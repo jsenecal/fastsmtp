@@ -1,6 +1,7 @@
 """Tests for delivery log cleanup functionality."""
 
 import os
+from datetime import UTC, datetime
 
 import pytest
 
@@ -60,3 +61,34 @@ class TestCleanupSettings:
         reload(fastsmtp.config)
         settings = fastsmtp.config.Settings(root_api_key="test123")
         assert settings.delivery_log_cleanup_enabled is False
+
+
+class TestCleanupResult:
+    """Tests for CleanupResult dataclass."""
+
+    def test_cleanup_result_creation(self):
+        """Test CleanupResult can be created with all fields."""
+        from fastsmtp.cleanup.service import CleanupResult
+
+        cutoff = datetime.now(UTC)
+        result = CleanupResult(
+            deleted_count=100,
+            dry_run=False,
+            cutoff_date=cutoff,
+        )
+
+        assert result.deleted_count == 100
+        assert result.dry_run is False
+        assert result.cutoff_date == cutoff
+
+    def test_cleanup_result_dry_run(self):
+        """Test CleanupResult with dry_run=True."""
+        from fastsmtp.cleanup.service import CleanupResult
+
+        result = CleanupResult(
+            deleted_count=50,
+            dry_run=True,
+            cutoff_date=datetime.now(UTC),
+        )
+
+        assert result.dry_run is True
