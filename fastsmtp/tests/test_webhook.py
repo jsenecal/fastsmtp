@@ -160,42 +160,41 @@ class TestSendWebhook:
 class TestHttpClientLifecycle:
     """Tests for HTTP client management."""
 
+    @pytest.fixture(autouse=True)
+    def reset_http_client(self):
+        """Reset the global HTTP client before and after each test."""
+        # Force reset the global client without trying to close it
+        # (it may be from a different event loop)
+        import fastsmtp.webhook.dispatcher as dispatcher
+
+        dispatcher._http_client = None
+        yield
+        # Just reset - don't try to close (may cause event loop issues)
+        dispatcher._http_client = None
+
     @pytest.mark.asyncio
     async def test_get_http_client_creates_client(self):
         """Test that get_http_client creates a client."""
-        # Reset global client
-        await close_http_client()
-
         client = await get_http_client()
         assert client is not None
         assert isinstance(client, httpx.AsyncClient)
 
-        # Cleanup
-        await close_http_client()
-
     @pytest.mark.asyncio
     async def test_get_http_client_reuses_client(self):
         """Test that get_http_client returns same client."""
-        await close_http_client()
-
         client1 = await get_http_client()
         client2 = await get_http_client()
         assert client1 is client2
 
-        await close_http_client()
-
     @pytest.mark.asyncio
     async def test_close_http_client(self):
         """Test that close_http_client closes and resets client."""
-        await close_http_client()
         client1 = await get_http_client()
         await close_http_client()
         client2 = await get_http_client()
 
         # After close, should get a new client
         assert client1 is not client2
-
-        await close_http_client()
 
 
 class TestEnqueueDelivery:

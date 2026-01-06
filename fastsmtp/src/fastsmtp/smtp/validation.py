@@ -185,15 +185,21 @@ async def validate_email_auth(
     # Run both validations in parallel
     tasks = []
 
+    async def dkim_none() -> tuple[str, None, None]:
+        return (RESULT_NONE, None, None)
+
+    async def spf_none() -> tuple[str, None]:
+        return (RESULT_NONE, None)
+
     if verify_dkim_enabled:
         tasks.append(verify_dkim(message))
     else:
-        tasks.append(asyncio.coroutine(lambda: (RESULT_NONE, None, None))())
+        tasks.append(dkim_none())
 
     if verify_spf_enabled:
         tasks.append(verify_spf(client_ip, mail_from, helo))
     else:
-        tasks.append(asyncio.coroutine(lambda: (RESULT_NONE, None))())
+        tasks.append(spf_none())
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
