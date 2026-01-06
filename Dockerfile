@@ -8,10 +8,10 @@ WORKDIR /app
 
 # Copy workspace files
 COPY pyproject.toml uv.lock ./
-COPY packages/fastsmtp/pyproject.toml packages/fastsmtp/
-COPY packages/fastsmtp/src packages/fastsmtp/src
-COPY packages/fastsmtp/alembic packages/fastsmtp/alembic
-COPY packages/fastsmtp/alembic.ini packages/fastsmtp/
+COPY fastsmtp/pyproject.toml fastsmtp/
+COPY fastsmtp/src fastsmtp/src
+COPY fastsmtp/alembic fastsmtp/alembic
+COPY fastsmtp/alembic.ini fastsmtp/
 
 # Install dependencies
 RUN uv sync --frozen --no-dev
@@ -25,7 +25,7 @@ WORKDIR /app
 
 # Copy virtual environment from builder
 COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/packages/fastsmtp /app/packages/fastsmtp
+COPY --from=builder /app/fastsmtp /app/fastsmtp
 
 # Set environment
 ENV PATH="/app/.venv/bin:$PATH"
@@ -43,4 +43,4 @@ EXPOSE 8000 25 465
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:8000/api/v1/health || exit 1

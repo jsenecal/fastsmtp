@@ -3,8 +3,18 @@ name = "fastsmtp-workspace"
 version = "0.1.0"
 requires-python = ">=3.12"
 
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.20",
+    "httpx>=0.28",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+]
+
 [tool.uv.workspace]
-members = ["packages/*"]
+members = ["fastsmtp", "fastsmtp-cli"]
 
 [tool.ruff]
 line-length = 100
