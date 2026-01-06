@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     worker_poll_interval: float = 1.0
     worker_batch_size: int = 10
 
+    # Delivery log cleanup
+    delivery_log_retention_days: int = 90
+    delivery_log_cleanup_interval_hours: int = 24
+    delivery_log_cleanup_enabled: bool = True
+    delivery_log_cleanup_batch_size: int = 1000
+
 
 @lru_cache
 def get_settings() -> Settings:
