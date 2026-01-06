@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastsmtp-api
+  namespace: fastsmtp
+  labels:
+    app: fastsmtp
+    component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fastsmtp
+      component: api
+  template:
+    metadata:
+      labels:
+        app: fastsmtp
+        component: api
+    spec:
+      containers:
+        - name: fastsmtp
+          image: fastsmtp:latest
+          ports:
+            - containerPort: 8000
+              name: http
+            - containerPort: 25
+              name: smtp
+            - containerPort: 465
+              name: smtps
+          envFrom:
+            - configMapRef:
+                name: fastsmtp-config
+            - secretRef:
+                name: fastsmtp-secrets
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastsmtp-worker
+  namespace: fastsmtp
+  labels:
+    app: fastsmtp
+    component: worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: fastsmtp
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: fastsmtp
+        component: worker
+    spec:
+      containers:
+        - name: worker
+          image: fastsmtp:latest
+          command: ["python", "-m", "fastsmtp.cli", "serve", "--worker-only"]
+          envFrom:
+            - configMapRef:
+                name: fastsmtp-config
+            - secretRef:
+                name: fastsmtp-secrets
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"

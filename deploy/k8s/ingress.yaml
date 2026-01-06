@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fastsmtp-api
+  namespace: fastsmtp
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: fastsmtp.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastsmtp-api
+                port:
+                  number: 8000
+  tls:
+    - hosts:
+        - fastsmtp.example.com
+      secretName: fastsmtp-tls

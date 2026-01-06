@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fastsmtp
+      POSTGRES_PASSWORD: fastsmtp
+      POSTGRES_DB: fastsmtp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastsmtp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # FastSMTP API & SMTP Server
+  fastsmtp:
+    build: .
+    ports:
+      - "8000:8000"    # API
+      - "2525:25"      # SMTP
+      - "4465:465"     # SMTP TLS
+    environment:
+      FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres:5432/fastsmtp
+      FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY:-change-me-in-production}
+      FASTSMTP_SECRET_KEY: ${FASTSMTP_SECRET_KEY:-change-me-in-production}
+      FASTSMTP_API_HOST: 0.0.0.0
+      FASTSMTP_SMTP_HOST: 0.0.0.0
+      FASTSMTP_CORS_ORIGINS: '["http://localhost:3000"]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "fastsmtp.cli", "serve"]
+
+  # Webhook Worker (separate instance for horizontal scaling)
+  worker:
+    build: .
+    environment:
+      FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres:5432/fastsmtp
+      FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY:-change-me-in-production}
+      FASTSMTP_SECRET_KEY: ${FASTSMTP_SECRET_KEY:-change-me-in-production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "fastsmtp.cli", "serve", "--worker-only"]
+    deploy:
+      replicas: 2
+
+volumes:
+  postgres_data:
