@@ -199,3 +199,109 @@ class TestDeliveryLogCleanupService:
         db_result = await test_session.execute(stmt)
         all_deliveries = db_result.scalars().all()
         assert len(all_deliveries) == 8  # 5 old + 3 recent
+
+    @pytest.mark.asyncio
+    async def test_cleanup_deletes_old_records(
+        self,
+        test_session: AsyncSession,
+        test_settings: Settings,
+        test_domain: Domain,
+        old_deliveries: list[DeliveryLog],
+        recent_deliveries: list[DeliveryLog],
+    ):
+        """Test cleanup deletes old records and keeps recent ones."""
+        from sqlalchemy import select
+
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
+
+        service = DeliveryLogCleanupService(test_settings, test_session)
+        result = await service.cleanup(dry_run=False)
+
+        assert result.dry_run is False
+        assert result.deleted_count == 5
+
+        # Verify old deliveries were deleted
+        stmt = select(DeliveryLog)
+        db_result = await test_session.execute(stmt)
+        remaining = db_result.scalars().all()
+        assert len(remaining) == 3  # Only recent deliveries remain
+
+        # Verify the remaining ones are the recent ones
+        remaining_ids = {d.id for d in remaining}
+        recent_ids = {d.id for d in recent_deliveries}
+        assert remaining_ids == recent_ids
+
+    @pytest.mark.asyncio
+    async def test_cleanup_respects_batch_size(
+        self,
+        test_session: AsyncSession,
+        test_domain: Domain,
+        old_deliveries: list[DeliveryLog],
+    ):
+        """Test cleanup processes in batches."""
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
+
+        # Create settings with small batch size
+        settings = Settings(
+            root_api_key="test123",
+            delivery_log_cleanup_batch_size=2,
+        )
+
+        service = DeliveryLogCleanupService(settings, test_session)
+        result = await service.cleanup(dry_run=False)
+
+        # Should still delete all 5, just in batches of 2
+        assert result.deleted_count == 5
+
+    @pytest.mark.asyncio
+    async def test_cleanup_with_custom_retention_days(
+        self,
+        test_session: AsyncSession,
+        test_settings: Settings,
+        test_domain: Domain,
+    ):
+        """Test cleanup with custom retention period."""
+        from sqlalchemy import select
+
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
+
+        # Create deliveries at different ages
+        now = datetime.now(UTC)
+        ages = [10, 20, 40, 60]  # days old
+
+        for i, days in enumerate(ages):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<age{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash="abc123",
+                payload={},
+                status="delivered",
+                attempts=1,
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+            await test_session.flush()
+
+            old_date = now - timedelta(days=days)
+            await test_session.execute(
+                DeliveryLog.__table__.update()
+                .where(DeliveryLog.id == delivery.id)
+                .values(created_at=old_date)
+            )
+
+        await test_session.commit()
+
+        service = DeliveryLogCleanupService(test_settings, test_session)
+
+        # Delete records older than 30 days
+        result = await service.cleanup(dry_run=False, retention_days=30)
+
+        assert result.deleted_count == 2  # 40 and 60 days old
+
+        # Verify correct records remain
+        stmt = select(DeliveryLog)
+        db_result = await test_session.execute(stmt)
+        remaining = db_result.scalars().all()
+        assert len(remaining) == 2  # 10 and 20 days old

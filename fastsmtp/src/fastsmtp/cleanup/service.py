@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp.config import Settings
@@ -49,26 +49,50 @@ class DeliveryLogCleanupService:
             CleanupResult with the number of deleted records.
         """
         cutoff_date = self._get_cutoff_date(retention_days)
+        batch_size = self.settings.delivery_log_cleanup_batch_size
+
+        # Count total records to delete
+        count_stmt = select(func.count()).select_from(DeliveryLog).where(
+            DeliveryLog.created_at < cutoff_date
+        )
+        count_result = await self.session.execute(count_stmt)
+        total_count = count_result.scalar() or 0
 
         if dry_run:
-            # Count records that would be deleted
-            stmt = select(func.count()).select_from(DeliveryLog).where(
-                DeliveryLog.created_at < cutoff_date
-            )
-            result = await self.session.execute(stmt)
-            count = result.scalar() or 0
-
-            logger.info(f"Dry run: would delete {count} delivery logs older than {cutoff_date}")
-
+            logger.info(f"Dry run: would delete {total_count} delivery logs older than {cutoff_date}")
             return CleanupResult(
-                deleted_count=count,
+                deleted_count=total_count,
                 dry_run=True,
                 cutoff_date=cutoff_date,
             )
 
-        # Actual deletion will be implemented in next task
+        # Delete in batches to avoid long locks
+        total_deleted = 0
+        while True:
+            # Get IDs of records to delete in this batch
+            select_stmt = (
+                select(DeliveryLog.id)
+                .where(DeliveryLog.created_at < cutoff_date)
+                .limit(batch_size)
+            )
+            result = await self.session.execute(select_stmt)
+            ids_to_delete = [row[0] for row in result.fetchall()]
+
+            if not ids_to_delete:
+                break
+
+            # Delete the batch
+            delete_stmt = delete(DeliveryLog).where(DeliveryLog.id.in_(ids_to_delete))
+            await self.session.execute(delete_stmt)
+            await self.session.commit()
+
+            total_deleted += len(ids_to_delete)
+            logger.debug(f"Deleted batch of {len(ids_to_delete)} delivery logs")
+
+        logger.info(f"Deleted {total_deleted} delivery logs older than {cutoff_date}")
+
         return CleanupResult(
-            deleted_count=0,
+            deleted_count=total_deleted,
             dry_run=False,
             cutoff_date=cutoff_date,
         )
