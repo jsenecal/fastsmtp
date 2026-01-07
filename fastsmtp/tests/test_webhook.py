@@ -280,6 +280,7 @@ class TestGetPendingDeliveries:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         deliveries = []
         for i in range(5):
@@ -336,6 +337,7 @@ class TestGetPendingDeliveries:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         delivery = DeliveryLog(
             id=uuid.uuid4(),
@@ -368,6 +370,7 @@ class TestMarkDelivered:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         delivery = DeliveryLog(
             id=uuid.uuid4(),
@@ -414,6 +417,7 @@ class TestMarkFailed:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         delivery = DeliveryLog(
             id=uuid.uuid4(),
@@ -466,6 +470,7 @@ class TestMarkFailed:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         # Create delivery at max retries - 1
         delivery = DeliveryLog(
@@ -510,6 +515,7 @@ class TestRetryDelivery:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         delivery = DeliveryLog(
             id=uuid.uuid4(),
@@ -549,6 +555,7 @@ class TestRetryDelivery:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         delivery = DeliveryLog(
             id=uuid.uuid4(),
@@ -586,6 +593,7 @@ class TestProcessDelivery:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         delivery = DeliveryLog(
             id=uuid.uuid4(),
@@ -621,6 +629,7 @@ class TestProcessDelivery:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         delivery = DeliveryLog(
             id=uuid.uuid4(),
@@ -659,6 +668,7 @@ class TestProcessDelivery:
             is_enabled=True,
         )
         test_session.add(domain)
+        await test_session.flush()
 
         recipient = Recipient(
             id=uuid.uuid4(),
@@ -669,6 +679,7 @@ class TestProcessDelivery:
             is_enabled=True,
         )
         test_session.add(recipient)
+        await test_session.flush()
 
         delivery = DeliveryLog(
             id=uuid.uuid4(),

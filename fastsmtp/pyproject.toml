@@ -41,3 +41,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fastsmtp"]
+
+[dependency-groups]
+dev = [
+    "testcontainers[postgres]>=4.13.3",
+]

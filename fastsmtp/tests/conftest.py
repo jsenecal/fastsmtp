@@ -5,15 +5,16 @@ import os
 from collections.abc import AsyncGenerator, Generator
 
 import pytest
+from testcontainers.postgres import PostgresContainer
 
 # Set required environment variables before any imports
 os.environ.setdefault("FASTSMTP_ROOT_API_KEY", "test_root_api_key_12345")
 os.environ.setdefault("FASTSMTP_SECRET_KEY", "test-secret-key-for-testing")
-os.environ.setdefault("FASTSMTP_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ.setdefault("FASTSMTP_DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
 import pytest_asyncio
 from fastapi import FastAPI
-from fastsmtp.config import Settings, get_settings
+from fastsmtp.config import Settings, clear_settings_cache, get_settings
 from fastsmtp.db.models import Base
 from fastsmtp.db.session import get_session
 from fastsmtp.main import create_app
@@ -29,11 +30,28 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     loop.close()
 
 
+@pytest.fixture(scope="session")
+def postgres_container() -> Generator[PostgresContainer, None, None]:
+    """Create PostgreSQL container for test session."""
+    with PostgresContainer("postgres:16-alpine") as postgres:
+        yield postgres
+
+
+@pytest.fixture(scope="session")
+def postgres_url(postgres_container: PostgresContainer) -> str:
+    """Get async PostgreSQL connection URL from container."""
+    # testcontainers returns psycopg2 URL, convert to asyncpg
+    url = postgres_container.get_connection_url()
+    return url.replace("psycopg2", "asyncpg")
+
+
 @pytest.fixture
-def test_settings() -> Settings:
-    """Create test settings."""
+def test_settings(postgres_url: str) -> Settings:
+    """Create test settings with PostgreSQL database."""
+    # Clear settings cache to ensure fresh settings
+    clear_settings_cache()
     return Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=postgres_url,
         root_api_key="test_root_api_key_12345",
         smtp_host="127.0.0.1",
         smtp_port=12525,
@@ -46,13 +64,15 @@ def test_settings() -> Settings:
 
 @pytest_asyncio.fixture
 async def test_engine(test_settings: Settings):
-    """Create test database engine."""
+    """Create test database engine with fresh tables."""
     engine = create_async_engine(
         test_settings.database_url,
         echo=False,
     )
 
+    # Create all tables fresh for each test
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
     yield engine
