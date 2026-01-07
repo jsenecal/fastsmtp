@@ -106,10 +106,11 @@ class TestDomainAccessControl:
         test_session.add(member)
 
         # Create API key
-        full_key, key_prefix, key_hash = generate_api_key()
+        full_key, key_prefix, key_hash, key_salt = generate_api_key()
         api_key = APIKey(
             user_id=user.id,
             key_hash=key_hash,
+            key_salt=key_salt,
             key_prefix=key_prefix,
             name="User Key",
             scopes=[
@@ -198,10 +199,11 @@ class TestDomainRoleHierarchy:
         )
         test_session.add(member)
 
-        full_key, key_prefix, key_hash = generate_api_key()
+        full_key, key_prefix, key_hash, key_salt = generate_api_key()
         api_key = APIKey(
             user_id=user.id,
             key_hash=key_hash,
+            key_salt=key_salt,
             key_prefix=key_prefix,
             name="Admin Key",
             scopes=["domains:read", "domains:write", "domains:delete"],

@@ -194,10 +194,11 @@ class TestAPIKeysWithRegularUser:
         await test_session.flush()
 
         # Create API key for user
-        full_key, key_prefix, key_hash = generate_api_key()
+        full_key, key_prefix, key_hash, key_salt = generate_api_key()
         api_key = APIKey(
             user_id=user.id,
             key_hash=key_hash,
+            key_salt=key_salt,
             key_prefix=key_prefix,
             name="Test Key",
             scopes=["domains:read", "domains:write"],

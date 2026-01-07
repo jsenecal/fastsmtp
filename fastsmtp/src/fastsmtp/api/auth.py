@@ -80,11 +80,12 @@ async def create_key(
             detail="Root user cannot create API keys. Create a user first.",
         )
 
-    full_key, key_prefix, key_hash = generate_api_key()
+    full_key, key_prefix, key_hash, key_salt = generate_api_key()
 
     api_key = APIKey(
         user_id=auth.user.id,
         key_hash=key_hash,
+        key_salt=key_salt,
         key_prefix=key_prefix,
         name=data.name,
         scopes=data.scopes,
@@ -177,10 +178,11 @@ async def rotate_key(
     old_key.is_active = False
 
     # Create new key with same settings
-    full_key, key_prefix, key_hash = generate_api_key()
+    full_key, key_prefix, key_hash, key_salt = generate_api_key()
     new_key = APIKey(
         user_id=auth.user.id,
         key_hash=key_hash,
+        key_salt=key_salt,
         key_prefix=key_prefix,
         name=f"{old_key.name} (rotated)",
         scopes=old_key.scopes,

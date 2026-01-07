@@ -11,7 +11,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from fastsmtp.auth.keys import hash_api_key, is_key_expired
+from fastsmtp.auth.keys import (
+    hash_api_key,
+    hash_api_key_salted,
+    is_key_expired,
+    verify_api_key,
+    verify_api_key_salted,
+)
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import APIKey, Domain, DomainMember, User
 from fastsmtp.db.session import get_session
@@ -157,12 +163,13 @@ async def get_auth_context(
             scopes=SCOPES,
         )
 
-    # Look up the API key in the database
-    key_hash = hash_api_key(x_api_key, settings.api_key_hash_algorithm)
+    # Look up the API key in the database by prefix
+    # We use prefix lookup because salted keys can't be looked up by hash directly
+    key_prefix = x_api_key[:12] if len(x_api_key) >= 12 else x_api_key
     stmt = (
         select(APIKey)
         .options(selectinload(APIKey.user).selectinload(User.domain_memberships))
-        .where(APIKey.key_hash == key_hash)
+        .where(APIKey.key_prefix == key_prefix)
     )
     result = await session.execute(stmt)
     api_key = result.scalar_one_or_none()
@@ -173,6 +180,24 @@ async def get_auth_context(
             detail="Invalid API key",
             headers={"WWW-Authenticate": "ApiKey"},
         )
+
+    # Verify the key hash (supports both salted and legacy unsalted keys)
+    if api_key.is_salted:
+        # New salted key verification
+        if not verify_api_key_salted(x_api_key, api_key.key_hash, api_key.key_salt):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+    else:
+        # Legacy unsalted key verification
+        if not verify_api_key(x_api_key, api_key.key_hash, settings.api_key_hash_algorithm):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
 
     if not api_key.is_active:
         raise HTTPException(

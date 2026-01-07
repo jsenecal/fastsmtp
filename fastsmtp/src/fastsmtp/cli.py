@@ -346,12 +346,13 @@ def user_generate_key(
                 console.print(f"[red]User '{username}' not found[/red]")
                 raise typer.Exit(1)
 
-            full_key, key_prefix, key_hash = generate_api_key()
+            full_key, key_prefix, key_hash, key_salt = generate_api_key()
             scope_list = scopes.split(",") if scopes else []
 
             api_key = APIKey(
                 user_id=user.id,
                 key_hash=key_hash,
+                key_salt=key_salt,
                 key_prefix=key_prefix,
                 name=name,
                 scopes=scope_list,

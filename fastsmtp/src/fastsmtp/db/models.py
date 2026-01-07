@@ -82,6 +82,9 @@ class APIKey(Base, TimestampMixin):
         index=True,
     )
     key_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    key_salt: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )  # Hex-encoded salt for PBKDF2. NULL = legacy unsalted key
     key_prefix: Mapped[str] = mapped_column(String(20), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     scopes: Mapped[list[str]] = mapped_column(default=list)
@@ -91,6 +94,11 @@ class APIKey(Base, TimestampMixin):
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="api_keys")
+
+    @property
+    def is_salted(self) -> bool:
+        """Check if this key uses salted hashing."""
+        return self.key_salt is not None
 
     def __repr__(self) -> str:
         return f"<APIKey {self.key_prefix}...>"

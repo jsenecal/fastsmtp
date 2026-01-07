@@ -42,10 +42,11 @@ class TestAuthKeysExtended:
         test_session.add(user)
         await test_session.flush()
 
-        full_key, key_prefix, key_hash = generate_api_key()
+        full_key, key_prefix, key_hash, key_salt = generate_api_key()
         api_key = APIKey(
             user_id=user.id,
             key_hash=key_hash,
+            key_salt=key_salt,
             key_prefix=key_prefix,
             name="Test Key",
             scopes=["recipients:read", "recipients:write"],
@@ -213,10 +214,11 @@ class TestAuthDependencies:
         test_session.add(user)
         await test_session.flush()
 
-        full_key, key_prefix, key_hash = generate_api_key()
+        full_key, key_prefix, key_hash, key_salt = generate_api_key()
         api_key = APIKey(
             user_id=user.id,
             key_hash=key_hash,
+            key_salt=key_salt,
             key_prefix=key_prefix,
             name="Inactive Key",
             is_active=False,
@@ -247,10 +249,11 @@ class TestAuthDependencies:
         test_session.add(user)
         await test_session.flush()
 
-        full_key, key_prefix, key_hash = generate_api_key()
+        full_key, key_prefix, key_hash, key_salt = generate_api_key()
         api_key = APIKey(
             user_id=user.id,
             key_hash=key_hash,
+            key_salt=key_salt,
             key_prefix=key_prefix,
             name="User Key",
             is_active=True,
