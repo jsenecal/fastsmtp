@@ -6,9 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from aiosmtpd.smtp import Envelope, Session
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.smtp.server import (
@@ -18,6 +16,7 @@ from fastsmtp.smtp.server import (
     find_recipient_for_address,
     lookup_recipient,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestLookupRecipient:

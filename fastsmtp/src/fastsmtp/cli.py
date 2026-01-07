@@ -98,7 +98,7 @@ def serve(
                         asyncio.gather(*shutdown_tasks, return_exceptions=True),
                         timeout=shutdown_timeout,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     console.print("[red]Shutdown timed out, forcing exit[/red]")
 
             console.print("[green]Shutdown complete[/green]")
@@ -154,9 +154,8 @@ def serve(
             cleanup_worker = CleanupWorker(settings)
             cleanup_worker.start()
             if settings.delivery_log_cleanup_enabled:
-                console.print(
-                    f"[green]Cleanup worker started (interval: {settings.delivery_log_cleanup_interval_hours}h)[/green]"
-                )
+                interval = settings.delivery_log_cleanup_interval_hours
+                console.print(f"[green]Cleanup worker started (interval: {interval}h)[/green]")
 
         if tasks:
             # Wait for server tasks or shutdown event

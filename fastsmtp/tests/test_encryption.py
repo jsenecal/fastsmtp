@@ -4,7 +4,6 @@ Tests follow TDD - written before implementation.
 """
 
 import pytest
-
 from fastsmtp.config import Settings
 
 
@@ -110,7 +109,9 @@ class TestEncryptionUtilities:
 
         encrypted = encrypt_data(plaintext, key1)
 
-        with pytest.raises(Exception):  # Could be InvalidToken or similar
+        from cryptography.fernet import InvalidToken
+
+        with pytest.raises(InvalidToken):
             decrypt_data(encrypted, key2)
 
 

@@ -9,11 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from fastsmtp.db.models import DeliveryLog, Domain, DomainMember, Recipient, RuleSet, Rule, User
+from fastsmtp.db.models import DeliveryLog, Domain, DomainMember, Recipient, Rule, RuleSet, User
 from fastsmtp.schemas.recipient import RecipientCreate, RecipientUpdate
 from fastsmtp.schemas.rule import RuleCreate, RuleSetCreate, RuleSetUpdate, RuleUpdate
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestRecipientAPIUnit:
@@ -893,8 +892,9 @@ class TestOperationsAPIUnit:
     @pytest.mark.asyncio
     async def test_list_delivery_logs(self, mock_auth, test_session):
         """Test list_delivery_logs function."""
-        from fastsmtp.api.operations import list_delivery_logs
         import hashlib
+
+        from fastsmtp.api.operations import list_delivery_logs
 
         # Create domain
         domain = Domain(domain_name="logs-unit.com", is_enabled=True)
@@ -933,8 +933,9 @@ class TestOperationsAPIUnit:
     @pytest.mark.asyncio
     async def test_list_delivery_logs_with_filters(self, mock_auth, test_session):
         """Test list_delivery_logs with status filter."""
-        from fastsmtp.api.operations import list_delivery_logs
         import hashlib
+
+        from fastsmtp.api.operations import list_delivery_logs
 
         domain = Domain(domain_name="logs-filter-unit.com", is_enabled=True)
         test_session.add(domain)
@@ -973,8 +974,9 @@ class TestOperationsAPIUnit:
     @pytest.mark.asyncio
     async def test_get_delivery_log(self, mock_auth, test_session):
         """Test get_delivery_log function."""
-        from fastsmtp.api.operations import get_delivery_log
         import hashlib
+
+        from fastsmtp.api.operations import get_delivery_log
 
         domain = Domain(domain_name="get-log-unit.com", is_enabled=True)
         test_session.add(domain)
@@ -1022,8 +1024,9 @@ class TestOperationsAPIUnit:
     @pytest.mark.asyncio
     async def test_retry_delivery_endpoint(self, mock_auth, test_session):
         """Test retry_delivery_endpoint function."""
-        from fastsmtp.api.operations import retry_delivery_endpoint
         import hashlib
+
+        from fastsmtp.api.operations import retry_delivery_endpoint
 
         domain = Domain(domain_name="retry-unit.com", is_enabled=True)
         test_session.add(domain)
@@ -1056,8 +1059,9 @@ class TestOperationsAPIUnit:
     @pytest.mark.asyncio
     async def test_retry_delivery_not_failed(self, mock_auth, test_session):
         """Test retry_delivery_endpoint with non-failed delivery."""
-        from fastsmtp.api.operations import retry_delivery_endpoint
         import hashlib
+
+        from fastsmtp.api.operations import retry_delivery_endpoint
 
         domain = Domain(domain_name="retry-notfailed.com", is_enabled=True)
         test_session.add(domain)
@@ -1429,8 +1433,8 @@ class TestAuthAPIUnit:
     async def test_create_key(self, test_session):
         """Test create_key function."""
         from fastsmtp.api.auth import create_key
-        from fastsmtp.schemas.user import APIKeyCreate
         from fastsmtp.config import Settings
+        from fastsmtp.schemas.user import APIKeyCreate
 
         user = User(username="createkeyuser", email="createkey@unit.com")
         test_session.add(user)
@@ -1459,8 +1463,8 @@ class TestAuthAPIUnit:
     async def test_create_key_root_user(self, mock_auth_root, test_session):
         """Test create_key fails for root user."""
         from fastsmtp.api.auth import create_key
-        from fastsmtp.schemas.user import APIKeyCreate
         from fastsmtp.config import Settings
+        from fastsmtp.schemas.user import APIKeyCreate
 
         data = APIKeyCreate(name="New Key", scopes=[])
         settings = Settings(root_api_key="test123")
@@ -1538,8 +1542,8 @@ class TestAuthAPIUnit:
     async def test_rotate_key(self, test_session):
         """Test rotate_key function."""
         from fastsmtp.api.auth import rotate_key
-        from fastsmtp.db.models import APIKey
         from fastsmtp.config import Settings
+        from fastsmtp.db.models import APIKey
 
         user = User(username="rotatekeyuser", email="rotatekey@unit.com")
         test_session.add(user)
@@ -1793,7 +1797,7 @@ class TestGetDomainWithAccessUnit:
     @pytest.mark.asyncio
     async def test_domain_not_found(self, test_session):
         """Test get_domain_with_access with non-existent domain."""
-        from fastsmtp.auth.dependencies import get_domain_with_access, AuthContext
+        from fastsmtp.auth.dependencies import AuthContext, get_domain_with_access
 
         user = User(username="domainnotfound", email="notfound@test.com")
         test_session.add(user)
@@ -1811,7 +1815,7 @@ class TestGetDomainWithAccessUnit:
     @pytest.mark.asyncio
     async def test_superuser_access(self, test_session):
         """Test get_domain_with_access for superuser."""
-        from fastsmtp.auth.dependencies import get_domain_with_access, AuthContext
+        from fastsmtp.auth.dependencies import AuthContext, get_domain_with_access
 
         user = User(username="superaccess", email="super@test.com", is_superuser=True)
         test_session.add(user)
@@ -1830,7 +1834,7 @@ class TestGetDomainWithAccessUnit:
     @pytest.mark.asyncio
     async def test_non_member_denied(self, test_session):
         """Test get_domain_with_access denies non-member."""
-        from fastsmtp.auth.dependencies import get_domain_with_access, AuthContext
+        from fastsmtp.auth.dependencies import AuthContext, get_domain_with_access
 
         user = User(username="nonmember2", email="nonmember2@test.com")
         test_session.add(user)
@@ -1852,7 +1856,7 @@ class TestGetDomainWithAccessUnit:
     @pytest.mark.asyncio
     async def test_role_hierarchy_admin_required(self, test_session):
         """Test get_domain_with_access enforces role hierarchy."""
-        from fastsmtp.auth.dependencies import get_domain_with_access, AuthContext
+        from fastsmtp.auth.dependencies import AuthContext, get_domain_with_access
 
         user = User(username="memberonly", email="member@test.com")
         test_session.add(user)
@@ -1880,7 +1884,7 @@ class TestGetDomainWithAccessUnit:
     @pytest.mark.asyncio
     async def test_role_hierarchy_success(self, test_session):
         """Test get_domain_with_access allows higher roles."""
-        from fastsmtp.auth.dependencies import get_domain_with_access, AuthContext
+        from fastsmtp.auth.dependencies import AuthContext, get_domain_with_access
 
         user = User(username="adminuser2", email="admin2@test.com")
         test_session.add(user)

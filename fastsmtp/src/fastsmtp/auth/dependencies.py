@@ -12,8 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from fastsmtp.auth.keys import (
-    hash_api_key,
-    hash_api_key_salted,
     is_key_expired,
     verify_api_key,
     verify_api_key_salted,

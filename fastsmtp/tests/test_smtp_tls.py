@@ -3,10 +3,8 @@
 import ssl
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
-
 from fastsmtp.config import Settings
 from fastsmtp.smtp.tls import (
     create_tls_context,
@@ -22,7 +20,7 @@ class TestCreateTLSContext:
     def temp_cert_files(self):
         """Create temporary certificate and key files."""
         # Create self-signed certificate for testing
-        from subprocess import run, PIPE
+        from subprocess import run
 
         with tempfile.TemporaryDirectory() as tmpdir:
             cert_path = Path(tmpdir) / "cert.pem"

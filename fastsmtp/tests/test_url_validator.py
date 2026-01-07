@@ -1,7 +1,6 @@
 """Tests for webhook URL validation (SSRF protection)."""
 
 import pytest
-
 from fastsmtp.webhook.url_validator import (
     SSRFError,
     is_ip_blocked,

@@ -5,18 +5,15 @@ Tests for rejected API keys, inactive users, malformed keys, and missing headers
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import pytest_asyncio
 from fastapi import HTTPException
-from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from fastsmtp.auth.dependencies import AuthContext, get_auth_context
 from fastsmtp.auth.keys import generate_api_key, hash_api_key
-from fastsmtp.config import Settings
 from fastsmtp.db.models import APIKey, User
+from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def create_mock_settings(root_api_key: str = "root-key") -> MagicMock:

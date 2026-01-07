@@ -3,17 +3,17 @@
 Tests follow TDD - written before implementation.
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from unittest.mock import AsyncMock, MagicMock, patch
-
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Base
 from fastsmtp.db.session import get_session
 from fastsmtp.main import create_app
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class TestRateLimitingConfig:
@@ -68,7 +68,6 @@ class TestRateLimitingMiddleware:
         self, rate_limited_settings: Settings, test_engine
     ) -> FastAPI:
         """Create app with rate limiting enabled."""
-        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
         application = create_app(rate_limited_settings)
 
@@ -109,12 +108,24 @@ class TestRateLimitingMiddleware:
         async def mock_get_redis():
             return mock_redis_client
 
-        with patch("fastsmtp.middleware.rate_limit.get_redis_client", side_effect=mock_get_redis), \
-             patch("fastsmtp.middleware.rate_limit.get_settings", return_value=rate_limited_settings):
+        with (
+            patch(
+                "fastsmtp.middleware.rate_limit.get_redis_client",
+                side_effect=mock_get_redis,
+            ),
+            patch(
+                "fastsmtp.middleware.rate_limit.get_settings",
+                return_value=rate_limited_settings,
+            ),
+        ):
             # Create app with rate limiting enabled
-            from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-            from fastsmtp.db.models import Base
             from fastsmtp.config import get_settings
+            from fastsmtp.db.models import Base
+            from sqlalchemy.ext.asyncio import (
+                AsyncSession,
+                async_sessionmaker,
+                create_async_engine,
+            )
 
             engine = create_async_engine(rate_limited_settings.database_url, echo=False)
             async with engine.begin() as conn:
@@ -122,7 +133,9 @@ class TestRateLimitingMiddleware:
 
             app = create_app(rate_limited_settings)
 
-            session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            session_factory = async_sessionmaker(
+                engine, class_=AsyncSession, expire_on_commit=False
+            )
 
             async def override_get_session():
                 async with session_factory() as session:
@@ -155,11 +168,23 @@ class TestRateLimitingMiddleware:
         mock_redis_client.get.return_value = b"10"
         mock_redis_client.ttl.return_value = 30
 
-        with patch("fastsmtp.middleware.rate_limit.get_redis_client", return_value=mock_redis_client), \
-             patch("fastsmtp.middleware.rate_limit.get_settings", return_value=rate_limited_settings):
-            from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-            from fastsmtp.db.models import Base
+        with (
+            patch(
+                "fastsmtp.middleware.rate_limit.get_redis_client",
+                return_value=mock_redis_client,
+            ),
+            patch(
+                "fastsmtp.middleware.rate_limit.get_settings",
+                return_value=rate_limited_settings,
+            ),
+        ):
             from fastsmtp.config import get_settings
+            from fastsmtp.db.models import Base
+            from sqlalchemy.ext.asyncio import (
+                AsyncSession,
+                async_sessionmaker,
+                create_async_engine,
+            )
 
             engine = create_async_engine(rate_limited_settings.database_url, echo=False)
             async with engine.begin() as conn:
@@ -167,7 +192,9 @@ class TestRateLimitingMiddleware:
 
             app = create_app(rate_limited_settings)
 
-            session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            session_factory = async_sessionmaker(
+                engine, class_=AsyncSession, expire_on_commit=False
+            )
 
             async def override_get_session():
                 async with session_factory() as session:
@@ -222,11 +249,23 @@ class TestRateLimitingMiddleware:
         async def mock_get_redis():
             return mock_redis_client
 
-        with patch("fastsmtp.middleware.rate_limit.get_redis_client", side_effect=mock_get_redis), \
-             patch("fastsmtp.middleware.rate_limit.get_settings", return_value=rate_limited_settings):
-            from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-            from fastsmtp.db.models import Base
+        with (
+            patch(
+                "fastsmtp.middleware.rate_limit.get_redis_client",
+                side_effect=mock_get_redis,
+            ),
+            patch(
+                "fastsmtp.middleware.rate_limit.get_settings",
+                return_value=rate_limited_settings,
+            ),
+        ):
             from fastsmtp.config import get_settings
+            from fastsmtp.db.models import Base
+            from sqlalchemy.ext.asyncio import (
+                AsyncSession,
+                async_sessionmaker,
+                create_async_engine,
+            )
 
             engine = create_async_engine(rate_limited_settings.database_url, echo=False)
             async with engine.begin() as conn:
@@ -234,7 +273,9 @@ class TestRateLimitingMiddleware:
 
             app = create_app(rate_limited_settings)
 
-            session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            session_factory = async_sessionmaker(
+                engine, class_=AsyncSession, expire_on_commit=False
+            )
 
             async def override_get_session():
                 async with session_factory() as session:
@@ -256,10 +297,14 @@ class TestRateLimitingMiddleware:
                     await client.get("/api/v1/domains")
 
             # Rate limit key should include API key identifier
-            rate_limit_keys = [k for k in request_counts.keys() if "rate_limit" in k.lower()]
-            assert len(rate_limit_keys) > 0, f"Should track rate limits by key. Keys: {request_counts.keys()}"
+            rate_limit_keys = [k for k in request_counts if "rate_limit" in k.lower()]
+            assert len(rate_limit_keys) > 0, (
+                f"Should track rate limits by key. Keys: {request_counts.keys()}"
+            )
             # Verify the key format includes api key prefix
-            assert any("test_root_ap" in k for k in rate_limit_keys), f"Key should include API key prefix. Keys: {rate_limit_keys}"
+            assert any("test_root_ap" in k for k in rate_limit_keys), (
+                f"Key should include API key prefix. Keys: {rate_limit_keys}"
+            )
 
             await engine.dispose()
 
@@ -302,9 +347,8 @@ class TestAuthRateLimiting:
             rate_limit_auth_attempts_per_minute=3,
         )
 
-        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-        from fastsmtp.db.models import Base
         from fastsmtp.config import get_settings
+        from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine(settings.database_url, echo=False)
         async with engine.begin() as conn:

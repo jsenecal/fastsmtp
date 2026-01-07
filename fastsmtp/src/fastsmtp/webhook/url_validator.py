@@ -56,10 +56,7 @@ def is_ip_blocked(ip_str: str) -> bool:
     """
     try:
         ip = ipaddress.ip_address(ip_str)
-        for network in BLOCKED_IP_RANGES:
-            if ip in network:
-                return True
-        return False
+        return any(ip in network for network in BLOCKED_IP_RANGES)
     except ValueError:
         # Invalid IP address format
         return False
@@ -118,13 +115,13 @@ def validate_webhook_url(url: str, resolve_dns: bool = True) -> None:
                 parsed.port or (443 if parsed.scheme == "https" else 80),
                 proto=socket.IPPROTO_TCP,
             )
-            for family, _, _, _, sockaddr in addrinfo:
+            for _family, _, _, _, sockaddr in addrinfo:
                 ip_str = sockaddr[0]
                 if is_ip_blocked(ip_str):
                     raise SSRFError(
                         f"Hostname '{hostname}' resolves to blocked IP '{ip_str}'"
                     )
-        except socket.gaierror as e:
+        except socket.gaierror:
             # DNS resolution failed - this is okay, the request will fail later
             # We don't want to block URLs that might temporarily have DNS issues
             pass

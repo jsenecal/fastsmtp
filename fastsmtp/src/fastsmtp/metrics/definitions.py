@@ -53,5 +53,5 @@ QUEUE_DEPTH = Gauge(
 AUTH_RESULTS = Counter(
     "fastsmtp_auth_results_total",
     "Email authentication results",
-    ["type", "result"],  # type: dkim/spf, result: pass/fail/none
+    ["type", "result"],  # type=dkim/spf, result=pass/fail/none
 )

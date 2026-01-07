@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     # CORS settings
     cors_origins: list[str] = Field(
         default_factory=list,
-        description="Allowed CORS origins. Empty list disables CORS. Use ['*'] for development only.",
+        description="Allowed CORS origins. Empty disables CORS. ['*'] for dev only.",
     )
 
     # Database (PostgreSQL)

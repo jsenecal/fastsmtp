@@ -4,12 +4,11 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from fastsmtp.auth import generate_api_key
 from fastsmtp.config import Settings
 from fastsmtp.db.models import APIKey, User
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestAuthWhoami:

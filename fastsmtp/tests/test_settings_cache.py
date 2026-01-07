@@ -3,9 +3,7 @@
 Tests follow TDD - written before implementation.
 """
 
-import os
 
-import pytest
 
 
 class TestSettingsCacheClearing:

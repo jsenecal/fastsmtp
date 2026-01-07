@@ -59,7 +59,9 @@ class DeliveryLogCleanupService:
         total_count = count_result.scalar() or 0
 
         if dry_run:
-            logger.info(f"Dry run: would delete {total_count} delivery logs older than {cutoff_date}")
+            logger.info(
+                f"Dry run: would delete {total_count} delivery logs older than {cutoff_date}"
+            )
             return CleanupResult(
                 deleted_count=total_count,
                 dry_run=True,

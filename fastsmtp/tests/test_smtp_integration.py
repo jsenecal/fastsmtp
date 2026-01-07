@@ -9,12 +9,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosmtplib
 import pytest
 import pytest_asyncio
-from aiosmtpd.smtp import Envelope, Session
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.smtp.server import FastSMTPHandler, SMTPServer
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestSMTPIntegration:

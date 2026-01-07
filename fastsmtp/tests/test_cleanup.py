@@ -213,9 +213,8 @@ class TestDeliveryLogCleanupService:
         recent_deliveries: list[DeliveryLog],
     ):
         """Test cleanup deletes old records and keeps recent ones."""
-        from sqlalchemy import select
-
         from fastsmtp.cleanup.service import DeliveryLogCleanupService
+        from sqlalchemy import select
 
         service = DeliveryLogCleanupService(test_settings, test_session)
         result = await service.cleanup(dry_run=False)
@@ -264,9 +263,8 @@ class TestDeliveryLogCleanupService:
         test_domain: Domain,
     ):
         """Test cleanup with custom retention period."""
-        from sqlalchemy import select
-
         from fastsmtp.cleanup.service import DeliveryLogCleanupService
+        from sqlalchemy import select
 
         # Create deliveries at different ages
         now = datetime.now(UTC)
@@ -412,9 +410,8 @@ class TestCleanupEndToEnd:
         test_settings: Settings,
     ):
         """Test complete cleanup workflow: create records, run cleanup, verify."""
-        from sqlalchemy import select
-
         from fastsmtp.cleanup.service import DeliveryLogCleanupService
+        from sqlalchemy import select
 
         # Create a domain
         domain = Domain(

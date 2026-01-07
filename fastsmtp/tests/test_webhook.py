@@ -8,9 +8,6 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from fastsmtp.config import Settings
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.webhook.dispatcher import (
@@ -28,6 +25,7 @@ from fastsmtp.webhook.queue import (
     mark_failed,
     retry_delivery,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestComputePayloadHash:
@@ -456,7 +454,11 @@ class TestMarkFailed:
         assert test_delivery.next_retry_at is not None
         # Verify retry is scheduled in the future (comparing timestamps)
         now = datetime.now(UTC)
-        retry_ts = test_delivery.next_retry_at.timestamp() if test_delivery.next_retry_at.tzinfo else test_delivery.next_retry_at.replace(tzinfo=UTC).timestamp()
+        next_retry = test_delivery.next_retry_at
+        if next_retry.tzinfo:
+            retry_ts = next_retry.timestamp()
+        else:
+            retry_ts = next_retry.replace(tzinfo=UTC).timestamp()
         assert retry_ts > now.timestamp() - 1  # Allow 1 second tolerance
 
     @pytest.mark.asyncio
@@ -585,7 +587,9 @@ class TestProcessDelivery:
     """Tests for process_delivery function."""
 
     @pytest.mark.asyncio
-    async def test_process_delivery_success(self, test_session: AsyncSession, test_settings: Settings):
+    async def test_process_delivery_success(
+        self, test_session: AsyncSession, test_settings: Settings
+    ):
         """Test successful delivery processing."""
         domain = Domain(
             id=uuid.uuid4(),
@@ -621,7 +625,9 @@ class TestProcessDelivery:
         assert delivery.status == "delivered"
 
     @pytest.mark.asyncio
-    async def test_process_delivery_failure(self, test_session: AsyncSession, test_settings: Settings):
+    async def test_process_delivery_failure(
+        self, test_session: AsyncSession, test_settings: Settings
+    ):
         """Test failed delivery processing."""
         domain = Domain(
             id=uuid.uuid4(),
