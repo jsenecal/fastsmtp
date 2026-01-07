@@ -40,8 +40,13 @@ def serve(
     smtp_only: bool = typer.Option(False, "--smtp-only", help="Run only SMTP server"),
     api_only: bool = typer.Option(False, "--api-only", help="Run only API server"),
     worker_only: bool = typer.Option(False, "--worker-only", help="Run only webhook worker"),
+    shutdown_timeout: int = typer.Option(
+        30, "--shutdown-timeout", help="Timeout for graceful shutdown in seconds"
+    ),
 ):
     """Start the FastSMTP server."""
+    import signal
+
     import uvicorn
 
     from fastsmtp.config import get_settings
@@ -51,6 +56,68 @@ def serve(
     settings = get_settings()
 
     async def run_all():
+        # Track all components for graceful shutdown
+        smtp_server: SMTPServer | None = None
+        uvicorn_server: uvicorn.Server | None = None
+        webhook_worker: WebhookWorker | None = None
+        cleanup_worker = None
+        shutdown_event = asyncio.Event()
+
+        async def graceful_shutdown(sig: signal.Signals | None = None) -> None:
+            """Handle graceful shutdown of all components."""
+            if sig:
+                console.print(f"\n[yellow]Received {sig.name}, shutting down...[/yellow]")
+            else:
+                console.print("\n[yellow]Shutting down...[/yellow]")
+
+            shutdown_event.set()
+
+            # Stop components in reverse order of startup
+            shutdown_tasks = []
+
+            if cleanup_worker is not None:
+                shutdown_tasks.append(cleanup_worker.stop())
+                console.print("[dim]Stopping cleanup worker...[/dim]")
+
+            if webhook_worker is not None:
+                shutdown_tasks.append(webhook_worker.stop())
+                console.print("[dim]Stopping webhook worker...[/dim]")
+
+            if uvicorn_server is not None:
+                uvicorn_server.should_exit = True
+                console.print("[dim]Stopping API server...[/dim]")
+
+            if smtp_server is not None:
+                smtp_server.stop()
+                console.print("[dim]Stopping SMTP server...[/dim]")
+
+            # Wait for async shutdowns with timeout
+            if shutdown_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*shutdown_tasks, return_exceptions=True),
+                        timeout=shutdown_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    console.print("[red]Shutdown timed out, forcing exit[/red]")
+
+            console.print("[green]Shutdown complete[/green]")
+
+        # Set up signal handlers
+        loop = asyncio.get_running_loop()
+
+        def signal_handler(sig: signal.Signals) -> None:
+            """Handle OS signals."""
+            loop.create_task(graceful_shutdown(sig))
+
+        # Register signal handlers (Unix only)
+        try:
+            loop.add_signal_handler(signal.SIGTERM, lambda: signal_handler(signal.SIGTERM))
+            loop.add_signal_handler(signal.SIGINT, lambda: signal_handler(signal.SIGINT))
+        except NotImplementedError:
+            # Windows doesn't support add_signal_handler
+            pass
+
         tasks = []
 
         if not api_only and not worker_only:
@@ -69,21 +136,21 @@ def serve(
                 port=settings.api_port,
                 log_level="info",
             )
-            server = uvicorn.Server(config)
-            tasks.append(asyncio.create_task(server.serve()))
+            uvicorn_server = uvicorn.Server(config)
+            tasks.append(asyncio.create_task(uvicorn_server.serve()))
             console.print(
                 f"[green]API server started on {settings.api_host}:{settings.api_port}[/green]"
             )
 
         if not smtp_only and not api_only:
             # Start webhook worker
-            worker = WebhookWorker(settings)
-            worker.start()
+            from fastsmtp.cleanup import CleanupWorker
+
+            webhook_worker = WebhookWorker(settings)
+            webhook_worker.start()
             console.print("[green]Webhook worker started[/green]")
 
             # Start cleanup worker (if enabled)
-            from fastsmtp.cleanup import CleanupWorker
-
             cleanup_worker = CleanupWorker(settings)
             cleanup_worker.start()
             if settings.delivery_log_cleanup_enabled:
@@ -92,12 +159,15 @@ def serve(
                 )
 
         if tasks:
+            # Wait for server tasks or shutdown event
             await asyncio.gather(*tasks)
 
     try:
         asyncio.run(run_all())
     except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down...[/yellow]")
+        # KeyboardInterrupt is handled by signal handler on Unix
+        # On Windows, we catch it here
+        console.print("\n[yellow]Interrupted[/yellow]")
 
 
 @app.command()
