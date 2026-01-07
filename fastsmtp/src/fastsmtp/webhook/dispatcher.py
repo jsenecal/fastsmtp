@@ -13,21 +13,26 @@ from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import DeliveryLog, Recipient
 from fastsmtp.db.session import async_session
 from fastsmtp.webhook.queue import get_pending_deliveries, mark_delivered, mark_failed
+from fastsmtp.webhook.url_validator import SSRFError, validate_webhook_url
 
 logger = logging.getLogger(__name__)
 
 # Module-level HTTP client for connection reuse
 _http_client: httpx.AsyncClient | None = None
+_http_client_lock = asyncio.Lock()
 
 
 async def get_http_client() -> httpx.AsyncClient:
-    """Get or create the shared HTTP client."""
+    """Get or create the shared HTTP client (thread-safe)."""
     global _http_client
     if _http_client is None:
-        _http_client = httpx.AsyncClient(
-            timeout=30.0,
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-        )
+        async with _http_client_lock:
+            # Double-check after acquiring lock
+            if _http_client is None:
+                _http_client = httpx.AsyncClient(
+                    timeout=30.0,
+                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                )
     return _http_client
 
 
@@ -45,6 +50,7 @@ async def send_webhook(
     headers: dict[str, str] | None = None,
     request_timeout: float = 30.0,
     client: httpx.AsyncClient | None = None,
+    validate_url: bool = True,
 ) -> tuple[bool, int | None, str | None]:
     """Send a webhook request.
 
@@ -54,10 +60,21 @@ async def send_webhook(
         headers: Additional headers
         request_timeout: Request timeout in seconds
         client: Optional HTTP client (uses shared client if not provided)
+        validate_url: Whether to validate URL for SSRF protection (default True)
 
     Returns:
         Tuple of (success, status_code, error_message)
     """
+    # Validate URL for SSRF protection
+    if validate_url:
+        try:
+            validate_webhook_url(url, resolve_dns=True)
+        except SSRFError as e:
+            logger.warning(f"Blocked webhook to {url}: {e}")
+            return False, None, f"URL blocked: {e}"
+        except ValueError as e:
+            return False, None, f"Invalid URL: {e}"
+
     all_headers = {
         "Content-Type": "application/json",
         "User-Agent": "FastSMTP/1.0",
@@ -145,12 +162,32 @@ class WebhookWorker:
         self._running = False
         self._task: asyncio.Task | None = None
 
+    async def _process_single_delivery(self, delivery_id: str) -> None:
+        """Process a single delivery with its own database session.
+
+        Each delivery gets its own session to avoid SQLAlchemy session
+        sharing issues during concurrent processing.
+        """
+        async with async_session() as session:
+            # Re-fetch the delivery in this session
+            stmt = select(DeliveryLog).where(DeliveryLog.id == delivery_id)
+            result = await session.execute(stmt)
+            delivery = result.scalar_one_or_none()
+
+            if delivery is None:
+                logger.warning(f"Delivery {delivery_id} not found")
+                return
+
+            await process_delivery(delivery, self.settings, session)
+            await session.commit()
+
     async def process_batch(self) -> int:
         """Process a batch of pending deliveries.
 
         Returns:
             Number of deliveries processed
         """
+        # Claim deliveries in one session
         async with async_session() as session:
             deliveries = await get_pending_deliveries(
                 session,
@@ -162,26 +199,27 @@ class WebhookWorker:
             if not deliveries:
                 return 0
 
-            logger.debug(f"Processing {len(deliveries)} deliveries")
+            # Capture delivery IDs before session closes
+            delivery_ids = [d.id for d in deliveries]
 
-            # Process deliveries concurrently within the same session
-            tasks = [
-                process_delivery(delivery, self.settings, session)
-                for delivery in deliveries
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        logger.debug(f"Processing {len(delivery_ids)} deliveries")
 
-            # Log any exceptions that occurred
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(
-                        f"Delivery {deliveries[i].id} processing failed: {result}",
-                        exc_info=result,
-                    )
+        # Process each delivery with its own session (safe for concurrent access)
+        tasks = [
+            self._process_single_delivery(delivery_id)
+            for delivery_id in delivery_ids
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            await session.commit()
+        # Log any exceptions that occurred
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(
+                    f"Delivery {delivery_ids[i]} processing failed: {result}",
+                    exc_info=result,
+                )
 
-        return len(deliveries)
+        return len(delivery_ids)
 
     async def run(self) -> None:
         """Run the worker loop."""
