@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp.config import Settings, get_settings
-from fastsmtp.db.models import DeliveryLog, Recipient
+from fastsmtp.db.models import DeliveryLog
 from fastsmtp.db.session import async_session
 from fastsmtp.metrics.definitions import (
     WEBHOOK_DELIVERIES_TOTAL,
@@ -116,14 +116,10 @@ async def process_delivery(
     """
     logger.debug(f"Processing delivery {delivery.id} to {delivery.webhook_url}")
 
-    # Get recipient headers if available
+    # Get recipient headers if available (recipient may be eagerly loaded via selectinload)
     headers: dict[str, str] = {}
-    if delivery.recipient_id:
-        stmt = select(Recipient).where(Recipient.id == delivery.recipient_id)
-        result = await session.execute(stmt)
-        recipient = result.scalar_one_or_none()
-        if recipient and recipient.webhook_headers:
-            headers = recipient.webhook_headers
+    if delivery.recipient and delivery.recipient.webhook_headers:
+        headers = delivery.recipient.webhook_headers
 
     # Track delivery duration
     start_time = time.perf_counter()

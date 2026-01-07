@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     webhook_timeout: int = 30
     webhook_max_retries: int = 5
     webhook_retry_base_delay: float = 1.0
+    webhook_max_attachment_size: int = Field(
+        default=10 * 1024 * 1024,  # 10MB
+        description="Maximum attachment size to include in webhook payload (bytes). "
+        "Attachments larger than this will only include metadata, not content.",
+    )
 
     # Security
     root_api_key: SecretStr = Field(
@@ -86,11 +91,27 @@ class Settings(BaseSettings):
     delivery_log_cleanup_interval_hours: int = 24
     delivery_log_cleanup_enabled: bool = True
     delivery_log_cleanup_batch_size: int = 1000
+    delivery_log_cleanup_max_per_run: int = Field(
+        default=100000,
+        description="Maximum records to delete per cleanup run. Prevents long-running deletes.",
+    )
+    delivery_log_cleanup_batch_delay_ms: int = Field(
+        default=100,
+        description="Delay between batch deletes (ms) to reduce database load.",
+    )
 
     # Rules engine
     regex_timeout_seconds: float = Field(
         default=1.0,
         description="Timeout for regex matching in rules engine (ReDoS protection)",
+    )
+    regex_thread_pool_size: int | None = Field(
+        default=None,
+        description="Thread pool size for regex operations (default: CPU count, min 2)",
+    )
+    rules_max_body_size: int = Field(
+        default=1024 * 1024,  # 1MB
+        description="Maximum body size (bytes) to evaluate in rules. Larger bodies are truncated.",
     )
 
     # Rate limiting (requires Redis for distributed)

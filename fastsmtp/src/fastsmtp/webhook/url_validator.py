@@ -1,5 +1,6 @@
 """Webhook URL validation for SSRF protection."""
 
+import asyncio
 import ipaddress
 import socket
 from typing import Any
@@ -175,10 +176,12 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
             if is_ip_blocked(str(ip)):
                 raise SSRFError(f"IP address '{host}' is in a blocked range")
         except ValueError:
-            # Not an IP, resolve DNS and validate
+            # Not an IP, resolve DNS and validate asynchronously
             port = request.url.port or (443 if request.url.scheme == b"https" else 80)
             try:
-                addrinfo = socket.getaddrinfo(
+                # Use async DNS resolution to avoid blocking the event loop
+                loop = asyncio.get_running_loop()
+                addrinfo = await loop.getaddrinfo(
                     host,
                     port,
                     proto=socket.IPPROTO_TCP,

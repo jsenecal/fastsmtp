@@ -1,5 +1,6 @@
 """Delivery log cleanup service."""
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,7 @@ class CleanupResult:
     deleted_count: int
     dry_run: bool
     cutoff_date: datetime
+    has_more: bool = False  # True if max_per_run limit was reached
 
 
 class DeliveryLogCleanupService:
@@ -41,6 +43,10 @@ class DeliveryLogCleanupService:
     ) -> CleanupResult:
         """Delete delivery logs older than the retention period.
 
+        Deletion is performed in batches with configurable delays to avoid
+        overwhelming the database. A maximum per-run limit prevents any single
+        cleanup run from taking too long.
+
         Args:
             dry_run: If True, only count records without deleting.
             retention_days: Override the configured retention period.
@@ -50,6 +56,8 @@ class DeliveryLogCleanupService:
         """
         cutoff_date = self._get_cutoff_date(retention_days)
         batch_size = self.settings.delivery_log_cleanup_batch_size
+        max_per_run = self.settings.delivery_log_cleanup_max_per_run
+        batch_delay_seconds = self.settings.delivery_log_cleanup_batch_delay_ms / 1000.0
 
         # Count total records to delete
         count_stmt = select(func.count()).select_from(DeliveryLog).where(
@@ -66,16 +74,24 @@ class DeliveryLogCleanupService:
                 deleted_count=total_count,
                 dry_run=True,
                 cutoff_date=cutoff_date,
+                has_more=False,
             )
 
-        # Delete in batches to avoid long locks
+        # Delete in batches with delay to avoid overwhelming database
         total_deleted = 0
-        while True:
+        first_batch = True
+        while total_deleted < max_per_run:
+            # Add delay between batches (skip delay for first batch)
+            if not first_batch and batch_delay_seconds > 0:
+                await asyncio.sleep(batch_delay_seconds)
+            first_batch = False
+
             # Get IDs of records to delete in this batch
+            remaining = max_per_run - total_deleted
             select_stmt = (
                 select(DeliveryLog.id)
                 .where(DeliveryLog.created_at < cutoff_date)
-                .limit(batch_size)
+                .limit(min(batch_size, remaining))
             )
             result = await self.session.execute(select_stmt)
             ids_to_delete = [row[0] for row in result.fetchall()]
@@ -91,10 +107,19 @@ class DeliveryLogCleanupService:
             total_deleted += len(ids_to_delete)
             logger.debug(f"Deleted batch of {len(ids_to_delete)} delivery logs")
 
-        logger.info(f"Deleted {total_deleted} delivery logs older than {cutoff_date}")
+        # Check if we hit the per-run limit (more records may remain)
+        has_more = total_deleted >= max_per_run
+
+        if has_more:
+            logger.info(
+                f"Deleted {total_deleted} delivery logs (limit reached, more remain)"
+            )
+        else:
+            logger.info(f"Deleted {total_deleted} delivery logs older than {cutoff_date}")
 
         return CleanupResult(
             deleted_count=total_deleted,
             dry_run=False,
             cutoff_date=cutoff_date,
+            has_more=has_more,
         )

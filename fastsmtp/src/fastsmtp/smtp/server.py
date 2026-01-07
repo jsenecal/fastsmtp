@@ -1,10 +1,12 @@
 """SMTP server implementation using aiosmtpd."""
 
+import base64
 import logging
 import uuid
 from email import message_from_bytes
 from email.message import Message
 
+import idna
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import SMTP, Envelope, Session
 from sqlalchemy import select
@@ -44,8 +46,16 @@ async def lookup_recipient(
         return None, None, "Invalid recipient address"
 
     local_part, domain_name = address.rsplit("@", 1)
-    domain_name = domain_name.lower()
     local_part_lower = local_part.lower()
+
+    # Normalize international domain names (IDN) to ASCII punycode
+    # This ensures "example.com" and "example.com" (with Cyrillic chars) are handled correctly
+    try:
+        domain_name = idna.encode(domain_name.lower()).decode("ascii")
+    except idna.core.InvalidCodepoint:
+        return None, None, "Invalid domain name encoding"
+    except idna.core.InvalidCodepointContext:
+        return None, None, "Invalid domain name encoding"
 
     # Look up domain with recipients (excluding soft-deleted)
     stmt = (
@@ -253,7 +263,7 @@ class FastSMTPHandler:
         from fastsmtp.webhook.queue import enqueue_delivery
 
         # Extract base payload (same for all recipients)
-        base_payload = extract_email_payload(message, envelope)
+        base_payload = extract_email_payload(message, envelope, self.settings)
         base_payload["client_ip"] = client_ip
         base_payload["dkim_result"] = auth_result.dkim_result
         base_payload["dkim_domain"] = auth_result.dkim_domain
@@ -316,9 +326,22 @@ class FastSMTPHandler:
         return deliveries_created
 
 
-def extract_email_payload(message: Message, envelope: Envelope) -> dict:
-    """Extract email content into a webhook payload."""
+def extract_email_payload(
+    message: Message,
+    envelope: Envelope,
+    settings: Settings | None = None,
+) -> dict:
+    """Extract email content into a webhook payload.
+
+    Args:
+        message: Parsed email message
+        envelope: SMTP envelope
+        settings: Application settings (for attachment size limits)
+    """
     from typing import Any
+
+    settings = settings or get_settings()
+    max_attachment_size = settings.webhook_max_attachment_size
 
     # Get basic headers
     payload: dict[str, Any] = {
@@ -348,11 +371,22 @@ def extract_email_payload(message: Message, envelope: Envelope) -> dict:
                 # Handle attachment
                 filename = part.get_filename() or "unnamed"
                 part_payload = part.get_payload(decode=True)
-                attachments.append({
+                size = len(part_payload) if isinstance(part_payload, bytes) else 0
+
+                attachment_info: dict[str, Any] = {
                     "filename": filename,
                     "content_type": content_type,
-                    "size": len(part_payload) if isinstance(part_payload, bytes) else 0,
-                })
+                    "size": size,
+                }
+
+                # Include base64-encoded content if within size limit
+                if isinstance(part_payload, bytes) and size <= max_attachment_size:
+                    attachment_info["content"] = base64.b64encode(part_payload).decode(
+                        "ascii"
+                    )
+                    attachment_info["content_transfer_encoding"] = "base64"
+
+                attachments.append(attachment_info)
             elif content_type == "text/plain":
                 payload_bytes = part.get_payload(decode=True)
                 if isinstance(payload_bytes, bytes):

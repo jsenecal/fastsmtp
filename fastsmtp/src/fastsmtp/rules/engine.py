@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, Rule, RuleSet
 from fastsmtp.rules.conditions import RegexTimeoutError, evaluate_condition
 from fastsmtp.smtp.validation import EmailAuthResult
@@ -52,6 +53,7 @@ def extract_field_value(
     message: Message,
     payload: dict,
     auth_result: EmailAuthResult | None = None,
+    settings: Settings | None = None,
 ) -> str | None:
     """Extract a field value from an email message.
 
@@ -60,10 +62,13 @@ def extract_field_value(
         message: Parsed email message
         payload: Extracted email payload
         auth_result: Email authentication result
+        settings: Application settings
 
     Returns:
         Field value or None if not found
     """
+    settings = settings or get_settings()
+
     # Handle special fields
     if field_name == "from":
         return message.get("From", "")
@@ -72,10 +77,18 @@ def extract_field_value(
     elif field_name == "subject":
         return message.get("Subject", "")
     elif field_name == "body":
-        # Combine text and html body
-        text = payload.get("body_text", "")
-        html = payload.get("body_html", "")
-        return f"{text}\n{html}".strip()
+        # Combine text and html body with size limit to prevent memory issues
+        text = payload.get("body_text", "") or ""
+        html = payload.get("body_html", "") or ""
+        body = f"{text}\n{html}".strip()
+        # Truncate to max body size for rules evaluation
+        max_size = settings.rules_max_body_size
+        if len(body) > max_size:
+            logger.debug(
+                f"Truncating body from {len(body)} to {max_size} bytes for rules evaluation"
+            )
+            body = body[:max_size]
+        return body
     elif field_name == "has_attachment":
         return "true" if payload.get("has_attachments") else "false"
     elif field_name == "dkim_result":
@@ -94,6 +107,7 @@ def evaluate_rule(
     message: Message,
     payload: dict,
     auth_result: EmailAuthResult | None = None,
+    settings: Settings | None = None,
 ) -> bool:
     """Evaluate a single rule against an email.
 
@@ -102,12 +116,15 @@ def evaluate_rule(
         message: Parsed email message
         payload: Extracted email payload
         auth_result: Email authentication result
+        settings: Application settings
 
     Returns:
         True if the rule matches. Also returns True if regex evaluation times out
         (fail-safe: treat timeout as a match to prevent rule bypass).
     """
-    field_value = extract_field_value(rule.field, message, payload, auth_result)
+    field_value = extract_field_value(
+        rule.field, message, payload, auth_result, settings
+    )
 
     if field_value is None:
         logger.debug(f"Rule {rule.id}: field '{rule.field}' not found")
@@ -148,6 +165,7 @@ async def evaluate_rules(
     message: Message,
     payload: dict,
     auth_result: EmailAuthResult | None = None,
+    settings: Settings | None = None,
 ) -> RuleEvaluationResult:
     """Evaluate all rules for a domain against an email.
 
@@ -162,10 +180,12 @@ async def evaluate_rules(
         message: Parsed email message
         payload: Extracted email payload
         auth_result: Email authentication result
+        settings: Application settings
 
     Returns:
         RuleEvaluationResult with all matches and final action
     """
+    settings = settings or get_settings()
     result = RuleEvaluationResult()
 
     # Get all enabled rulesets for this domain, ordered by priority
@@ -186,7 +206,7 @@ async def evaluate_rules(
         rules = sorted(ruleset.rules, key=lambda r: r.order)
 
         for rule in rules:
-            if evaluate_rule(rule, message, payload, auth_result):
+            if evaluate_rule(rule, message, payload, auth_result, settings):
                 # Rule matched
                 match = RuleMatch(
                     rule_id=rule.id,

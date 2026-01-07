@@ -4,31 +4,38 @@ import asyncio
 import contextlib
 import logging
 
-from fastsmtp.cleanup.service import DeliveryLogCleanupService
+from fastsmtp.cleanup.service import CleanupResult, DeliveryLogCleanupService
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.session import async_session
 
 logger = logging.getLogger(__name__)
 
+# Minimum interval between cleanup runs when catching up (5 minutes)
+CATCHUP_INTERVAL_SECONDS = 300
+
 
 class CleanupWorker:
-    """Background worker that periodically cleans up old delivery logs."""
+    """Background worker that periodically cleans up old delivery logs.
+
+    The worker runs cleanup at configurable intervals. When there are many
+    records to delete (more than max_per_run), it will run more frequently
+    to catch up gradually without overwhelming the database.
+    """
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self._running = False
         self._task: asyncio.Task | None = None
 
-    async def run_cleanup(self) -> int:
+    async def run_cleanup(self) -> CleanupResult:
         """Run a single cleanup operation.
 
         Returns:
-            Number of records deleted.
+            CleanupResult with deletion details.
         """
         async with async_session() as session:
             service = DeliveryLogCleanupService(self.settings, session)
-            result = await service.cleanup(dry_run=False)
-            return result.deleted_count
+            return await service.cleanup(dry_run=False)
 
     async def run(self) -> None:
         """Run the worker loop."""
@@ -41,17 +48,29 @@ class CleanupWorker:
             f"Cleanup worker started (interval: {interval_hours}h, retention: {retention_days}d)"
         )
 
+        # Wait before first cleanup (don't cleanup immediately on startup)
+        await asyncio.sleep(interval_seconds)
+
         while self._running:
             try:
-                # Wait first, then cleanup (don't cleanup immediately on startup)
-                await asyncio.sleep(interval_seconds)
-
                 if not self._running:
                     break
 
-                deleted = await self.run_cleanup()
-                if deleted > 0:
-                    logger.info(f"Cleanup worker deleted {deleted} old delivery logs")
+                result = await self.run_cleanup()
+                if result.deleted_count > 0:
+                    logger.info(
+                        f"Cleanup worker deleted {result.deleted_count} old delivery logs"
+                    )
+
+                # If there are more records to delete, run again sooner
+                if result.has_more:
+                    logger.info(
+                        f"More records to delete, next run in {CATCHUP_INTERVAL_SECONDS}s"
+                    )
+                    await asyncio.sleep(CATCHUP_INTERVAL_SECONDS)
+                else:
+                    # Normal interval
+                    await asyncio.sleep(interval_seconds)
 
             except asyncio.CancelledError:
                 break

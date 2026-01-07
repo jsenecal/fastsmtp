@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -222,6 +222,16 @@ class Recipient(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         UniqueConstraint("domain_id", "local_part", name="uq_recipient_local_part"),
         Index("ix_recipients_domain_local", "domain_id", "local_part"),
+        # Partial unique index to prevent multiple catch-all recipients per domain
+        # PostgreSQL allows multiple NULLs in unique constraints, so we need this
+        # Use text() and dialect-specific where clauses for cross-database support
+        Index(
+            "ix_recipients_domain_catchall",
+            "domain_id",
+            unique=True,
+            postgresql_where=text("local_part IS NULL"),
+            sqlite_where=text("local_part IS NULL"),
+        ),
     )
 
     def __repr__(self) -> str:
@@ -321,6 +331,12 @@ class DeliveryLog(Base, TimestampMixin):
     recipient_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("recipients.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    # Relationship for eager loading (used by webhook worker to get headers)
+    recipient: Mapped["Recipient | None"] = relationship(
+        "Recipient",
+        foreign_keys=[recipient_id],
+        lazy="noload",  # Default to not loading, use selectinload explicitly
     )
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)

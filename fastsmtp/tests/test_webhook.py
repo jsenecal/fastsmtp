@@ -8,6 +8,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
 from fastsmtp.config import Settings
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.webhook.dispatcher import (
@@ -716,10 +719,20 @@ class TestProcessDelivery:
         test_session.add(delivery)
         await test_session.flush()
 
+        # Re-fetch delivery with recipient relationship eagerly loaded
+        # (simulates how get_pending_deliveries loads deliveries in production)
+        stmt = (
+            select(DeliveryLog)
+            .options(selectinload(DeliveryLog.recipient))
+            .where(DeliveryLog.id == delivery.id)
+        )
+        result = await test_session.execute(stmt)
+        loaded_delivery = result.scalar_one()
+
         with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
             mock_send.return_value = (True, 200, None)
 
-            await process_delivery(delivery, test_settings, test_session)
+            await process_delivery(loaded_delivery, test_settings, test_session)
 
             # Verify headers were passed
             call_kwargs = mock_send.call_args.kwargs

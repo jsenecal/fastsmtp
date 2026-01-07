@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.enums import DeliveryStatus
@@ -95,8 +96,10 @@ async def get_pending_deliveries(
     now = datetime.now(UTC)
 
     # Select pending deliveries that are due for retry
+    # Use selectinload to eagerly load recipients (fixes N+1 query issue)
     stmt = (
         select(DeliveryLog)
+        .options(selectinload(DeliveryLog.recipient))
         .where(
             DeliveryLog.status.in_([DeliveryStatus.PENDING, DeliveryStatus.FAILED]),
             DeliveryLog.next_retry_at <= now,

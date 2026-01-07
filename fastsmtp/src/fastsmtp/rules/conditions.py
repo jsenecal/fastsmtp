@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import logging
+import os
 import re
 from typing import Any
 
@@ -26,10 +27,21 @@ class RegexTimeoutError(Exception):
 
 
 def _get_regex_executor() -> concurrent.futures.ThreadPoolExecutor:
-    """Get or create the regex thread pool executor."""
+    """Get or create the regex thread pool executor.
+
+    Pool size is determined by:
+    1. Settings.regex_thread_pool_size if set
+    2. CPU count (with minimum of 2)
+    """
     global _regex_executor
     if _regex_executor is None:
-        _regex_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        settings = get_settings()
+        if settings.regex_thread_pool_size is not None:
+            pool_size = max(1, settings.regex_thread_pool_size)
+        else:
+            pool_size = max(2, os.cpu_count() or 2)
+        _regex_executor = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
+        logger.debug(f"Created regex thread pool with {pool_size} workers")
     return _regex_executor
 
 
@@ -90,7 +102,7 @@ def match_regex(value: str, pattern: str, case_sensitive: bool = False) -> bool:
             f"Pattern: {pattern[:100]}... Value length: {len(value)} chars. "
             "This may indicate a ReDoS attack."
         )
-        raise RegexTimeoutError(pattern, settings.regex_timeout_seconds)
+        raise RegexTimeoutError(pattern, settings.regex_timeout_seconds) from None
     except re.error as e:
         # Invalid regex pattern - log but don't match
         logger.warning(f"Invalid regex pattern '{pattern[:100]}': {e}")
