@@ -44,5 +44,6 @@ packages = ["src/fastsmtp"]
 
 [dependency-groups]
 dev = [
+    "aiosmtplib>=5.0.0",
     "testcontainers[postgres]>=4.13.3",
 ]
