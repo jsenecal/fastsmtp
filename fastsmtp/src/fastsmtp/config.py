@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     smtp_tls_cert: Path | None = None
     smtp_tls_key: Path | None = None
     smtp_require_starttls: bool = False
+    smtp_max_message_size: int = Field(
+        default=10 * 1024 * 1024,  # 10MB
+        description="Maximum email message size in bytes",
+    )
 
     # Email authentication
     smtp_verify_dkim: bool = True

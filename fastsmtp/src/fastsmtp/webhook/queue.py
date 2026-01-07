@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp.config import Settings, get_settings
+from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import DeliveryLog
 from fastsmtp.smtp.validation import EmailAuthResult
 
@@ -56,7 +57,7 @@ async def enqueue_delivery(
         webhook_url=webhook_url,
         payload_hash=compute_payload_hash(payload),
         payload=payload,
-        status="pending",
+        status=DeliveryStatus.PENDING,
         attempts=0,
         next_retry_at=datetime.now(UTC),
         instance_id=settings.instance_id,
@@ -97,7 +98,7 @@ async def get_pending_deliveries(
     stmt = (
         select(DeliveryLog)
         .where(
-            DeliveryLog.status.in_(["pending", "failed"]),
+            DeliveryLog.status.in_([DeliveryStatus.PENDING, DeliveryStatus.FAILED]),
             DeliveryLog.next_retry_at <= now,
         )
         .order_by(DeliveryLog.next_retry_at)
@@ -129,7 +130,7 @@ async def mark_delivered(
         update(DeliveryLog)
         .where(DeliveryLog.id == delivery_id)
         .values(
-            status="delivered",
+            status=DeliveryStatus.DELIVERED,
             delivered_at=datetime.now(UTC),
             next_retry_at=None,
             last_error=None,
@@ -167,7 +168,7 @@ async def mark_failed(
             update(DeliveryLog)
             .where(DeliveryLog.id == delivery_id)
             .values(
-                status="exhausted",
+                status=DeliveryStatus.EXHAUSTED,
                 attempts=new_attempts,
                 last_error=error,
                 last_status_code=status_code,
@@ -184,7 +185,7 @@ async def mark_failed(
             update(DeliveryLog)
             .where(DeliveryLog.id == delivery_id)
             .values(
-                status="failed",
+                status=DeliveryStatus.FAILED,
                 attempts=new_attempts,
                 last_error=error,
                 last_status_code=status_code,
@@ -221,7 +222,7 @@ async def retry_delivery(
         return None
 
     # Only allow retrying failed/exhausted deliveries
-    if delivery.status not in ("failed", "exhausted"):
+    if delivery.status not in (DeliveryStatus.FAILED, DeliveryStatus.EXHAUSTED):
         logger.warning(f"Cannot retry delivery {delivery_id} with status {delivery.status}")
         return delivery
 
@@ -229,7 +230,7 @@ async def retry_delivery(
         update(DeliveryLog)
         .where(DeliveryLog.id == delivery_id)
         .values(
-            status="pending",
+            status=DeliveryStatus.PENDING,
             next_retry_at=datetime.now(UTC),
         )
     )

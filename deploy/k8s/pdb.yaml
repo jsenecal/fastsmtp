@@ -1,0 +1,30 @@
+---
+# PodDisruptionBudget for API server
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fastsmtp-api-pdb
+  namespace: fastsmtp
+  labels:
+    app: fastsmtp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fastsmtp
+      component: api
+---
+# PodDisruptionBudget for webhook workers
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fastsmtp-worker-pdb
+  namespace: fastsmtp
+  labels:
+    app: fastsmtp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fastsmtp
+      component: worker

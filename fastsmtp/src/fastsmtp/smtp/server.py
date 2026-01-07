@@ -268,10 +268,13 @@ class SMTPServer:
             self.handler,
             hostname=self.settings.smtp_host,
             port=self.settings.smtp_port,
+            data_size_limit=self.settings.smtp_max_message_size,
         )
         self.controller.start()
+        max_size_mb = self.settings.smtp_max_message_size / (1024 * 1024)
         logger.info(
-            f"SMTP server started on {self.settings.smtp_host}:{self.settings.smtp_port}"
+            f"SMTP server started on {self.settings.smtp_host}:{self.settings.smtp_port} "
+            f"(max message size: {max_size_mb:.1f}MB)"
         )
 
         # Start TLS SMTP server if configured
@@ -282,6 +285,7 @@ class SMTPServer:
                 hostname=self.settings.smtp_host,
                 port=self.settings.smtp_tls_port,
                 ssl_context=tls_context,
+                data_size_limit=self.settings.smtp_max_message_size,
             )
             self.tls_controller.start()
             logger.info(

@@ -321,6 +321,9 @@ class DeliveryLog(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_delivery_log_status_retry", "status", "next_retry_at"),
         Index("ix_delivery_log_domain_created", "domain_id", "created_at"),
+        Index("ix_delivery_log_instance_id", "instance_id"),
+        Index("ix_delivery_log_delivered_at", "delivered_at"),
+        Index("ix_delivery_log_cleanup", "created_at", "status"),  # For cleanup queries
     )
 
     def __repr__(self) -> str:

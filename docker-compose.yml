@@ -25,11 +25,10 @@ services:
       - "4465:465"     # SMTP TLS
     environment:
       FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres:5432/fastsmtp
-      FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY:-change-me-in-production}
-      FASTSMTP_SECRET_KEY: ${FASTSMTP_SECRET_KEY:-change-me-in-production}
+      FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY:?FASTSMTP_ROOT_API_KEY is required}
       FASTSMTP_API_HOST: 0.0.0.0
       FASTSMTP_SMTP_HOST: 0.0.0.0
-      FASTSMTP_CORS_ORIGINS: '["http://localhost:3000"]'
+      FASTSMTP_CORS_ORIGINS: ${FASTSMTP_CORS_ORIGINS:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,8 +39,7 @@ services:
     build: .
     environment:
       FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres:5432/fastsmtp
-      FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY:-change-me-in-production}
-      FASTSMTP_SECRET_KEY: ${FASTSMTP_SECRET_KEY:-change-me-in-production}
+      FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY:?FASTSMTP_ROOT_API_KEY is required}
     depends_on:
       postgres:
         condition: service_healthy
