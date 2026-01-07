@@ -320,7 +320,7 @@ class TestRecipientAPIUnit:
                 session=test_session,
             )
 
-            assert "deleted" in result["message"]
+            assert "deleted" in result.message
 
 
 class TestRulesAPIUnit:
@@ -465,7 +465,7 @@ class TestRulesAPIUnit:
                 session=test_session,
             )
 
-            assert "deleted" in result["message"]
+            assert "deleted" in result.message
 
     @pytest.mark.asyncio
     async def test_create_rule(self, mock_auth, test_session):
@@ -578,7 +578,7 @@ class TestRulesAPIUnit:
                 session=test_session,
             )
 
-            assert "deleted" in result["message"]
+            assert "deleted" in result.message
 
 
 class TestDomainsAPIUnit:
