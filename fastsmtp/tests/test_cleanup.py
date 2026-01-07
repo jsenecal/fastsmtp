@@ -400,3 +400,80 @@ class TestCleanupIntegration:
         # Cleanup worker starts automatically based on config
         # No explicit flag needed
         assert result.exit_code == 0
+
+
+class TestCleanupEndToEnd:
+    """End-to-end tests for cleanup functionality."""
+
+    @pytest.mark.asyncio
+    async def test_full_cleanup_workflow(
+        self,
+        test_session: AsyncSession,
+        test_settings: Settings,
+    ):
+        """Test complete cleanup workflow: create records, run cleanup, verify."""
+        from sqlalchemy import select
+
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
+
+        # Create a domain
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="e2e-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+
+        now = datetime.now(UTC)
+
+        # Create mix of old and new records
+        for i, days_old in enumerate([1, 30, 60, 100, 150]):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=domain.id,
+                message_id=f"<e2e{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash="abc123",
+                payload={"age_days": days_old},
+                status="delivered",
+                attempts=1,
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+            await test_session.flush()
+
+            old_date = now - timedelta(days=days_old)
+            await test_session.execute(
+                DeliveryLog.__table__.update()
+                .where(DeliveryLog.id == delivery.id)
+                .values(created_at=old_date)
+            )
+
+        await test_session.commit()
+
+        # Verify initial state
+        stmt = select(DeliveryLog).where(DeliveryLog.domain_id == domain.id)
+        result = await test_session.execute(stmt)
+        assert len(result.scalars().all()) == 5
+
+        # Run dry-run first
+        service = DeliveryLogCleanupService(test_settings, test_session)
+        dry_result = await service.cleanup(dry_run=True)
+        assert dry_result.deleted_count == 2  # 100 and 150 days old
+
+        # Verify nothing deleted yet
+        result = await test_session.execute(stmt)
+        assert len(result.scalars().all()) == 5
+
+        # Run actual cleanup
+        cleanup_result = await service.cleanup(dry_run=False)
+        assert cleanup_result.deleted_count == 2
+
+        # Verify correct records remain
+        result = await test_session.execute(stmt)
+        remaining = result.scalars().all()
+        assert len(remaining) == 3
+
+        remaining_ages = sorted([d.payload["age_days"] for d in remaining])
+        assert remaining_ages == [1, 30, 60]
