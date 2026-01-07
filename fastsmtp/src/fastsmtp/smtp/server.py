@@ -1,7 +1,7 @@
 """SMTP server implementation using aiosmtpd."""
 
-import asyncio
 import logging
+import uuid
 from email import message_from_bytes
 from email.message import Message
 
@@ -15,7 +15,7 @@ from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.db.session import async_session
 from fastsmtp.metrics.definitions import AUTH_RESULTS, SMTP_MESSAGE_SIZE, SMTP_MESSAGES_TOTAL
-from fastsmtp.smtp.validation import validate_email_auth
+from fastsmtp.smtp.validation import EmailAuthResult, validate_email_auth
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,15 @@ async def lookup_recipient(
     domain_name = domain_name.lower()
     local_part_lower = local_part.lower()
 
-    # Look up domain with recipients
+    # Look up domain with recipients (excluding soft-deleted)
     stmt = (
         select(Domain)
         .options(selectinload(Domain.recipients))
-        .where(Domain.domain_name == domain_name, Domain.is_enabled.is_(True))
+        .where(
+            Domain.domain_name == domain_name,
+            Domain.is_enabled.is_(True),
+            Domain.deleted_at.is_(None),
+        )
     )
     result = await session.execute(stmt)
     domain = result.scalar_one_or_none()
@@ -54,11 +58,12 @@ async def lookup_recipient(
         return None, None, f"Domain {domain_name} not configured"
 
     # Find matching recipient: specific match first, then catch-all
+    # Filter out disabled and soft-deleted recipients
     specific_recipient = None
     catchall_recipient = None
 
     for recipient in domain.recipients:
-        if not recipient.is_enabled:
+        if not recipient.is_enabled or recipient.deleted_at is not None:
             continue
         if recipient.local_part is None:
             catchall_recipient = recipient
@@ -75,11 +80,14 @@ async def lookup_recipient(
 
 
 class FastSMTPHandler:
-    """Handler for incoming SMTP messages."""
+    """Handler for incoming SMTP messages.
 
-    def __init__(self, settings: Settings, message_queue: asyncio.Queue | None = None):
+    Messages are persisted directly to the database in handle_DATA before
+    acknowledging receipt to the SMTP client. This ensures no data loss.
+    """
+
+    def __init__(self, settings: Settings):
         self.settings = settings
-        self.message_queue = message_queue
 
     async def handle_RCPT(
         self,
@@ -106,7 +114,12 @@ class FastSMTPHandler:
         session: Session,
         envelope: Envelope,
     ) -> str:
-        """Process incoming email data."""
+        """Process incoming email data and persist to database.
+
+        Messages are persisted to the database before returning 250 OK to ensure
+        no data loss if the server crashes. The webhook worker will then process
+        the deliveries asynchronously.
+        """
         client_ip = session.peer[0] if session.peer else "unknown"
         mail_from = envelope.mail_from or ""
         helo = session.host_name or ""
@@ -136,8 +149,8 @@ class FastSMTPHandler:
             SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
             return "550 Failed to parse message"
 
-        # Get Message-ID
-        message_id = message.get("Message-ID", f"<{id(envelope)}@fastsmtp>")
+        # Get Message-ID (use UUID if not present for reliable deduplication)
+        message_id = message.get("Message-ID") or f"<{uuid.uuid4()}@fastsmtp>"
 
         # Run email authentication
         auth_result = await validate_email_auth(
@@ -157,8 +170,7 @@ class FastSMTPHandler:
         AUTH_RESULTS.labels(type="dkim", result=auth_result.dkim_result).inc()
         AUTH_RESULTS.labels(type="spf", result=auth_result.spf_result).inc()
 
-        # Check if we should reject based on auth results
-        # This can be overridden per-domain, but we check global settings first
+        # Check if we should reject based on auth results (global settings)
         if self.settings.smtp_reject_dkim_fail and auth_result.dkim_result == "fail":
             logger.warning(f"Rejecting message {message_id}: DKIM failed")
             SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
@@ -169,21 +181,117 @@ class FastSMTPHandler:
             SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
             return "550 SPF verification failed"
 
-        # Queue the message for processing
-        if self.message_queue:
-            await self.message_queue.put({
-                "envelope": envelope,
-                "message": message,
-                "message_id": message_id,
-                "auth_result": auth_result,
-                "client_ip": client_ip,
-            })
-            logger.debug(f"Message {message_id} queued for processing")
-        else:
-            logger.warning(f"Message {message_id} received but no queue configured")
+        # Process message and persist to database BEFORE returning 250 OK
+        # This ensures no data loss if the server crashes
+        try:
+            deliveries_created = await self._process_and_persist_message(
+                envelope=envelope,
+                message=message,
+                message_id=message_id,
+                auth_result=auth_result,
+                client_ip=client_ip,
+            )
+        except Exception as e:
+            logger.exception(f"Failed to persist message {message_id}: {e}")
+            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
+            return "451 Temporary failure, please retry"
+
+        if deliveries_created == 0:
+            # All recipients were dropped by rules or had errors
+            logger.warning(f"Message {message_id}: no deliveries created (all dropped)")
+            SMTP_MESSAGES_TOTAL.labels(result="dropped").inc()
+            return "250 Message accepted"
 
         SMTP_MESSAGES_TOTAL.labels(result="accepted").inc()
+        logger.info(f"Message {message_id}: {deliveries_created} deliveries queued")
         return "250 Message accepted for delivery"
+
+    async def _process_and_persist_message(
+        self,
+        envelope: Envelope,
+        message: Message,
+        message_id: str,
+        auth_result: EmailAuthResult,
+        client_ip: str,
+    ) -> int:
+        """Process message for each recipient and persist deliveries to database.
+
+        Args:
+            envelope: SMTP envelope
+            message: Parsed email message
+            message_id: Message-ID header value
+            auth_result: Email authentication result
+            client_ip: Client IP address
+
+        Returns:
+            Number of deliveries created
+        """
+        # Import here to avoid circular import
+        from fastsmtp.rules.engine import evaluate_rules
+        from fastsmtp.webhook.queue import enqueue_delivery
+
+        # Extract base payload (same for all recipients)
+        base_payload = extract_email_payload(message, envelope)
+        base_payload["client_ip"] = client_ip
+        base_payload["dkim_result"] = auth_result.dkim_result
+        base_payload["dkim_domain"] = auth_result.dkim_domain
+        base_payload["spf_result"] = auth_result.spf_result
+        base_payload["spf_domain"] = auth_result.spf_domain
+
+        deliveries_created = 0
+
+        async with async_session() as db_session:
+            # Process each recipient
+            for rcpt_to in envelope.rcpt_tos:
+                domain, recipient, error = await lookup_recipient(rcpt_to, db_session)
+
+                if error or not domain or not recipient:
+                    logger.warning(
+                        f"Message {message_id}: skipping recipient {rcpt_to}: {error}"
+                    )
+                    continue
+
+                # Evaluate rules for this domain
+                rule_result = await evaluate_rules(
+                    session=db_session,
+                    domain_id=domain.id,
+                    message=message,
+                    payload=base_payload,
+                    auth_result=auth_result,
+                )
+
+                # Check if message should be dropped
+                if rule_result.should_drop:
+                    logger.info(
+                        f"Message {message_id}: dropped for {rcpt_to} by rules"
+                    )
+                    continue
+
+                # Build recipient-specific payload
+                payload = base_payload.copy()
+                payload["tags"] = rule_result.tags
+                payload["recipient"] = rcpt_to
+
+                # Determine webhook URL (rule override takes precedence)
+                webhook_url = rule_result.webhook_url_override or recipient.webhook_url
+
+                # Enqueue delivery to database
+                await enqueue_delivery(
+                    session=db_session,
+                    domain_id=domain.id,
+                    recipient_id=recipient.id,
+                    message_id=message_id,
+                    webhook_url=webhook_url,
+                    payload=payload,
+                    auth_result=auth_result,
+                    settings=self.settings,
+                )
+                deliveries_created += 1
+
+            # Commit all deliveries in a single transaction
+            await db_session.commit()
+
+        return deliveries_created
 
 
 def extract_email_payload(message: Message, envelope: Envelope) -> dict:
@@ -266,16 +374,19 @@ def extract_email_payload(message: Message, envelope: Envelope) -> dict:
 
 
 class SMTPServer:
-    """FastSMTP server wrapper with optional TLS support."""
+    """FastSMTP server wrapper with optional TLS support.
+
+    Messages are persisted directly to the database in handle_DATA before
+    acknowledging receipt. This ensures no data loss if the server crashes.
+    The webhook worker processes deliveries asynchronously from the database.
+    """
 
     def __init__(
         self,
         settings: Settings | None = None,
-        message_queue: asyncio.Queue | None = None,
     ):
         self.settings = settings or get_settings()
-        self.message_queue = message_queue or asyncio.Queue()
-        self.handler = FastSMTPHandler(self.settings, self.message_queue)
+        self.handler = FastSMTPHandler(self.settings)
         self.controller: Controller | None = None
         self.tls_controller: Controller | None = None
 
@@ -325,10 +436,6 @@ class SMTPServer:
         if self.tls_controller:
             self.tls_controller.stop()
             logger.info("SMTP TLS server stopped")
-
-    async def get_message(self) -> dict:
-        """Get the next message from the queue."""
-        return await self.message_queue.get()
 
 
 async def find_recipient_for_address(

@@ -1,6 +1,5 @@
 """Extended tests for SMTP server module to improve coverage."""
 
-import asyncio
 from email.message import EmailMessage
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -255,8 +254,7 @@ class TestFastSMTPHandler:
     @pytest.fixture
     def handler(self, test_settings):
         """Create a test handler."""
-        queue = asyncio.Queue()
-        return FastSMTPHandler(test_settings, queue)
+        return FastSMTPHandler(test_settings)
 
     @pytest.mark.asyncio
     async def test_handle_rcpt_invalid_address(self, handler):
@@ -300,28 +298,6 @@ class TestSMTPServer:
         server = SMTPServer(settings=test_settings)
 
         assert server.settings == test_settings
-        assert server.message_queue is not None
         assert server.handler is not None
-
-    def test_smtp_server_init_default_queue(self, test_settings):
-        """Test SMTPServer creates default queue."""
-        server = SMTPServer(settings=test_settings)
-        assert isinstance(server.message_queue, asyncio.Queue)
-
-    def test_smtp_server_init_custom_queue(self, test_settings):
-        """Test SMTPServer uses custom queue."""
-        queue = asyncio.Queue()
-        server = SMTPServer(settings=test_settings, message_queue=queue)
-        assert server.message_queue is queue
-
-    @pytest.mark.asyncio
-    async def test_smtp_server_get_message(self, test_settings):
-        """Test getting message from queue."""
-        queue = asyncio.Queue()
-        server = SMTPServer(settings=test_settings, message_queue=queue)
-
-        test_message = {"test": True}
-        await queue.put(test_message)
-
-        result = await server.get_message()
-        assert result == test_message
+        assert server.controller is None  # Not started yet
+        assert server.tls_controller is None

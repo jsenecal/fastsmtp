@@ -33,7 +33,7 @@ WEBHOOK_DELIVERY_DURATION = Histogram(
 SMTP_MESSAGES_TOTAL = Counter(
     "fastsmtp_smtp_messages_total",
     "Total SMTP messages received",
-    ["result"],  # accepted, rejected
+    ["result"],  # accepted, rejected, dropped
 )
 
 SMTP_MESSAGE_SIZE = Histogram(

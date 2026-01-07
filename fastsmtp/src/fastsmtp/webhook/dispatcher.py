@@ -23,32 +23,6 @@ from fastsmtp.webhook.url_validator import SSRFError, validate_webhook_url
 
 logger = logging.getLogger(__name__)
 
-# Module-level HTTP client for connection reuse
-_http_client: httpx.AsyncClient | None = None
-_http_client_lock = asyncio.Lock()
-
-
-async def get_http_client() -> httpx.AsyncClient:
-    """Get or create the shared HTTP client (thread-safe)."""
-    global _http_client
-    if _http_client is None:
-        async with _http_client_lock:
-            # Double-check after acquiring lock
-            if _http_client is None:
-                _http_client = httpx.AsyncClient(
-                    timeout=30.0,
-                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-                )
-    return _http_client
-
-
-async def close_http_client() -> None:
-    """Close the shared HTTP client."""
-    global _http_client
-    if _http_client is not None:
-        await _http_client.aclose()
-        _http_client = None
-
 
 async def send_webhook(
     url: str,
@@ -65,7 +39,7 @@ async def send_webhook(
         payload: JSON payload to send
         headers: Additional headers
         request_timeout: Request timeout in seconds
-        client: Optional HTTP client (uses shared client if not provided)
+        client: HTTP client to use (required for production use)
         validate_url: Whether to validate URL for SSRF protection (default True)
 
     Returns:
@@ -88,10 +62,13 @@ async def send_webhook(
     if headers:
         all_headers.update(headers)
 
-    try:
-        if client is None:
-            client = await get_http_client()
+    # Create a temporary client if none provided (for testing/one-off use)
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=request_timeout)
+        close_client = True
 
+    try:
         response = await client.post(
             url,
             json=payload,
@@ -114,12 +91,16 @@ async def send_webhook(
     except Exception as e:
         logger.exception(f"Unexpected error sending webhook to {url}")
         return False, None, f"Unexpected error: {e}"
+    finally:
+        if close_client:
+            await client.aclose()
 
 
 async def process_delivery(
     delivery: DeliveryLog,
     settings: Settings,
     session: AsyncSession,
+    client: httpx.AsyncClient | None = None,
 ) -> None:
     """Process a single delivery.
 
@@ -127,6 +108,7 @@ async def process_delivery(
         delivery: DeliveryLog entry to process
         settings: Application settings
         session: Database session
+        client: HTTP client for connection reuse (recommended for batch processing)
     """
     logger.debug(f"Processing delivery {delivery.id} to {delivery.webhook_url}")
 
@@ -148,6 +130,7 @@ async def process_delivery(
         payload=delivery.payload,
         headers=headers,
         request_timeout=settings.webhook_timeout,
+        client=client,
     )
 
     # Record delivery duration
@@ -174,12 +157,34 @@ async def process_delivery(
 
 
 class WebhookWorker:
-    """Background worker that processes the webhook delivery queue."""
+    """Background worker that processes the webhook delivery queue.
+
+    Each worker manages its own HTTP client for connection pooling.
+    The client is created when the worker starts and closed when it stops,
+    ensuring no race conditions with concurrent tasks.
+    """
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self._running = False
         self._task: asyncio.Task | None = None
+        self._http_client: httpx.AsyncClient | None = None
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """Get or create the worker's HTTP client."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=self.settings.webhook_timeout,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            )
+        return self._http_client
+
+    async def _close_http_client(self) -> None:
+        """Close the worker's HTTP client safely."""
+        if self._http_client is not None:
+            client = self._http_client
+            self._http_client = None  # Clear reference first to prevent reuse
+            await client.aclose()
 
     async def _process_single_delivery(self, delivery_id: uuid.UUID) -> None:
         """Process a single delivery with its own database session.
@@ -187,6 +192,8 @@ class WebhookWorker:
         Each delivery gets its own session to avoid SQLAlchemy session
         sharing issues during concurrent processing.
         """
+        client = await self._get_http_client()
+
         async with async_session() as session:
             # Re-fetch the delivery in this session
             stmt = select(DeliveryLog).where(DeliveryLog.id == delivery_id)
@@ -197,7 +204,7 @@ class WebhookWorker:
                 logger.warning(f"Delivery {delivery_id} not found")
                 return
 
-            await process_delivery(delivery, self.settings, session)
+            await process_delivery(delivery, self.settings, session, client)
             await session.commit()
 
     async def process_batch(self) -> int:
@@ -245,15 +252,19 @@ class WebhookWorker:
         self._running = True
         logger.info(f"Webhook worker started (instance: {self.settings.instance_id})")
 
-        while self._running:
-            try:
-                processed = await self.process_batch()
-                if processed == 0:
-                    # No work available, wait before checking again
+        try:
+            while self._running:
+                try:
+                    processed = await self.process_batch()
+                    if processed == 0:
+                        # No work available, wait before checking again
+                        await asyncio.sleep(self.settings.worker_poll_interval)
+                except Exception:
+                    logger.exception("Error in webhook worker loop")
                     await asyncio.sleep(self.settings.worker_poll_interval)
-            except Exception:
-                logger.exception("Error in webhook worker loop")
-                await asyncio.sleep(self.settings.worker_poll_interval)
+        finally:
+            # Always clean up HTTP client when worker stops
+            await self._close_http_client()
 
         logger.info("Webhook worker stopped")
 
@@ -263,11 +274,21 @@ class WebhookWorker:
             self._task = asyncio.create_task(self.run())
 
     async def stop(self) -> None:
-        """Stop the worker and clean up resources."""
+        """Stop the worker gracefully.
+
+        Sets running flag to False and waits for current work to complete.
+        The HTTP client is closed in the run() finally block.
+        """
         self._running = False
         if self._task and not self._task.done():
-            self._task.cancel()
-        await close_http_client()
+            # Wait for graceful shutdown instead of cancelling
+            try:
+                await asyncio.wait_for(self._task, timeout=30.0)
+            except TimeoutError:
+                logger.warning("Worker did not stop gracefully, cancelling")
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
 
     async def wait(self) -> None:
         """Wait for the worker to finish."""

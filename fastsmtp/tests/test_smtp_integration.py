@@ -1,9 +1,8 @@
 """Integration tests for SMTP server.
 
-Tests the complete email flow: SMTP -> parse -> queue.
+Tests the complete email flow: SMTP -> parse -> database delivery queue.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosmtplib
@@ -11,8 +10,9 @@ import pytest
 import pytest_asyncio
 from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
-from fastsmtp.db.models import Domain, Recipient
+from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.smtp.server import FastSMTPHandler, SMTPServer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -37,10 +37,9 @@ class TestSMTPIntegration:
     @pytest_asyncio.fixture
     async def smtp_server(self, smtp_settings: Settings):
         """Start an actual SMTP server for testing."""
-        queue = asyncio.Queue()
-        server = SMTPServer(settings=smtp_settings, message_queue=queue)
+        server = SMTPServer(settings=smtp_settings)
         server.start()
-        yield server, queue
+        yield server
         server.stop()
 
     @pytest_asyncio.fixture
@@ -79,7 +78,7 @@ class TestSMTPIntegration:
         self, smtp_server, smtp_settings: Settings
     ):
         """Test that SMTP server starts and accepts connections."""
-        server, queue = smtp_server
+        server = smtp_server
 
         # Try to connect to the SMTP server
         smtp = aiosmtplib.SMTP(
@@ -100,7 +99,7 @@ class TestSMTPIntegration:
         self, smtp_server, smtp_settings: Settings
     ):
         """Test that EHLO returns server capabilities."""
-        server, queue = smtp_server
+        server = smtp_server
 
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
@@ -171,8 +170,7 @@ class TestFastSMTPHandlerIntegration:
         test_domain_with_recipient: Domain,
     ):
         """Test that handle_RCPT accepts valid recipients."""
-        queue = asyncio.Queue()
-        handler = FastSMTPHandler(test_settings, queue)
+        handler = FastSMTPHandler(test_settings)
 
         # Create mock SMTP objects
         server = MagicMock()
@@ -201,8 +199,7 @@ class TestFastSMTPHandlerIntegration:
         test_session: AsyncSession,
     ):
         """Test that handle_RCPT rejects unknown domains."""
-        queue = asyncio.Queue()
-        handler = FastSMTPHandler(test_settings, queue)
+        handler = FastSMTPHandler(test_settings)
 
         server = MagicMock()
         session = MagicMock()
@@ -230,8 +227,7 @@ class TestFastSMTPHandlerIntegration:
         test_session: AsyncSession,
     ):
         """Test that handle_RCPT rejects malformed addresses."""
-        queue = asyncio.Queue()
-        handler = FastSMTPHandler(test_settings, queue)
+        handler = FastSMTPHandler(test_settings)
 
         server = MagicMock()
         session = MagicMock()
@@ -252,15 +248,14 @@ class TestFastSMTPHandlerIntegration:
         assert "Invalid" in result
 
     @pytest.mark.asyncio
-    async def test_handle_data_queues_message(
+    async def test_handle_data_persists_to_database(
         self,
         test_settings: Settings,
         test_session: AsyncSession,
         test_domain_with_recipient: Domain,
     ):
-        """Test that handle_DATA queues valid messages."""
-        queue = asyncio.Queue()
-        handler = FastSMTPHandler(test_settings, queue)
+        """Test that handle_DATA persists deliveries to database."""
+        handler = FastSMTPHandler(test_settings)
 
         server = MagicMock()
         session = MagicMock()
@@ -279,15 +274,25 @@ Message-ID: <test-123@example.com>
 This is a test message body.
 """
 
-        result = await handler.handle_DATA(server, session, envelope)
+        with patch("fastsmtp.smtp.server.async_session") as mock_async_session:
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__.return_value = test_session
+            mock_ctx.__aexit__.return_value = None
+            mock_async_session.return_value = mock_ctx
+
+            result = await handler.handle_DATA(server, session, envelope)
 
         assert result == "250 Message accepted for delivery"
-        assert not queue.empty()
 
-        queued = await queue.get()
-        assert queued["message_id"] == "<test-123@example.com>"
-        assert queued["envelope"].mail_from == "sender@example.com"
-        assert "user@handler-test.com" in queued["envelope"].rcpt_tos
+        # Check that delivery was persisted
+        stmt = select(DeliveryLog).where(
+            DeliveryLog.message_id == "<test-123@example.com>"
+        )
+        db_result = await test_session.execute(stmt)
+        delivery = db_result.scalar_one_or_none()
+        assert delivery is not None
+        assert delivery.webhook_url == "https://webhook.example.com/handler"
+        assert delivery.status == "pending"
 
     @pytest.mark.asyncio
     async def test_handle_data_rejects_unparseable_message(
@@ -295,8 +300,7 @@ This is a test message body.
         test_settings: Settings,
     ):
         """Test that handle_DATA rejects unparseable messages."""
-        queue = asyncio.Queue()
-        handler = FastSMTPHandler(test_settings, queue)
+        handler = FastSMTPHandler(test_settings)
 
         server = MagicMock()
         session = MagicMock()
@@ -335,8 +339,7 @@ class TestSMTPLargeMessageHandling:
             smtp_verify_spf=False,
         )
 
-        queue = asyncio.Queue()
-        server = SMTPServer(settings=settings, message_queue=queue)
+        server = SMTPServer(settings=settings)
         server.start()
 
         try:
@@ -413,8 +416,7 @@ class TestSMTPSTARTTLS:
         if tls_settings is None:
             pytest.skip("TLS settings not available")
 
-        queue = asyncio.Queue()
-        server = SMTPServer(settings=tls_settings, message_queue=queue)
+        server = SMTPServer(settings=tls_settings)
         server.start()
 
         try:
@@ -432,8 +434,7 @@ class TestSMTPSTARTTLS:
         if tls_settings is None:
             pytest.skip("TLS settings not available")
 
-        queue = asyncio.Queue()
-        server = SMTPServer(settings=tls_settings, message_queue=queue)
+        server = SMTPServer(settings=tls_settings)
         server.start()
 
         try:
@@ -457,8 +458,7 @@ class TestSMTPSTARTTLS:
         if tls_settings is None:
             pytest.skip("TLS settings not available")
 
-        queue = asyncio.Queue()
-        server = SMTPServer(settings=tls_settings, message_queue=queue)
+        server = SMTPServer(settings=tls_settings)
         server.start()
 
         try:
@@ -510,8 +510,7 @@ class TestSMTPAuthSettings:
         self, strict_auth_settings: Settings
     ):
         """Test that server starts with strict auth settings."""
-        queue = asyncio.Queue()
-        server = SMTPServer(settings=strict_auth_settings, message_queue=queue)
+        server = SMTPServer(settings=strict_auth_settings)
         server.start()
 
         try:
@@ -539,8 +538,7 @@ class TestSMTPAuthSettings:
             smtp_reject_dkim_fail=True,
         )
 
-        queue = asyncio.Queue()
-        handler = FastSMTPHandler(settings, queue)
+        handler = FastSMTPHandler(settings)
 
         server = MagicMock()
         session = MagicMock()
@@ -575,7 +573,6 @@ Body.
 
         assert "550" in result
         assert "DKIM" in result
-        assert queue.empty()  # Message should not be queued
 
     @pytest.mark.asyncio
     async def test_handler_rejects_spf_fail_when_configured(self):
@@ -588,8 +585,7 @@ Body.
             smtp_reject_spf_fail=True,
         )
 
-        queue = asyncio.Queue()
-        handler = FastSMTPHandler(settings, queue)
+        handler = FastSMTPHandler(settings)
 
         server = MagicMock()
         session = MagicMock()
@@ -623,4 +619,3 @@ Body.
 
         assert "550" in result
         assert "SPF" in result
-        assert queue.empty()

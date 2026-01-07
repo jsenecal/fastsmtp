@@ -12,8 +12,6 @@ from fastsmtp.config import Settings
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.webhook.dispatcher import (
     WebhookWorker,
-    close_http_client,
-    get_http_client,
     process_delivery,
     send_webhook,
 )
@@ -155,44 +153,59 @@ class TestSendWebhook:
         assert call_kwargs["headers"]["Content-Type"] == "application/json"
 
 
-class TestHttpClientLifecycle:
-    """Tests for HTTP client management."""
+class TestWorkerHttpClientLifecycle:
+    """Tests for WebhookWorker HTTP client management."""
 
-    @pytest.fixture(autouse=True)
-    def reset_http_client(self):
-        """Reset the global HTTP client before and after each test."""
-        # Force reset the global client without trying to close it
-        # (it may be from a different event loop)
-        import fastsmtp.webhook.dispatcher as dispatcher
-
-        dispatcher._http_client = None
-        yield
-        # Just reset - don't try to close (may cause event loop issues)
-        dispatcher._http_client = None
+    @pytest.fixture
+    def test_settings(self) -> Settings:
+        """Create test settings."""
+        return Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            secret_key="test-secret",
+            webhook_timeout=5.0,
+        )
 
     @pytest.mark.asyncio
-    async def test_get_http_client_creates_client(self):
-        """Test that get_http_client creates a client."""
-        client = await get_http_client()
+    async def test_worker_creates_client_on_demand(self, test_settings: Settings):
+        """Test that worker creates HTTP client when needed."""
+        worker = WebhookWorker(settings=test_settings)
+        assert worker._http_client is None
+
+        client = await worker._get_http_client()
         assert client is not None
         assert isinstance(client, httpx.AsyncClient)
 
+        # Cleanup
+        await worker._close_http_client()
+
     @pytest.mark.asyncio
-    async def test_get_http_client_reuses_client(self):
-        """Test that get_http_client returns same client."""
-        client1 = await get_http_client()
-        client2 = await get_http_client()
+    async def test_worker_reuses_client(self, test_settings: Settings):
+        """Test that worker reuses the same HTTP client."""
+        worker = WebhookWorker(settings=test_settings)
+
+        client1 = await worker._get_http_client()
+        client2 = await worker._get_http_client()
         assert client1 is client2
 
+        # Cleanup
+        await worker._close_http_client()
+
     @pytest.mark.asyncio
-    async def test_close_http_client(self):
-        """Test that close_http_client closes and resets client."""
-        client1 = await get_http_client()
-        await close_http_client()
-        client2 = await get_http_client()
+    async def test_worker_close_client(self, test_settings: Settings):
+        """Test that worker closes client properly."""
+        worker = WebhookWorker(settings=test_settings)
+
+        client1 = await worker._get_http_client()
+        await worker._close_http_client()
 
         # After close, should get a new client
+        client2 = await worker._get_http_client()
         assert client1 is not client2
+        assert worker._http_client is client2
+
+        # Cleanup
+        await worker._close_http_client()
 
 
 class TestEnqueueDelivery:
