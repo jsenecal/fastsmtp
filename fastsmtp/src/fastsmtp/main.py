@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastsmtp import __version__
 from fastsmtp.api.router import api_router
 from fastsmtp.config import Settings, get_settings
-from fastsmtp.db.session import engine
+from fastsmtp.db.session import close_engine
+from fastsmtp.middleware import RequestLoggingMiddleware
 
 
 @asynccontextmanager
@@ -17,7 +18,7 @@ async def lifespan(app: FastAPI):
     # Startup
     yield
     # Shutdown
-    await engine.dispose()
+    await close_engine()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -39,6 +40,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Store settings on app state for access in routes
     app.state.settings = settings
+
+    # Add request logging middleware
+    app.add_middleware(RequestLoggingMiddleware)
 
     # Add CORS middleware only if origins are configured
     if settings.cors_origins:
