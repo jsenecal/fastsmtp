@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -12,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import DeliveryLog, Recipient
 from fastsmtp.db.session import async_session
+from fastsmtp.metrics.definitions import (
+    WEBHOOK_DELIVERIES_TOTAL,
+    WEBHOOK_DELIVERY_DURATION,
+)
 from fastsmtp.webhook.queue import get_pending_deliveries, mark_delivered, mark_failed
 from fastsmtp.webhook.url_validator import SSRFError, validate_webhook_url
 
@@ -133,6 +138,9 @@ async def process_delivery(
         if recipient and recipient.webhook_headers:
             headers = recipient.webhook_headers
 
+    # Track delivery duration
+    start_time = time.perf_counter()
+
     # Send the webhook
     success, status_code, error = await send_webhook(
         url=delivery.webhook_url,
@@ -141,9 +149,14 @@ async def process_delivery(
         request_timeout=settings.webhook_timeout,
     )
 
-    # Update delivery status
+    # Record delivery duration
+    duration = time.perf_counter() - start_time
+    WEBHOOK_DELIVERY_DURATION.observe(duration)
+
+    # Update delivery status and record metrics
     if success:
         await mark_delivered(session, delivery.id)
+        WEBHOOK_DELIVERIES_TOTAL.labels(status="delivered").inc()
     else:
         await mark_failed(
             session,
@@ -152,6 +165,11 @@ async def process_delivery(
             status_code,
             settings,
         )
+        # Check if this was the final attempt (exhausted)
+        if delivery.attempts + 1 >= settings.webhook_max_retries:
+            WEBHOOK_DELIVERIES_TOTAL.labels(status="exhausted").inc()
+        else:
+            WEBHOOK_DELIVERIES_TOTAL.labels(status="failed").inc()
 
 
 class WebhookWorker:

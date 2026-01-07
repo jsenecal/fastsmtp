@@ -2,13 +2,15 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from fastsmtp import __version__
 from fastsmtp.api.router import api_router
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.session import close_engine
+from fastsmtp.metrics import MetricsMiddleware
 from fastsmtp.middleware import RequestLoggingMiddleware
 
 
@@ -44,6 +46,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Add request logging middleware
     app.add_middleware(RequestLoggingMiddleware)
 
+    # Add Prometheus metrics middleware
+    app.add_middleware(MetricsMiddleware)
+
     # Add CORS middleware only if origins are configured
     if settings.cors_origins:
         # Don't allow credentials with wildcard origins (security risk)
@@ -58,6 +63,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Include API router
     app.include_router(api_router)
+
+    # Add Prometheus metrics endpoint at root level
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        """Expose Prometheus metrics."""
+        return Response(
+            content=generate_latest(),
+            media_type=CONTENT_TYPE_LATEST,
+        )
 
     return app
 

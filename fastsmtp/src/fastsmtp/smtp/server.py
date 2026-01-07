@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.db.session import async_session
+from fastsmtp.metrics.definitions import AUTH_RESULTS, SMTP_MESSAGE_SIZE, SMTP_MESSAGES_TOTAL
 from fastsmtp.smtp.validation import validate_email_auth
 
 logger = logging.getLogger(__name__)
@@ -109,17 +110,22 @@ class FastSMTPHandler:
         client_ip = session.peer[0] if session.peer else "unknown"
         mail_from = envelope.mail_from or ""
         helo = session.host_name or ""
+        message_size = len(envelope.content)
 
         logger.info(
             f"Received message from {mail_from} to {envelope.rcpt_tos} "
-            f"(client: {client_ip}, size: {len(envelope.content)} bytes)"
+            f"(client: {client_ip}, size: {message_size} bytes)"
         )
+
+        # Record message size metric
+        SMTP_MESSAGE_SIZE.observe(message_size)
 
         # Parse the message
         try:
             message = message_from_bytes(envelope.content)
         except Exception as e:
             logger.error(f"Failed to parse message: {e}")
+            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
             return "550 Failed to parse message"
 
         # Get Message-ID
@@ -139,14 +145,20 @@ class FastSMTPHandler:
             f"Message {message_id}: DKIM={auth_result.dkim_result}, SPF={auth_result.spf_result}"
         )
 
+        # Record authentication metrics
+        AUTH_RESULTS.labels(type="dkim", result=auth_result.dkim_result).inc()
+        AUTH_RESULTS.labels(type="spf", result=auth_result.spf_result).inc()
+
         # Check if we should reject based on auth results
         # This can be overridden per-domain, but we check global settings first
         if self.settings.smtp_reject_dkim_fail and auth_result.dkim_result == "fail":
             logger.warning(f"Rejecting message {message_id}: DKIM failed")
+            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
             return "550 DKIM verification failed"
 
         if self.settings.smtp_reject_spf_fail and auth_result.spf_result == "fail":
             logger.warning(f"Rejecting message {message_id}: SPF failed")
+            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
             return "550 SPF verification failed"
 
         # Queue the message for processing
@@ -162,6 +174,7 @@ class FastSMTPHandler:
         else:
             logger.warning(f"Message {message_id} received but no queue configured")
 
+        SMTP_MESSAGES_TOTAL.labels(result="accepted").inc()
         return "250 Message accepted for delivery"
 
 
