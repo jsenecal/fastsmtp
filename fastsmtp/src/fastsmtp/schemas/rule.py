@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 # Valid field names for rules
 RULE_FIELDS = {
@@ -104,6 +104,38 @@ class RuleBase(BaseModel):
         description="Tags to add when rule matches",
     )
 
+    @field_validator("field")
+    @classmethod
+    def validate_field(cls, v: str) -> str:
+        """Validate field name."""
+        if v in RULE_FIELDS:
+            return v
+        if v.startswith(RULE_HEADER_PREFIX):
+            header_name = v[len(RULE_HEADER_PREFIX) :]
+            if header_name:
+                return v
+            raise ValueError("Header name cannot be empty")
+        valid_fields = ", ".join(sorted(RULE_FIELDS)) + f", or {RULE_HEADER_PREFIX}X-Header"
+        raise ValueError(f"Invalid field '{v}'. Valid fields: {valid_fields}")
+
+    @field_validator("operator")
+    @classmethod
+    def validate_operator(cls, v: str) -> str:
+        """Validate operator."""
+        if v not in RULE_OPERATORS:
+            valid_ops = ", ".join(sorted(RULE_OPERATORS))
+            raise ValueError(f"Invalid operator '{v}'. Valid operators: {valid_ops}")
+        return v
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        """Validate action."""
+        if v not in RULE_ACTIONS:
+            valid_actions = ", ".join(sorted(RULE_ACTIONS))
+            raise ValueError(f"Invalid action '{v}'. Valid actions: {valid_actions}")
+        return v
+
 
 class RuleCreate(RuleBase):
     """Schema for creating a rule."""
@@ -121,6 +153,44 @@ class RuleUpdate(BaseModel):
     action: str | None = None
     webhook_url_override: HttpUrl | None = None
     add_tags: list[str] | None = None
+
+    @field_validator("field")
+    @classmethod
+    def validate_field(cls, v: str | None) -> str | None:
+        """Validate field name if provided."""
+        if v is None:
+            return v
+        if v in RULE_FIELDS:
+            return v
+        if v.startswith(RULE_HEADER_PREFIX):
+            header_name = v[len(RULE_HEADER_PREFIX) :]
+            if header_name:
+                return v
+            raise ValueError("Header name cannot be empty")
+        valid_fields = ", ".join(sorted(RULE_FIELDS)) + f", or {RULE_HEADER_PREFIX}X-Header"
+        raise ValueError(f"Invalid field '{v}'. Valid fields: {valid_fields}")
+
+    @field_validator("operator")
+    @classmethod
+    def validate_operator(cls, v: str | None) -> str | None:
+        """Validate operator if provided."""
+        if v is None:
+            return v
+        if v not in RULE_OPERATORS:
+            valid_ops = ", ".join(sorted(RULE_OPERATORS))
+            raise ValueError(f"Invalid operator '{v}'. Valid operators: {valid_ops}")
+        return v
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str | None) -> str | None:
+        """Validate action if provided."""
+        if v is None:
+            return v
+        if v not in RULE_ACTIONS:
+            valid_actions = ", ".join(sorted(RULE_ACTIONS))
+            raise ValueError(f"Invalid action '{v}'. Valid actions: {valid_actions}")
+        return v
 
 
 class RuleResponse(RuleBase):

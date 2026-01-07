@@ -156,9 +156,7 @@ async def verify_spf(client_ip: str, mail_from: str, helo: str) -> tuple[str, st
         Tuple of (result, domain)
     """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, partial(_verify_spf_sync, client_ip, mail_from, helo)
-    )
+    return await loop.run_in_executor(None, partial(_verify_spf_sync, client_ip, mail_from, helo))
 
 
 async def validate_email_auth(

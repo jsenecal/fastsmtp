@@ -176,6 +176,7 @@ class WebhookWorker:
             self._http_client = create_ssrf_safe_client(
                 timeout=self.settings.webhook_timeout,
                 limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                allowed_internal_domains=self.settings.webhook_allowed_internal_domains,
             )
         return self._http_client
 
@@ -231,10 +232,7 @@ class WebhookWorker:
         logger.debug(f"Processing {len(delivery_ids)} deliveries")
 
         # Process each delivery with its own session (safe for concurrent access)
-        tasks = [
-            self._process_single_delivery(delivery_id)
-            for delivery_id in delivery_ids
-        ]
+        tasks = [self._process_single_delivery(delivery_id) for delivery_id in delivery_ids]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Log any exceptions that occurred

@@ -137,6 +137,7 @@ async def mark_delivered(
             delivered_at=datetime.now(UTC),
             next_retry_at=None,
             last_error=None,
+            updated_at=datetime.now(UTC),  # Explicit update since onupdate doesn't trigger
         )
     )
     await session.execute(stmt)
@@ -165,6 +166,8 @@ async def mark_failed(
 
     new_attempts = delivery.attempts + 1
 
+    now = datetime.now(UTC)
+
     if new_attempts >= settings.webhook_max_retries:
         # Exhausted all retries
         update_stmt = (
@@ -176,13 +179,14 @@ async def mark_failed(
                 last_error=error,
                 last_status_code=status_code,
                 next_retry_at=None,
+                updated_at=now,  # Explicit update since onupdate doesn't trigger
             )
         )
         logger.warning(f"Delivery {delivery_id} exhausted after {new_attempts} attempts")
     else:
         # Calculate next retry with exponential backoff
         delay = settings.webhook_retry_base_delay * (2 ** (new_attempts - 1))
-        next_retry = datetime.now(UTC) + timedelta(seconds=delay)
+        next_retry = now + timedelta(seconds=delay)
 
         update_stmt = (
             update(DeliveryLog)
@@ -193,11 +197,11 @@ async def mark_failed(
                 last_error=error,
                 last_status_code=status_code,
                 next_retry_at=next_retry,
+                updated_at=now,  # Explicit update since onupdate doesn't trigger
             )
         )
         logger.info(
-            f"Delivery {delivery_id} failed (attempt {new_attempts}), "
-            f"next retry at {next_retry}"
+            f"Delivery {delivery_id} failed (attempt {new_attempts}), next retry at {next_retry}"
         )
 
     await session.execute(update_stmt)
@@ -229,12 +233,14 @@ async def retry_delivery(
         logger.warning(f"Cannot retry delivery {delivery_id} with status {delivery.status}")
         return delivery
 
+    now = datetime.now(UTC)
     update_stmt = (
         update(DeliveryLog)
         .where(DeliveryLog.id == delivery_id)
         .values(
             status=DeliveryStatus.PENDING,
-            next_retry_at=datetime.now(UTC),
+            next_retry_at=now,
+            updated_at=now,  # Explicit update since onupdate doesn't trigger
         )
     )
     await session.execute(update_stmt)

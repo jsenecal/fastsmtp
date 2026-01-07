@@ -585,9 +585,7 @@ def domain_add_member(
             session.add(member)
             await session.commit()
 
-            console.print(
-                f"[green]Added '{username}' to '{domain_name}' as {role}[/green]"
-            )
+            console.print(f"[green]Added '{username}' to '{domain_name}' as {role}[/green]")
 
     run_async(add())
 
@@ -629,9 +627,7 @@ def domain_remove_member(
             member_result = await session.execute(member_stmt)
             member = member_result.scalar_one_or_none()
             if not member:
-                console.print(
-                    f"[red]User '{username}' is not a member of '{domain_name}'[/red]"
-                )
+                console.print(f"[red]User '{username}' is not a member of '{domain_name}'[/red]")
                 raise typer.Exit(1)
 
             await session.delete(member)
@@ -648,7 +644,7 @@ def cleanup(
         False, "--dry-run", help="Show what would be deleted without actually deleting"
     ),
     older_than: str | None = typer.Option(
-        None, "--older-than", help="Override retention period (e.g., '30d', '6h')"
+        None, "--older-than", help="Override retention period in days (e.g., '30d')"
     ),
 ):
     """Clean up old delivery log records."""
@@ -663,7 +659,7 @@ def cleanup(
         retention_days = _parse_duration_to_days(older_than)
         if retention_days is None:
             console.print(f"[red]Invalid duration format: {older_than}[/red]")
-            console.print("Use format like '30d' (days) or '6h' (hours)")
+            console.print("Use format like '30d' (days)")
             raise typer.Exit(1)
 
     async def run_cleanup():
@@ -689,29 +685,19 @@ def cleanup(
 
 
 def _parse_duration_to_days(duration: str) -> int | None:
-    """Parse a duration string like '30d' or '6h' to days.
+    """Parse a duration string like '30d' to days.
 
+    Only accepts days format to avoid misleading conversions.
     Returns None if the format is invalid.
     """
     import re
 
-    match = re.match(r"^(\d+)([dhm])$", duration.lower())
+    match = re.match(r"^(\d+)d$", duration.lower())
     if not match:
         return None
 
     value = int(match.group(1))
-    unit = match.group(2)
-
-    if unit == "d":
-        return value
-    elif unit == "h":
-        # Convert hours to days (minimum 1 day if hours specified)
-        return max(1, value // 24) if value >= 24 else 1
-    elif unit == "m":
-        # Minutes - minimum 1 day
-        return 1
-
-    return None
+    return value if value > 0 else None
 
 
 if __name__ == "__main__":

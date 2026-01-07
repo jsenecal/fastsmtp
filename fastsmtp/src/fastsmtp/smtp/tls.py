@@ -40,9 +40,7 @@ def create_tls_context(
     context.options |= ssl.OP_NO_TLSv1_1
 
     # Set cipher suites (prefer modern ciphers)
-    context.set_ciphers(
-        "ECDHE+AESGCM:DHE+AESGCM:ECDHE+CHACHA20:DHE+CHACHA20:!aNULL:!MD5:!DSS"
-    )
+    context.set_ciphers("ECDHE+AESGCM:DHE+AESGCM:ECDHE+CHACHA20:DHE+CHACHA20:!aNULL:!MD5:!DSS")
 
     # Client certificate verification
     if require_client_cert:

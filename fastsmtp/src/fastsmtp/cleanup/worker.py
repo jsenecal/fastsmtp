@@ -58,15 +58,11 @@ class CleanupWorker:
 
                 result = await self.run_cleanup()
                 if result.deleted_count > 0:
-                    logger.info(
-                        f"Cleanup worker deleted {result.deleted_count} old delivery logs"
-                    )
+                    logger.info(f"Cleanup worker deleted {result.deleted_count} old delivery logs")
 
                 # If there are more records to delete, run again sooner
                 if result.has_more:
-                    logger.info(
-                        f"More records to delete, next run in {CATCHUP_INTERVAL_SECONDS}s"
-                    )
+                    logger.info(f"More records to delete, next run in {CATCHUP_INTERVAL_SECONDS}s")
                     await asyncio.sleep(CATCHUP_INTERVAL_SECONDS)
                 else:
                     # Normal interval

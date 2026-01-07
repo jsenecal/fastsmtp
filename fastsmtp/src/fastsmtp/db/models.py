@@ -4,7 +4,18 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, func, text
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -134,9 +145,7 @@ class Domain(Base, TimestampMixin, SoftDeleteMixin):
         primary_key=True,
         default=uuid.uuid4,
     )
-    domain_name: Mapped[str] = mapped_column(
-        String(255), unique=True, nullable=False, index=True
-    )
+    domain_name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     is_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
     verify_dkim: Mapped[bool | None] = mapped_column(nullable=True)
     verify_spf: Mapped[bool | None] = mapped_column(nullable=True)
@@ -209,9 +218,7 @@ class Recipient(Base, TimestampMixin, SoftDeleteMixin):
         nullable=False,
         index=True,
     )
-    local_part: Mapped[str | None] = mapped_column(
-        String(255), nullable=True
-    )  # NULL = catch-all
+    local_part: Mapped[str | None] = mapped_column(String(255), nullable=True)  # NULL = catch-all
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     webhook_headers: Mapped[dict] = mapped_column(default=dict)
     is_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)

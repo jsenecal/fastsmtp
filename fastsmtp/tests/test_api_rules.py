@@ -254,8 +254,10 @@ class TestRulesCRUD:
                 "action": "tag",
             },
         )
-        assert response.status_code == 400
-        assert "Invalid field" in response.json()["detail"]
+        assert response.status_code == 422
+        # Pydantic validation error format
+        detail = response.json()["detail"]
+        assert any("Invalid field" in err["msg"] for err in detail)
 
     @pytest.mark.asyncio
     async def test_create_rule_invalid_operator(
@@ -272,8 +274,10 @@ class TestRulesCRUD:
                 "action": "tag",
             },
         )
-        assert response.status_code == 400
-        assert "Invalid operator" in response.json()["detail"]
+        assert response.status_code == 422
+        # Pydantic validation error format
+        detail = response.json()["detail"]
+        assert any("Invalid operator" in err["msg"] for err in detail)
 
     @pytest.mark.asyncio
     async def test_create_rule_invalid_action(
@@ -290,8 +294,10 @@ class TestRulesCRUD:
                 "action": "invalid_action",
             },
         )
-        assert response.status_code == 400
-        assert "Invalid action" in response.json()["detail"]
+        assert response.status_code == 422
+        # Pydantic validation error format
+        detail = response.json()["detail"]
+        assert any("Invalid action" in err["msg"] for err in detail)
 
     @pytest.mark.asyncio
     async def test_create_multiple_rules_order(

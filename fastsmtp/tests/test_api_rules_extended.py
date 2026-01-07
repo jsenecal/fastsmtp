@@ -125,8 +125,10 @@ class TestRuleUpdateExtended:
             f"/api/v1/domains/{domain.id}/rules/{rule.id}",
             json={"field": "invalid_field"},
         )
-        assert response.status_code == 400
-        assert "Invalid field" in response.json()["detail"]
+        assert response.status_code == 422
+        # Pydantic validation error format
+        detail = response.json()["detail"]
+        assert any("Invalid field" in err["msg"] for err in detail)
 
     @pytest.mark.asyncio
     async def test_update_rule_operator_validation(
@@ -154,8 +156,10 @@ class TestRuleUpdateExtended:
             f"/api/v1/domains/{domain.id}/rules/{rule.id}",
             json={"operator": "invalid_operator"},
         )
-        assert response.status_code == 400
-        assert "Invalid operator" in response.json()["detail"]
+        assert response.status_code == 422
+        # Pydantic validation error format
+        detail = response.json()["detail"]
+        assert any("Invalid operator" in err["msg"] for err in detail)
 
     @pytest.mark.asyncio
     async def test_update_rule_action_validation(
@@ -183,8 +187,10 @@ class TestRuleUpdateExtended:
             f"/api/v1/domains/{domain.id}/rules/{rule.id}",
             json={"action": "invalid_action"},
         )
-        assert response.status_code == 400
-        assert "Invalid action" in response.json()["detail"]
+        assert response.status_code == 422
+        # Pydantic validation error format
+        detail = response.json()["detail"]
+        assert any("Invalid action" in err["msg"] for err in detail)
 
     @pytest.mark.asyncio
     async def test_update_rule_not_found(

@@ -122,9 +122,7 @@ def evaluate_rule(
         True if the rule matches. Also returns True if regex evaluation times out
         (fail-safe: treat timeout as a match to prevent rule bypass).
     """
-    field_value = extract_field_value(
-        rule.field, message, payload, auth_result, settings
-    )
+    field_value = extract_field_value(rule.field, message, payload, auth_result, settings)
 
     if field_value is None:
         logger.debug(f"Rule {rule.id}: field '{rule.field}' not found")
@@ -148,13 +146,9 @@ def evaluate_rule(
         return True
 
     if result:
-        logger.debug(
-            f"Rule {rule.id} matched: {rule.field} {rule.operator} '{rule.value}'"
-        )
+        logger.debug(f"Rule {rule.id} matched: {rule.field} {rule.operator} '{rule.value}'")
     else:
-        logger.debug(
-            f"Rule {rule.id} did not match: {rule.field} {rule.operator} '{rule.value}'"
-        )
+        logger.debug(f"Rule {rule.id} did not match: {rule.field} {rule.operator} '{rule.value}'")
 
     return result
 

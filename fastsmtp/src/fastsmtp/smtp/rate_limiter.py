@@ -60,17 +60,11 @@ class SMTPRateLimiter:
         self._window_seconds = 60.0
 
         # Track connections and messages per IP
-        self._connection_buckets: dict[str, RateLimitBucket] = defaultdict(
-            RateLimitBucket
-        )
-        self._message_buckets: dict[str, RateLimitBucket] = defaultdict(
-            RateLimitBucket
-        )
+        self._connection_buckets: dict[str, RateLimitBucket] = defaultdict(RateLimitBucket)
+        self._message_buckets: dict[str, RateLimitBucket] = defaultdict(RateLimitBucket)
         self._global_lock = Lock()
 
-    def _get_bucket(
-        self, buckets: dict[str, RateLimitBucket], key: str
-    ) -> RateLimitBucket:
+    def _get_bucket(self, buckets: dict[str, RateLimitBucket], key: str) -> RateLimitBucket:
         """Get or create a bucket for a key."""
         with self._global_lock:
             if key not in buckets:

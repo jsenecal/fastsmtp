@@ -65,6 +65,16 @@ class Settings(BaseSettings):
         description="Maximum attachment size to include in webhook payload (bytes). "
         "Attachments larger than this will only include metadata, not content.",
     )
+    webhook_max_payload_size: int = Field(
+        default=50 * 1024 * 1024,  # 50MB
+        description="Maximum total webhook payload size (bytes). "
+        "Payloads exceeding this will have body/attachments truncated.",
+    )
+    webhook_allowed_internal_domains: list[str] = Field(
+        default_factory=list,
+        description="Domains allowed to bypass SSRF protection (e.g., internal services). "
+        "Use sparingly and only for trusted internal services.",
+    )
 
     # Security
     root_api_key: SecretStr = Field(
@@ -78,9 +88,7 @@ class Settings(BaseSettings):
     )
 
     # K8s/Operations
-    instance_id: str = Field(
-        default_factory=lambda: os.getenv("HOSTNAME", uuid4().hex[:8])
-    )
+    instance_id: str = Field(default_factory=lambda: os.getenv("HOSTNAME", uuid4().hex[:8]))
 
     # Worker settings
     worker_poll_interval: float = 1.0

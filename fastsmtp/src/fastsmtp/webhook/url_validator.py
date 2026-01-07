@@ -123,9 +123,7 @@ def validate_webhook_url(url: str, resolve_dns: bool = True) -> None:
             for _family, _, _, _, sockaddr in addrinfo:
                 ip_str = str(sockaddr[0])
                 if is_ip_blocked(ip_str):
-                    raise SSRFError(
-                        f"Hostname '{hostname}' resolves to blocked IP '{ip_str}'"
-                    )
+                    raise SSRFError(f"Hostname '{hostname}' resolves to blocked IP '{ip_str}'")
         except socket.gaierror:
             # DNS resolution failed - this is okay, the request will fail later
             # We don't want to block URLs that might temporarily have DNS issues
@@ -156,6 +154,24 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
     a safe IP during validation but a malicious IP (e.g., 127.0.0.1) at connection time.
     """
 
+    def __init__(
+        self,
+        allowed_internal_domains: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        # Normalize allowed domains to lowercase for comparison
+        self._allowed_domains = {d.lower() for d in (allowed_internal_domains or [])}
+
+    def _is_domain_allowed(self, host: str) -> bool:
+        """Check if a domain is in the allowed internal domains list."""
+        host_lower = host.lower()
+        # Exact match or subdomain match
+        for allowed in self._allowed_domains:
+            if host_lower == allowed or host_lower.endswith("." + allowed):
+                return True
+        return False
+
     async def handle_async_request(self, request: httpcore.Request) -> httpcore.Response:
         """Handle request with IP validation at connection time."""
         host = request.url.host
@@ -165,6 +181,10 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
         # Decode host if bytes
         if isinstance(host, bytes):
             host = host.decode("ascii")
+
+        # Check if domain is in allowlist (bypass SSRF protection)
+        if self._is_domain_allowed(host):
+            return await super().handle_async_request(request)
 
         # Check blocked hostnames
         if host.lower() in BLOCKED_HOSTNAMES:
@@ -189,9 +209,7 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
                 for _family, _, _, _, sockaddr in addrinfo:
                     ip_str = str(sockaddr[0])
                     if is_ip_blocked(ip_str):
-                        raise SSRFError(
-                            f"Hostname '{host}' resolves to blocked IP '{ip_str}'"
-                        )
+                        raise SSRFError(f"Hostname '{host}' resolves to blocked IP '{ip_str}'")
             except socket.gaierror:
                 # Let the actual connection fail with proper error
                 pass
@@ -206,15 +224,23 @@ class SSRFSafeTransport(httpx.AsyncHTTPTransport):
     IP validation happens at connection time, not just at request time.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        allowed_internal_domains: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         # Replace the internal connection pool with our SSRF-safe version
-        self._pool = SSRFSafeAsyncConnectionPool(**kwargs)
+        self._pool = SSRFSafeAsyncConnectionPool(
+            allowed_internal_domains=allowed_internal_domains,
+            **kwargs,
+        )
 
 
 def create_ssrf_safe_client(
     timeout: float = 30.0,
     limits: httpx.Limits | None = None,
+    allowed_internal_domains: list[str] | None = None,
 ) -> httpx.AsyncClient:
     """Create an httpx client with SSRF protection at connection time.
 
@@ -225,11 +251,12 @@ def create_ssrf_safe_client(
     Args:
         timeout: Request timeout in seconds
         limits: Connection pool limits
+        allowed_internal_domains: Domains allowed to bypass SSRF protection
 
     Returns:
         httpx.AsyncClient configured with SSRF-safe transport
     """
-    transport = SSRFSafeTransport()
+    transport = SSRFSafeTransport(allowed_internal_domains=allowed_internal_domains)
     return httpx.AsyncClient(
         transport=transport,
         timeout=timeout,

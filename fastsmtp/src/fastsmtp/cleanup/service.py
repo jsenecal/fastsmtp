@@ -60,8 +60,10 @@ class DeliveryLogCleanupService:
         batch_delay_seconds = self.settings.delivery_log_cleanup_batch_delay_ms / 1000.0
 
         # Count total records to delete
-        count_stmt = select(func.count()).select_from(DeliveryLog).where(
-            DeliveryLog.created_at < cutoff_date
+        count_stmt = (
+            select(func.count())
+            .select_from(DeliveryLog)
+            .where(DeliveryLog.created_at < cutoff_date)
         )
         count_result = await self.session.execute(count_stmt)
         total_count = count_result.scalar() or 0
@@ -111,9 +113,7 @@ class DeliveryLogCleanupService:
         has_more = total_deleted >= max_per_run
 
         if has_more:
-            logger.info(
-                f"Deleted {total_deleted} delivery logs (limit reached, more remain)"
-            )
+            logger.info(f"Deleted {total_deleted} delivery logs (limit reached, more remain)")
         else:
             logger.info(f"Deleted {total_deleted} delivery logs older than {cutoff_date}")
 

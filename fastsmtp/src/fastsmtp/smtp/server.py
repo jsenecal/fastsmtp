@@ -116,9 +116,7 @@ class FastSMTPHandler:
         """Validate recipient address against configured domains."""
         # Check recipient limit per message
         if len(envelope.rcpt_tos) >= self.settings.smtp_rate_limit_recipients_per_message:
-            logger.warning(
-                f"Recipient limit exceeded: {len(envelope.rcpt_tos)} recipients"
-            )
+            logger.warning(f"Recipient limit exceeded: {len(envelope.rcpt_tos)} recipients")
             SMTP_RATE_LIMITED.labels(type="recipient").inc()
             return "452 Too many recipients"
 
@@ -278,9 +276,7 @@ class FastSMTPHandler:
                 domain, recipient, error = await lookup_recipient(rcpt_to, db_session)
 
                 if error or not domain or not recipient:
-                    logger.warning(
-                        f"Message {message_id}: skipping recipient {rcpt_to}: {error}"
-                    )
+                    logger.warning(f"Message {message_id}: skipping recipient {rcpt_to}: {error}")
                     continue
 
                 # Evaluate rules for this domain
@@ -294,9 +290,7 @@ class FastSMTPHandler:
 
                 # Check if message should be dropped
                 if rule_result.should_drop:
-                    logger.info(
-                        f"Message {message_id}: dropped for {rcpt_to} by rules"
-                    )
+                    logger.info(f"Message {message_id}: dropped for {rcpt_to} by rules")
                     continue
 
                 # Build recipient-specific payload
@@ -381,9 +375,7 @@ def extract_email_payload(
 
                 # Include base64-encoded content if within size limit
                 if isinstance(part_payload, bytes) and size <= max_attachment_size:
-                    attachment_info["content"] = base64.b64encode(part_payload).decode(
-                        "ascii"
-                    )
+                    attachment_info["content"] = base64.b64encode(part_payload).decode("ascii")
                     attachment_info["content_transfer_encoding"] = "base64"
 
                 attachments.append(attachment_info)
@@ -425,6 +417,62 @@ def extract_email_payload(
     payload["body_html"] = body_html
     payload["attachments"] = attachments
     payload["has_attachments"] = len(attachments) > 0
+
+    # Enforce maximum payload size
+    max_payload_size = settings.webhook_max_payload_size
+    payload = _enforce_payload_size_limit(payload, max_payload_size)
+
+    return payload
+
+
+def _enforce_payload_size_limit(payload: dict, max_size: int) -> dict:
+    """Enforce maximum payload size by truncating body and removing attachment content.
+
+    Args:
+        payload: The webhook payload dict
+        max_size: Maximum payload size in bytes
+
+    Returns:
+        Payload within size limits
+    """
+    import json
+
+    # Estimate current size (JSON serialization overhead)
+    current_size = len(json.dumps(payload, default=str))
+
+    if current_size <= max_size:
+        return payload
+
+    # First pass: remove attachment content (keep metadata)
+    for attachment in payload.get("attachments", []):
+        if "content" in attachment:
+            del attachment["content"]
+            if "content_transfer_encoding" in attachment:
+                del attachment["content_transfer_encoding"]
+
+    current_size = len(json.dumps(payload, default=str))
+    if current_size <= max_size:
+        logger.debug(f"Payload reduced to {current_size} bytes by removing attachment content")
+        return payload
+
+    # Second pass: truncate body text and html
+    excess = current_size - max_size
+    body_text = payload.get("body_text", "")
+    body_html = payload.get("body_html", "")
+
+    # Truncate bodies proportionally
+    total_body_len = len(body_text) + len(body_html)
+    if total_body_len > excess:
+        text_ratio = len(body_text) / total_body_len if total_body_len > 0 else 0.5
+        text_trim = int(excess * text_ratio)
+        html_trim = excess - text_trim
+
+        if len(body_text) > text_trim:
+            payload["body_text"] = body_text[: len(body_text) - text_trim] + "... [truncated]"
+        if len(body_html) > html_trim:
+            payload["body_html"] = body_html[: len(body_html) - html_trim] + "... [truncated]"
+
+        logger.debug(f"Payload body truncated to fit within {max_size} bytes")
 
     return payload
 
