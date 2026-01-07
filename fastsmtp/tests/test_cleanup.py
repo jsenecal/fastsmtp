@@ -1,9 +1,14 @@
 """Tests for delivery log cleanup functionality."""
 
 import os
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
+from fastsmtp.config import Settings
+from fastsmtp.db.models import DeliveryLog, Domain
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Set required environment variables before any imports
 os.environ.setdefault("FASTSMTP_ROOT_API_KEY", "test_root_api_key_12345")
@@ -92,3 +97,105 @@ class TestCleanupResult:
         )
 
         assert result.dry_run is True
+
+
+class TestDeliveryLogCleanupService:
+    """Tests for DeliveryLogCleanupService."""
+
+    @pytest_asyncio.fixture
+    async def test_domain(self, test_session: AsyncSession) -> Domain:
+        """Create a test domain."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="cleanup-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+        return domain
+
+    @pytest_asyncio.fixture
+    async def old_deliveries(
+        self, test_session: AsyncSession, test_domain: Domain
+    ) -> list[DeliveryLog]:
+        """Create old delivery logs (older than 90 days)."""
+        deliveries = []
+        old_date = datetime.now(UTC) - timedelta(days=100)
+
+        for i in range(5):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<old{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash="abc123",
+                payload={"index": i},
+                status="delivered",
+                attempts=1,
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+            deliveries.append(delivery)
+
+        await test_session.flush()
+
+        # Manually set created_at to old date (bypassing server_default)
+        for delivery in deliveries:
+            await test_session.execute(
+                DeliveryLog.__table__.update()
+                .where(DeliveryLog.id == delivery.id)
+                .values(created_at=old_date)
+            )
+        await test_session.commit()
+
+        return deliveries
+
+    @pytest_asyncio.fixture
+    async def recent_deliveries(
+        self, test_session: AsyncSession, test_domain: Domain
+    ) -> list[DeliveryLog]:
+        """Create recent delivery logs (within retention period)."""
+        deliveries = []
+
+        for i in range(3):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<recent{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash="def456",
+                payload={"index": i},
+                status="delivered",
+                attempts=1,
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+            deliveries.append(delivery)
+
+        await test_session.flush()
+        return deliveries
+
+    @pytest.mark.asyncio
+    async def test_cleanup_dry_run_counts_without_deleting(
+        self,
+        test_session: AsyncSession,
+        test_settings: Settings,
+        test_domain: Domain,
+        old_deliveries: list[DeliveryLog],
+        recent_deliveries: list[DeliveryLog],
+    ):
+        """Test dry run counts records but doesn't delete them."""
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
+        from sqlalchemy import select
+
+        service = DeliveryLogCleanupService(test_settings, test_session)
+        result = await service.cleanup(dry_run=True)
+
+        assert result.dry_run is True
+        assert result.deleted_count == 5  # Only old deliveries
+
+        # Verify nothing was actually deleted
+        stmt = select(DeliveryLog)
+        db_result = await test_session.execute(stmt)
+        all_deliveries = db_result.scalars().all()
+        assert len(all_deliveries) == 8  # 5 old + 3 recent
