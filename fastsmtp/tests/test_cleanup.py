@@ -305,3 +305,34 @@ class TestDeliveryLogCleanupService:
         db_result = await test_session.execute(stmt)
         remaining = db_result.scalars().all()
         assert len(remaining) == 2  # 10 and 20 days old
+
+
+from typer.testing import CliRunner
+
+runner = CliRunner()
+
+
+class TestCleanupCLI:
+    """Tests for cleanup CLI command."""
+
+    def test_cleanup_command_exists(self):
+        """Test cleanup command is registered."""
+        from fastsmtp.cli import app
+
+        result = runner.invoke(app, ["cleanup", "--help"])
+        assert result.exit_code == 0
+        assert "delivery log" in result.stdout.lower() or "cleanup" in result.stdout.lower()
+
+    def test_cleanup_dry_run_flag(self):
+        """Test --dry-run flag is available."""
+        from fastsmtp.cli import app
+
+        result = runner.invoke(app, ["cleanup", "--help"])
+        assert "--dry-run" in result.stdout
+
+    def test_cleanup_older_than_flag(self):
+        """Test --older-than flag is available."""
+        from fastsmtp.cli import app
+
+        result = runner.invoke(app, ["cleanup", "--help"])
+        assert "--older-than" in result.stdout

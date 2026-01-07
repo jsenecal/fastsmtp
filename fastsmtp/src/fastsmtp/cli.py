@@ -562,5 +562,77 @@ def domain_remove_member(
     run_async(remove())
 
 
+@app.command()
+def cleanup(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be deleted without actually deleting"
+    ),
+    older_than: str | None = typer.Option(
+        None, "--older-than", help="Override retention period (e.g., '30d', '6h')"
+    ),
+):
+    """Clean up old delivery log records."""
+    from fastsmtp.cleanup.service import DeliveryLogCleanupService
+    from fastsmtp.db.session import async_session
+
+    settings = get_settings()
+
+    # Parse older_than if provided
+    retention_days: int | None = None
+    if older_than:
+        retention_days = _parse_duration_to_days(older_than)
+        if retention_days is None:
+            console.print(f"[red]Invalid duration format: {older_than}[/red]")
+            console.print("Use format like '30d' (days) or '6h' (hours)")
+            raise typer.Exit(1)
+
+    async def run_cleanup():
+        async with async_session() as session:
+            service = DeliveryLogCleanupService(settings, session)
+            result = await service.cleanup(dry_run=dry_run, retention_days=retention_days)
+            return result
+
+    result = run_async(run_cleanup())
+
+    cutoff_str = result.cutoff_date.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    if dry_run:
+        console.print(
+            f"[yellow]Would delete {result.deleted_count} delivery log records "
+            f"older than {cutoff_str}[/yellow]"
+        )
+    else:
+        console.print(
+            f"[green]Deleted {result.deleted_count} delivery log records "
+            f"older than {cutoff_str}[/green]"
+        )
+
+
+def _parse_duration_to_days(duration: str) -> int | None:
+    """Parse a duration string like '30d' or '6h' to days.
+
+    Returns None if the format is invalid.
+    """
+    import re
+
+    match = re.match(r"^(\d+)([dhm])$", duration.lower())
+    if not match:
+        return None
+
+    value = int(match.group(1))
+    unit = match.group(2)
+
+    if unit == "d":
+        return value
+    elif unit == "h":
+        # Convert hours to days (minimum 1 day if hours specified)
+        return max(1, value // 24) if value >= 24 else 1
+    elif unit == "m":
+        # Minutes - minimum 1 day
+        return 1
+
+    return None
+
+
 if __name__ == "__main__":
     app()
