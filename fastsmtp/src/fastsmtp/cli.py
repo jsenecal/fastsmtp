@@ -81,6 +81,16 @@ def serve(
             worker.start()
             console.print("[green]Webhook worker started[/green]")
 
+            # Start cleanup worker (if enabled)
+            from fastsmtp.cleanup import CleanupWorker
+
+            cleanup_worker = CleanupWorker(settings)
+            cleanup_worker.start()
+            if settings.delivery_log_cleanup_enabled:
+                console.print(
+                    f"[green]Cleanup worker started (interval: {settings.delivery_log_cleanup_interval_hours}h)[/green]"
+                )
+
         if tasks:
             await asyncio.gather(*tasks)
 

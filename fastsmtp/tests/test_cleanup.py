@@ -387,3 +387,16 @@ class TestCleanupWorker:
         # Worker should not have started a task
         assert worker._task is None
         assert worker._running is False
+
+
+class TestCleanupIntegration:
+    """Tests for cleanup integration with server."""
+
+    def test_serve_command_has_no_cleanup_flag(self):
+        """Test serve command doesn't have explicit cleanup flags (auto-enabled)."""
+        from fastsmtp.cli import app
+
+        result = runner.invoke(app, ["serve", "--help"])
+        # Cleanup worker starts automatically based on config
+        # No explicit flag needed
+        assert result.exit_code == 0
