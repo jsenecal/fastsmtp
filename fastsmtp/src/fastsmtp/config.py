@@ -89,6 +89,24 @@ class Settings(BaseSettings):
         description="Timeout for regex matching in rules engine (ReDoS protection)",
     )
 
+    # Rate limiting (requires Redis)
+    redis_url: str | None = Field(
+        default=None,
+        description="Redis/Valkey URL for rate limiting (e.g., redis://localhost:6379/0)",
+    )
+    rate_limit_enabled: bool = Field(
+        default=True,
+        description="Enable rate limiting (requires redis_url to be set)",
+    )
+    rate_limit_requests_per_minute: int = Field(
+        default=100,
+        description="Maximum API requests per minute per API key",
+    )
+    rate_limit_auth_attempts_per_minute: int = Field(
+        default=5,
+        description="Maximum authentication attempts per minute per IP",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

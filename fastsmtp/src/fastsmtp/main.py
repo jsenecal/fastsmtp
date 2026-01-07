@@ -11,7 +11,7 @@ from fastsmtp.api.router import api_router
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.session import close_engine
 from fastsmtp.metrics import MetricsMiddleware
-from fastsmtp.middleware import RequestLoggingMiddleware
+from fastsmtp.middleware import RateLimitMiddleware, RequestLoggingMiddleware
 
 
 @asynccontextmanager
@@ -48,6 +48,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Add Prometheus metrics middleware
     app.add_middleware(MetricsMiddleware)
+
+    # Add rate limiting middleware (requires Redis)
+    if settings.redis_url and settings.rate_limit_enabled:
+        app.add_middleware(RateLimitMiddleware)
 
     # Add CORS middleware only if origins are configured
     if settings.cors_origins:
