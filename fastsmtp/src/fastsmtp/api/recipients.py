@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.db.models import Recipient
 from fastsmtp.db.session import get_session
+from fastsmtp.schemas.common import MessageResponse
 from fastsmtp.schemas.recipient import RecipientCreate, RecipientResponse, RecipientUpdate
 
 router = APIRouter(tags=["recipients"])
@@ -177,7 +178,7 @@ async def delete_recipient(
     recipient_id: uuid.UUID,
     auth: Auth,
     session: AsyncSession = Depends(get_session),
-) -> dict[str, str]:
+) -> MessageResponse:
     """Delete a recipient."""
     await get_domain_with_access(domain_id, auth, session, required_role="admin")
     auth.require_scope("recipients:write")
@@ -197,4 +198,4 @@ async def delete_recipient(
 
     pattern = recipient.local_part or "*"
     await session.delete(recipient)
-    return {"message": f"Recipient '{pattern}' deleted"}
+    return MessageResponse(message=f"Recipient '{pattern}' deleted")

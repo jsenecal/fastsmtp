@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.db.models import Rule, RuleSet
 from fastsmtp.db.session import get_session
+from fastsmtp.schemas.common import MessageResponse
 from fastsmtp.schemas.rule import (
     RULE_ACTIONS,
     RULE_FIELDS,
@@ -214,7 +215,7 @@ async def delete_ruleset(
     ruleset_id: uuid.UUID,
     auth: Auth,
     session: AsyncSession = Depends(get_session),
-) -> dict[str, str]:
+) -> MessageResponse:
     """Delete a ruleset and all its rules."""
     await get_domain_with_access(domain_id, auth, session, required_role="admin")
     auth.require_scope("rules:write")
@@ -234,7 +235,7 @@ async def delete_ruleset(
 
     name = ruleset.name
     await session.delete(ruleset)
-    return {"message": f"Ruleset '{name}' deleted"}
+    return MessageResponse(message=f"Ruleset '{name}' deleted")
 
 
 # Rule endpoints
@@ -357,7 +358,7 @@ async def delete_rule(
     rule_id: uuid.UUID,
     auth: Auth,
     session: AsyncSession = Depends(get_session),
-) -> dict[str, str]:
+) -> MessageResponse:
     """Delete a rule."""
     await get_domain_with_access(domain_id, auth, session, required_role="admin")
     auth.require_scope("rules:write")
@@ -380,7 +381,7 @@ async def delete_rule(
         )
 
     await session.delete(rule)
-    return {"message": "Rule deleted"}
+    return MessageResponse(message="Rule deleted")
 
 
 @router.post("/domains/{domain_id}/rulesets/{ruleset_id}/reorder")
@@ -390,7 +391,7 @@ async def reorder_rules(
     data: RuleReorderRequest,
     auth: Auth,
     session: AsyncSession = Depends(get_session),
-) -> dict[str, str]:
+) -> MessageResponse:
     """Reorder rules within a ruleset."""
     await get_domain_with_access(domain_id, auth, session, required_role="admin")
     auth.require_scope("rules:write")
@@ -432,4 +433,4 @@ async def reorder_rules(
         rules[rule_id].order = order
 
     await session.flush()
-    return {"message": f"Reordered {len(data.rule_ids)} rules"}
+    return MessageResponse(message=f"Reordered {len(data.rule_ids)} rules")
