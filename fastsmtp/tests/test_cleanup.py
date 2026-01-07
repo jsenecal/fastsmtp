@@ -1,14 +1,17 @@
 """Tests for delivery log cleanup functionality."""
 
+import asyncio
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 from fastsmtp.config import Settings
 from fastsmtp.db.models import DeliveryLog, Domain
 from sqlalchemy.ext.asyncio import AsyncSession
+from typer.testing import CliRunner
 
 # Set required environment variables before any imports
 os.environ.setdefault("FASTSMTP_ROOT_API_KEY", "test_root_api_key_12345")
@@ -307,8 +310,6 @@ class TestDeliveryLogCleanupService:
         assert len(remaining) == 2  # 10 and 20 days old
 
 
-from typer.testing import CliRunner
-
 runner = CliRunner()
 
 
@@ -336,3 +337,53 @@ class TestCleanupCLI:
 
         result = runner.invoke(app, ["cleanup", "--help"])
         assert "--older-than" in result.stdout
+
+
+class TestCleanupWorker:
+    """Tests for CleanupWorker background task."""
+
+    @pytest.mark.asyncio
+    async def test_worker_creation(self, test_settings: Settings):
+        """Test CleanupWorker can be created."""
+        from fastsmtp.cleanup.worker import CleanupWorker
+
+        worker = CleanupWorker(settings=test_settings)
+        assert worker.settings == test_settings
+        assert worker._running is False
+
+    @pytest.mark.asyncio
+    async def test_worker_start_stop(self, test_settings: Settings):
+        """Test worker start and stop lifecycle."""
+        from fastsmtp.cleanup.worker import CleanupWorker
+
+        worker = CleanupWorker(settings=test_settings)
+
+        # Mock the cleanup run to prevent actual DB operations
+        with patch.object(worker, "run_cleanup", new_callable=AsyncMock) as mock_cleanup:
+            mock_cleanup.return_value = None
+
+            worker.start()
+            assert worker._task is not None
+
+            await asyncio.sleep(0.05)
+            assert worker._running is True
+
+            await worker.stop()
+            assert worker._running is False
+
+    @pytest.mark.asyncio
+    async def test_worker_disabled_does_not_start(self):
+        """Test worker doesn't start when disabled."""
+        from fastsmtp.cleanup.worker import CleanupWorker
+
+        settings = Settings(
+            root_api_key="test123",
+            delivery_log_cleanup_enabled=False,
+        )
+
+        worker = CleanupWorker(settings=settings)
+        worker.start()
+
+        # Worker should not have started a task
+        assert worker._task is None
+        assert worker._running is False
