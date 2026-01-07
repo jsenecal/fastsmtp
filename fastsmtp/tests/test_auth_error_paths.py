@@ -24,6 +24,15 @@ def create_mock_settings(root_api_key: str = "root-key") -> MagicMock:
     return mock_settings
 
 
+def mock_scalars_result(api_keys: list) -> MagicMock:
+    """Create a mock result that returns api_keys via scalars().all()."""
+    mock_result = MagicMock()
+    mock_scalars = MagicMock()
+    mock_scalars.all.return_value = api_keys
+    mock_result.scalars.return_value = mock_scalars
+    return mock_result
+
+
 class TestMissingAPIKey:
     """Tests for missing API key header."""
 
@@ -71,10 +80,8 @@ class TestInvalidAPIKey:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Mock database query to return None (key not found)
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value = mock_result
+        # Mock database query to return empty list (no keys found)
+        mock_session.execute.return_value = mock_scalars_result([])
 
         with pytest.raises(HTTPException) as exc_info:
             await get_auth_context(
@@ -92,10 +99,8 @@ class TestInvalidAPIKey:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Mock database query to return None
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value = mock_result
+        # Mock database query to return empty list
+        mock_session.execute.return_value = mock_scalars_result([])
 
         with pytest.raises(HTTPException) as exc_info:
             await get_auth_context(
@@ -128,9 +133,7 @@ class TestInvalidAPIKey:
         mock_api_key.expires_at = None
         mock_api_key.user = mock_user
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_api_key
-        mock_session.execute.return_value = mock_result
+        mock_session.execute.return_value = mock_scalars_result([mock_api_key])
 
         # Try with a different key (wrong hash)
         wrong_key, _, _, _ = generate_api_key()
@@ -168,9 +171,7 @@ class TestInvalidAPIKey:
         mock_api_key.expires_at = None
         mock_api_key.user = mock_user
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_api_key
-        mock_session.execute.return_value = mock_result
+        mock_session.execute.return_value = mock_scalars_result([mock_api_key])
 
         # Try with a different key (wrong hash)
         wrong_key, _, _, _ = generate_api_key()
@@ -211,9 +212,7 @@ class TestInactiveAPIKey:
         mock_api_key.expires_at = None
         mock_api_key.user = mock_user
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_api_key
-        mock_session.execute.return_value = mock_result
+        mock_session.execute.return_value = mock_scalars_result([mock_api_key])
 
         with pytest.raises(HTTPException) as exc_info:
             await get_auth_context(
@@ -251,9 +250,7 @@ class TestExpiredAPIKey:
         mock_api_key.expires_at = datetime.now(UTC) - timedelta(days=1)  # Expired yesterday
         mock_api_key.user = mock_user
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_api_key
-        mock_session.execute.return_value = mock_result
+        mock_session.execute.return_value = mock_scalars_result([mock_api_key])
 
         with pytest.raises(HTTPException) as exc_info:
             await get_auth_context(
@@ -290,9 +287,7 @@ class TestExpiredAPIKey:
         mock_api_key.user = mock_user
         mock_api_key.scopes = []
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_api_key
-        mock_session.execute.return_value = mock_result
+        mock_session.execute.return_value = mock_scalars_result([mock_api_key])
 
         # Should not raise - key is still valid
         auth_context = await get_auth_context(
@@ -330,9 +325,7 @@ class TestExpiredAPIKey:
         mock_api_key.user = mock_user
         mock_api_key.scopes = ["domains:read", "domains:write"]
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_api_key
-        mock_session.execute.return_value = mock_result
+        mock_session.execute.return_value = mock_scalars_result([mock_api_key])
 
         # Should not raise - key is valid
         auth_context = await get_auth_context(
@@ -371,9 +364,7 @@ class TestInactiveUser:
         mock_api_key.expires_at = None
         mock_api_key.user = mock_user
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_api_key
-        mock_session.execute.return_value = mock_result
+        mock_session.execute.return_value = mock_scalars_result([mock_api_key])
 
         with pytest.raises(HTTPException) as exc_info:
             await get_auth_context(
@@ -432,9 +423,7 @@ class TestRootAPIKey:
 
         # Similar but different key should not authenticate as root
         # This also tests that timing-safe comparison is used (no early exit)
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value = mock_result
+        mock_session.execute.return_value = mock_scalars_result([])
 
         with pytest.raises(HTTPException) as exc_info:
             await get_auth_context(

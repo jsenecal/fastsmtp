@@ -19,7 +19,11 @@ from fastsmtp.metrics.definitions import (
     WEBHOOK_DELIVERY_DURATION,
 )
 from fastsmtp.webhook.queue import get_pending_deliveries, mark_delivered, mark_failed
-from fastsmtp.webhook.url_validator import SSRFError, validate_webhook_url
+from fastsmtp.webhook.url_validator import (
+    SSRFError,
+    create_ssrf_safe_client,
+    validate_webhook_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +69,7 @@ async def send_webhook(
     # Create a temporary client if none provided (for testing/one-off use)
     close_client = False
     if client is None:
-        client = httpx.AsyncClient(timeout=request_timeout)
+        client = create_ssrf_safe_client(timeout=request_timeout)
         close_client = True
 
     try:
@@ -171,9 +175,9 @@ class WebhookWorker:
         self._http_client: httpx.AsyncClient | None = None
 
     async def _get_http_client(self) -> httpx.AsyncClient:
-        """Get or create the worker's HTTP client."""
+        """Get or create the worker's HTTP client with SSRF protection."""
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(
+            self._http_client = create_ssrf_safe_client(
                 timeout=self.settings.webhook_timeout,
                 limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
             )

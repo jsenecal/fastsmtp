@@ -55,3 +55,16 @@ AUTH_RESULTS = Counter(
     "Email authentication results",
     ["type", "result"],  # type=dkim/spf, result=pass/fail/none
 )
+
+# Rules engine metrics
+RULES_REGEX_TIMEOUTS = Counter(
+    "fastsmtp_rules_regex_timeouts_total",
+    "Number of regex evaluations that timed out (potential ReDoS)",
+)
+
+# SMTP rate limiting metrics
+SMTP_RATE_LIMITED = Counter(
+    "fastsmtp_smtp_rate_limited_total",
+    "Number of SMTP requests rejected due to rate limiting",
+    ["type"],  # connection, message, recipient
+)

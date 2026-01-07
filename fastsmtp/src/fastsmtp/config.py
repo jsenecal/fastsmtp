@@ -93,7 +93,7 @@ class Settings(BaseSettings):
         description="Timeout for regex matching in rules engine (ReDoS protection)",
     )
 
-    # Rate limiting (requires Redis)
+    # Rate limiting (requires Redis for distributed)
     redis_url: str | None = Field(
         default=None,
         description="Redis/Valkey URL for rate limiting (e.g., redis://localhost:6379/0)",
@@ -109,6 +109,24 @@ class Settings(BaseSettings):
     rate_limit_auth_attempts_per_minute: int = Field(
         default=5,
         description="Maximum authentication attempts per minute per IP",
+    )
+
+    # SMTP Rate Limiting (in-memory, per-instance)
+    smtp_rate_limit_enabled: bool = Field(
+        default=True,
+        description="Enable SMTP rate limiting per client IP",
+    )
+    smtp_rate_limit_connections_per_minute: int = Field(
+        default=30,
+        description="Maximum SMTP connections per minute per IP",
+    )
+    smtp_rate_limit_messages_per_minute: int = Field(
+        default=60,
+        description="Maximum SMTP messages per minute per IP",
+    )
+    smtp_rate_limit_recipients_per_message: int = Field(
+        default=100,
+        description="Maximum recipients per SMTP message",
     )
 
 

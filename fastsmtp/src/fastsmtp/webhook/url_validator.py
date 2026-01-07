@@ -2,7 +2,11 @@
 
 import ipaddress
 import socket
+from typing import Any
 from urllib.parse import urlparse
+
+import httpcore
+import httpx
 
 # Private and reserved IP ranges that should be blocked
 BLOCKED_IP_RANGES = [
@@ -142,3 +146,89 @@ def is_url_safe(url: str, resolve_dns: bool = True) -> tuple[bool, str | None]:
         return True, None
     except (SSRFError, ValueError) as e:
         return False, str(e)
+
+
+class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
+    """Connection pool that validates resolved IPs to prevent DNS rebinding attacks.
+
+    This prevents TOCTOU (Time-Of-Check-Time-Of-Use) attacks where DNS returns
+    a safe IP during validation but a malicious IP (e.g., 127.0.0.1) at connection time.
+    """
+
+    async def handle_async_request(self, request: httpcore.Request) -> httpcore.Response:
+        """Handle request with IP validation at connection time."""
+        host = request.url.host
+        if host is None:
+            raise SSRFError("Request has no host")
+
+        # Decode host if bytes
+        if isinstance(host, bytes):
+            host = host.decode("ascii")
+
+        # Check blocked hostnames
+        if host.lower() in BLOCKED_HOSTNAMES:
+            raise SSRFError(f"Hostname '{host}' is blocked")
+
+        # Check if host is already an IP address
+        try:
+            ip = ipaddress.ip_address(host)
+            if is_ip_blocked(str(ip)):
+                raise SSRFError(f"IP address '{host}' is in a blocked range")
+        except ValueError:
+            # Not an IP, resolve DNS and validate
+            port = request.url.port or (443 if request.url.scheme == b"https" else 80)
+            try:
+                addrinfo = socket.getaddrinfo(
+                    host,
+                    port,
+                    proto=socket.IPPROTO_TCP,
+                )
+                for _family, _, _, _, sockaddr in addrinfo:
+                    ip_str = str(sockaddr[0])
+                    if is_ip_blocked(ip_str):
+                        raise SSRFError(
+                            f"Hostname '{host}' resolves to blocked IP '{ip_str}'"
+                        )
+            except socket.gaierror:
+                # Let the actual connection fail with proper error
+                pass
+
+        return await super().handle_async_request(request)
+
+
+class SSRFSafeTransport(httpx.AsyncHTTPTransport):
+    """HTTP transport that prevents SSRF via DNS rebinding attacks.
+
+    Use this transport when creating httpx.AsyncClient to ensure that
+    IP validation happens at connection time, not just at request time.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # Replace the internal connection pool with our SSRF-safe version
+        self._pool = SSRFSafeAsyncConnectionPool(**kwargs)
+
+
+def create_ssrf_safe_client(
+    timeout: float = 30.0,
+    limits: httpx.Limits | None = None,
+) -> httpx.AsyncClient:
+    """Create an httpx client with SSRF protection at connection time.
+
+    This client validates resolved IPs when connecting, preventing DNS rebinding
+    attacks where an attacker's DNS server returns different IPs between
+    validation and actual connection.
+
+    Args:
+        timeout: Request timeout in seconds
+        limits: Connection pool limits
+
+    Returns:
+        httpx.AsyncClient configured with SSRF-safe transport
+    """
+    transport = SSRFSafeTransport()
+    return httpx.AsyncClient(
+        transport=transport,
+        timeout=timeout,
+        limits=limits or httpx.Limits(max_connections=100, max_keepalive_connections=20),
+    )

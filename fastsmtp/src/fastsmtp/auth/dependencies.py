@@ -1,5 +1,6 @@
 """FastAPI authentication dependencies."""
 
+import hashlib
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from fastsmtp.auth.keys import (
+    PBKDF2_ITERATIONS,
     is_key_expired,
     verify_api_key,
     verify_api_key_salted,
@@ -163,6 +165,7 @@ async def get_auth_context(
 
     # Look up the API key in the database by prefix
     # We use prefix lookup because salted keys can't be looked up by hash directly
+    # Note: Multiple keys could theoretically have the same prefix, so we check all
     key_prefix = x_api_key[:12] if len(x_api_key) >= 12 else x_api_key
     stmt = (
         select(APIKey)
@@ -170,7 +173,39 @@ async def get_auth_context(
         .where(APIKey.key_prefix == key_prefix)
     )
     result = await session.execute(stmt)
-    api_key = result.scalar_one_or_none()
+    api_keys = result.scalars().all()
+
+    # SECURITY: Always perform a hash comparison to prevent timing attacks.
+    # If no keys found, we still do a dummy hash comparison to maintain constant time.
+    # This prevents attackers from enumerating valid prefixes by measuring response times.
+    api_key = None
+    if not api_keys:
+        # No keys with this prefix - perform dummy hash to maintain constant time
+        # Use a dummy salt and hash that will never match
+        dummy_salt = b"0" * 32
+        hashlib.pbkdf2_hmac(
+            "sha256",
+            x_api_key.encode("utf-8"),
+            dummy_salt,
+            iterations=PBKDF2_ITERATIONS,
+        )
+    else:
+        # Check each key with matching prefix (handles prefix collisions)
+        for candidate_key in api_keys:
+            if candidate_key.is_salted and candidate_key.key_salt is not None:
+                if verify_api_key_salted(
+                    x_api_key, candidate_key.key_hash, candidate_key.key_salt
+                ):
+                    api_key = candidate_key
+                    break
+            else:
+                if verify_api_key(
+                    x_api_key,
+                    candidate_key.key_hash,
+                    settings.api_key_hash_algorithm,
+                ):
+                    api_key = candidate_key
+                    break
 
     if not api_key:
         raise HTTPException(
@@ -178,24 +213,6 @@ async def get_auth_context(
             detail="Invalid API key",
             headers={"WWW-Authenticate": "ApiKey"},
         )
-
-    # Verify the key hash (supports both salted and legacy unsalted keys)
-    if api_key.is_salted and api_key.key_salt is not None:
-        # New salted key verification
-        if not verify_api_key_salted(x_api_key, api_key.key_hash, api_key.key_salt):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-                headers={"WWW-Authenticate": "ApiKey"},
-            )
-    else:
-        # Legacy unsalted key verification
-        if not verify_api_key(x_api_key, api_key.key_hash, settings.api_key_hash_algorithm):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key",
-                headers={"WWW-Authenticate": "ApiKey"},
-            )
 
     if not api_key.is_active:
         raise HTTPException(

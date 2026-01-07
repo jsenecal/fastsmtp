@@ -14,7 +14,13 @@ from sqlalchemy.orm import selectinload
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.db.session import async_session
-from fastsmtp.metrics.definitions import AUTH_RESULTS, SMTP_MESSAGE_SIZE, SMTP_MESSAGES_TOTAL
+from fastsmtp.metrics.definitions import (
+    AUTH_RESULTS,
+    SMTP_MESSAGE_SIZE,
+    SMTP_MESSAGES_TOTAL,
+    SMTP_RATE_LIMITED,
+)
+from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import EmailAuthResult, validate_email_auth
 
 logger = logging.getLogger(__name__)
@@ -98,6 +104,14 @@ class FastSMTPHandler:
         rcpt_options: list[str],
     ) -> str:
         """Validate recipient address against configured domains."""
+        # Check recipient limit per message
+        if len(envelope.rcpt_tos) >= self.settings.smtp_rate_limit_recipients_per_message:
+            logger.warning(
+                f"Recipient limit exceeded: {len(envelope.rcpt_tos)} recipients"
+            )
+            SMTP_RATE_LIMITED.labels(type="recipient").inc()
+            return "452 Too many recipients"
+
         async with async_session() as db_session:
             domain, recipient, error = await lookup_recipient(address, db_session)
 
@@ -123,6 +137,14 @@ class FastSMTPHandler:
         client_ip = session.peer[0] if session.peer else "unknown"
         mail_from = envelope.mail_from or ""
         helo = session.host_name or ""
+
+        # Check rate limit for messages
+        rate_limiter = get_smtp_rate_limiter()
+        allowed, error = rate_limiter.check_message(client_ip)
+        if not allowed:
+            logger.warning(f"Rate limit exceeded for {client_ip}: {error}")
+            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
+            return f"421 {error}"
 
         # Ensure content is bytes
         content = envelope.content
