@@ -108,7 +108,20 @@ class Settings(BaseSettings):
     )
 
 
-@lru_cache
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Get cached settings instance."""
+    """Get cached settings instance.
+
+    Settings are cached after first load. Use clear_settings_cache()
+    to reload settings (e.g., in tests or after environment changes).
+    """
     return Settings()
+
+
+def clear_settings_cache() -> None:
+    """Clear the settings cache.
+
+    Call this to force settings to be reloaded on the next get_settings() call.
+    Useful in tests to ensure test isolation or when environment variables change.
+    """
+    get_settings.cache_clear()
