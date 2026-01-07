@@ -79,6 +79,37 @@ class TestMatchers:
         for op in expected_operators:
             assert op in MATCHERS
 
+    def test_match_regex_redos_protection(self, monkeypatch):
+        """Test that regex matching times out on ReDoS patterns.
+
+        This test uses a pattern known to cause catastrophic backtracking
+        and verifies the timeout protection works correctly.
+        """
+        # Set a very short timeout for testing
+        from fastsmtp.config import Settings
+
+        def mock_settings():
+            return Settings(
+                root_api_key="test123",
+                regex_timeout_seconds=0.1,  # 100ms timeout
+            )
+
+        monkeypatch.setattr("fastsmtp.rules.conditions.get_settings", mock_settings)
+
+        # Clear the executor cache to use new settings
+        import fastsmtp.rules.conditions as conditions
+
+        conditions._regex_executor = None
+
+        # A classic ReDoS pattern: catastrophic backtracking
+        evil_pattern = r"(a+)+b"
+        # Input that causes exponential backtracking
+        evil_input = "a" * 30  # No 'b' at end causes backtracking
+
+        # Should timeout and return False instead of hanging
+        result = match_regex(evil_input, evil_pattern)
+        assert result is False  # Times out or doesn't match
+
 
 class TestEvaluateCondition:
     """Tests for the evaluate_condition function."""

@@ -1,7 +1,21 @@
 """Rule condition matchers."""
 
+import concurrent.futures
 import re
 from typing import Any
+
+from fastsmtp.config import get_settings
+
+# Thread pool for regex timeout (ReDoS protection)
+_regex_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_regex_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Get or create the regex thread pool executor."""
+    global _regex_executor
+    if _regex_executor is None:
+        _regex_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    return _regex_executor
 
 
 def match_equals(value: str, pattern: str, case_sensitive: bool = False) -> bool:
@@ -32,12 +46,29 @@ def match_ends_with(value: str, pattern: str, case_sensitive: bool = False) -> b
     return value.endswith(pattern)
 
 
+def _regex_search(pattern: str, value: str, flags: int) -> bool:
+    """Execute regex search (runs in thread for timeout support)."""
+    return bool(re.search(pattern, value, flags))
+
+
 def match_regex(value: str, pattern: str, case_sensitive: bool = False) -> bool:
-    """Match if value matches regex pattern."""
+    """Match if value matches regex pattern.
+
+    Uses a thread-based timeout to protect against ReDoS attacks.
+    """
     flags = 0 if case_sensitive else re.IGNORECASE
+    settings = get_settings()
+
     try:
-        return bool(re.search(pattern, value, flags))
+        # Use thread pool with timeout for ReDoS protection
+        executor = _get_regex_executor()
+        future = executor.submit(_regex_search, pattern, value, flags)
+        return future.result(timeout=settings.regex_timeout_seconds)
+    except concurrent.futures.TimeoutError:
+        # Regex took too long - potential ReDoS attack
+        return False
     except re.error:
+        # Invalid regex pattern
         return False
 
 

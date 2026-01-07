@@ -32,7 +32,7 @@ app.add_typer(domain_app, name="domain")
 
 def run_async(coro):
     """Run an async function synchronously."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 @app.command()

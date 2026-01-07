@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     delivery_log_cleanup_enabled: bool = True
     delivery_log_cleanup_batch_size: int = 1000
 
+    # Rules engine
+    regex_timeout_seconds: float = Field(
+        default=1.0,
+        description="Timeout for regex matching in rules engine (ReDoS protection)",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:
