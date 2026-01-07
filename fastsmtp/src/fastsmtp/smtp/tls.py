@@ -1,12 +1,112 @@
 """TLS support for SMTP server."""
 
+import asyncio
+import contextlib
 import logging
+import os
 import ssl
 from pathlib import Path
 
 from fastsmtp.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+class TLSContextManager:
+    """Manages TLS context with optional hot-reload support.
+
+    When hot-reload is enabled, monitors certificate files for changes
+    and automatically reloads the TLS context.
+    """
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self._context: ssl.SSLContext | None = None
+        self._cert_mtime: float = 0
+        self._key_mtime: float = 0
+        self._running = False
+        self._task: asyncio.Task | None = None
+
+    @property
+    def context(self) -> ssl.SSLContext | None:
+        """Get the current TLS context."""
+        return self._context
+
+    def _get_file_mtimes(self) -> tuple[float, float]:
+        """Get modification times for cert and key files."""
+        cert_path = self.settings.smtp_tls_cert
+        key_path = self.settings.smtp_tls_key
+
+        cert_mtime = 0.0
+        key_mtime = 0.0
+
+        if cert_path and cert_path.exists():
+            cert_mtime = os.path.getmtime(cert_path)
+        if key_path and key_path.exists():
+            key_mtime = os.path.getmtime(key_path)
+
+        return cert_mtime, key_mtime
+
+    def _files_changed(self) -> bool:
+        """Check if certificate files have changed."""
+        cert_mtime, key_mtime = self._get_file_mtimes()
+        return cert_mtime != self._cert_mtime or key_mtime != self._key_mtime
+
+    def load_context(self) -> ssl.SSLContext | None:
+        """Load or reload the TLS context.
+
+        Returns:
+            SSL context if successful, None otherwise
+        """
+        context = get_tls_context_from_settings(self.settings)
+        if context:
+            self._context = context
+            self._cert_mtime, self._key_mtime = self._get_file_mtimes()
+            logger.info("TLS context loaded successfully")
+        return context
+
+    async def _monitor_loop(self) -> None:
+        """Background loop that monitors certificate files for changes."""
+        interval = self.settings.smtp_tls_reload_interval
+        logger.info(f"TLS hot-reload enabled, checking every {interval}s")
+
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+                if self._files_changed():
+                    logger.info("TLS certificate files changed, reloading...")
+                    new_context = get_tls_context_from_settings(self.settings)
+                    if new_context:
+                        self._context = new_context
+                        self._cert_mtime, self._key_mtime = self._get_file_mtimes()
+                        logger.info("TLS context reloaded successfully")
+                    else:
+                        logger.error("Failed to reload TLS context, keeping old context")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Error in TLS hot-reload monitor")
+
+        logger.info("TLS hot-reload monitor stopped")
+
+    def start_hot_reload(self) -> None:
+        """Start the hot-reload monitor if enabled."""
+        if not self.settings.smtp_tls_hot_reload:
+            return
+        if not self.settings.smtp_tls_cert or not self.settings.smtp_tls_key:
+            logger.debug("TLS hot-reload not started - no TLS configured")
+            return
+
+        self._running = True
+        self._task = asyncio.create_task(self._monitor_loop())
+
+    async def stop_hot_reload(self) -> None:
+        """Stop the hot-reload monitor."""
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
 
 
 def create_tls_context(

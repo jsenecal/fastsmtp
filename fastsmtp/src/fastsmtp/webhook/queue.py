@@ -1,10 +1,12 @@
 """Database-backed webhook delivery queue."""
 
+import asyncio
 import hashlib
 import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +17,99 @@ from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import DeliveryLog
 from fastsmtp.smtp.validation import EmailAuthResult
 
+if TYPE_CHECKING:
+    pass
+
 logger = logging.getLogger(__name__)
+
+
+async def _send_dlq_notification(
+    delivery: DeliveryLog,
+    settings: Settings,
+) -> None:
+    """Send a dead letter queue notification for an exhausted delivery.
+
+    This is fire-and-forget - failures are logged but don't affect the main flow.
+    """
+    if not settings.dlq_webhook_url:
+        return
+
+    # Import here to avoid circular imports
+    from fastsmtp.webhook.dispatcher import send_webhook
+    from fastsmtp.webhook.url_validator import create_ssrf_safe_client
+
+    dlq_payload = {
+        "event": "delivery.exhausted",
+        "delivery_id": str(delivery.id),
+        "message_id": delivery.message_id,
+        "domain_id": str(delivery.domain_id) if delivery.domain_id else None,
+        "webhook_url": delivery.webhook_url,
+        "attempts": delivery.attempts,
+        "last_error": delivery.last_error,
+        "last_status_code": delivery.last_status_code,
+        "created_at": delivery.created_at.isoformat() if delivery.created_at else None,
+        "exhausted_at": datetime.now(UTC).isoformat(),
+    }
+
+    try:
+        async with create_ssrf_safe_client(
+            timeout=10.0,
+            allowed_internal_domains=settings.webhook_allowed_internal_domains,
+        ) as client:
+            success, status_code, error = await send_webhook(
+                url=settings.dlq_webhook_url,
+                payload=dlq_payload,
+                headers={"X-FastSMTP-Event": "dlq"},
+                request_timeout=10.0,
+                client=client,
+                validate_url=True,
+            )
+            if success:
+                logger.info(f"DLQ notification sent for delivery {delivery.id}")
+            else:
+                logger.warning(
+                    f"DLQ notification failed for delivery {delivery.id}: "
+                    f"status={status_code}, error={error}"
+                )
+    except Exception:
+        logger.exception(f"Failed to send DLQ notification for delivery {delivery.id}")
+
+
+async def get_pending_count(session: AsyncSession) -> int:
+    """Get the count of pending and failed (retry) deliveries.
+
+    Used for backpressure checking.
+    """
+    from sqlalchemy import func
+
+    stmt = select(func.count(DeliveryLog.id)).where(
+        DeliveryLog.status.in_([DeliveryStatus.PENDING, DeliveryStatus.FAILED])
+    )
+    result = await session.execute(stmt)
+    return result.scalar() or 0
+
+
+async def check_queue_backpressure(
+    session: AsyncSession,
+    settings: Settings | None = None,
+) -> tuple[bool, int]:
+    """Check if the delivery queue is under backpressure.
+
+    Args:
+        session: Database session
+        settings: Application settings
+
+    Returns:
+        Tuple of (is_backpressured, current_count)
+    """
+    settings = settings or get_settings()
+
+    # No limit configured = no backpressure
+    if settings.queue_max_pending is None:
+        return False, 0
+
+    count = await get_pending_count(session)
+    return count >= settings.queue_max_pending, count
 
 
 def compute_payload_hash(payload: dict) -> str:
@@ -168,7 +262,9 @@ async def mark_failed(
 
     now = datetime.now(UTC)
 
-    if new_attempts >= settings.webhook_max_retries:
+    is_exhausted = new_attempts >= settings.webhook_max_retries
+
+    if is_exhausted:
         # Exhausted all retries
         update_stmt = (
             update(DeliveryLog)
@@ -206,6 +302,15 @@ async def mark_failed(
 
     await session.execute(update_stmt)
     await session.flush()
+
+    # Send DLQ notification for exhausted deliveries (fire-and-forget)
+    if is_exhausted and settings.dlq_webhook_url:
+        # Update delivery object with new values for notification
+        delivery.attempts = new_attempts
+        delivery.last_error = error
+        delivery.last_status_code = status_code
+        # Schedule as background task to not block the main flow
+        asyncio.create_task(_send_dlq_notification(delivery, settings))
 
 
 async def retry_delivery(

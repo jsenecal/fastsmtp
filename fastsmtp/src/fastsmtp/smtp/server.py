@@ -1,12 +1,17 @@
 """SMTP server implementation using aiosmtpd."""
 
+import asyncio
 import base64
 import logging
 import uuid
 from email import message_from_bytes
 from email.message import Message
+from typing import TYPE_CHECKING
 
 import idna
+
+if TYPE_CHECKING:
+    from fastsmtp.smtp.tls import TLSContextManager
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import SMTP, Envelope, Session
 from sqlalchemy import select
@@ -153,6 +158,27 @@ class FastSMTPHandler:
             logger.warning(f"Rate limit exceeded for {client_ip}: {error}")
             SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
             return f"421 {error}"
+
+        # Check queue backpressure
+        from fastsmtp.webhook.queue import check_queue_backpressure
+
+        async with async_session() as db_session:
+            is_backpressured, queue_count = await check_queue_backpressure(
+                db_session, self.settings
+            )
+        if is_backpressured:
+            logger.warning(
+                f"Queue backpressure triggered: {queue_count} pending deliveries "
+                f"(max: {self.settings.queue_max_pending})"
+            )
+            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
+            if self.settings.queue_backpressure_action == "drop":
+                # Accept but don't process - log for monitoring
+                logger.info(f"Dropping message from {mail_from} due to backpressure")
+                return "250 OK (backpressure: message dropped)"
+            else:
+                # Reject with temporary error so sender can retry
+                return "451 Service temporarily unavailable - queue full, try again later"
 
         # Ensure content is bytes
         content = envelope.content
@@ -493,10 +519,61 @@ class SMTPServer:
         self.handler = FastSMTPHandler(self.settings)
         self.controller: Controller | None = None
         self.tls_controller: Controller | None = None
+        self._tls_manager: TLSContextManager | None = None
+        self._hot_reload_task: asyncio.Task | None = None
+
+    def _restart_tls_controller(self) -> None:
+        """Restart the TLS controller with a new context."""
+        if not self._tls_manager or not self._tls_manager.context:
+            return
+
+        # Stop existing TLS controller
+        if self.tls_controller:
+            self.tls_controller.stop()
+            logger.info("SMTP TLS server stopped for reload")
+
+        # Start new TLS controller with updated context
+        self.tls_controller = Controller(
+            self.handler,
+            hostname=self.settings.smtp_host,
+            port=self.settings.smtp_tls_port,
+            ssl_context=self._tls_manager.context,
+            data_size_limit=self.settings.smtp_max_message_size,
+        )
+        self.tls_controller.start()
+        logger.info(
+            f"SMTP TLS server restarted on "
+            f"{self.settings.smtp_host}:{self.settings.smtp_tls_port}"
+        )
+
+    async def _tls_hot_reload_loop(self) -> None:
+        """Monitor TLS certificates and restart controller on changes."""
+        if not self._tls_manager:
+            return
+
+        interval = self.settings.smtp_tls_reload_interval
+        logger.info(f"TLS hot-reload enabled, checking every {interval}s")
+
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                if self._tls_manager._files_changed():
+                    logger.info("TLS certificate files changed, reloading...")
+                    new_context = self._tls_manager.load_context()
+                    if new_context:
+                        self._restart_tls_controller()
+                    else:
+                        logger.error("Failed to reload TLS context, keeping old config")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Error in TLS hot-reload loop")
+
+        logger.info("TLS hot-reload monitor stopped")
 
     def start(self) -> None:
         """Start the SMTP server(s)."""
-        from fastsmtp.smtp.tls import get_tls_context_from_settings
+        from fastsmtp.smtp.tls import TLSContextManager
 
         # Start plain SMTP server
         self.controller = Controller(
@@ -513,7 +590,8 @@ class SMTPServer:
         )
 
         # Start TLS SMTP server if configured
-        tls_context = get_tls_context_from_settings(self.settings)
+        self._tls_manager = TLSContextManager(self.settings)
+        tls_context = self._tls_manager.load_context()
         if tls_context:
             self.tls_controller = Controller(
                 self.handler,
@@ -532,8 +610,16 @@ class SMTPServer:
             if self.settings.smtp_require_starttls:
                 logger.info("STARTTLS required for plain SMTP connections")
 
+            # Start hot-reload monitoring if enabled
+            if self.settings.smtp_tls_hot_reload:
+                self._hot_reload_task = asyncio.create_task(self._tls_hot_reload_loop())
+
     def stop(self) -> None:
         """Stop the SMTP server(s)."""
+        # Stop hot-reload task
+        if self._hot_reload_task and not self._hot_reload_task.done():
+            self._hot_reload_task.cancel()
+
         if self.controller:
             self.controller.stop()
             logger.info("SMTP server stopped")

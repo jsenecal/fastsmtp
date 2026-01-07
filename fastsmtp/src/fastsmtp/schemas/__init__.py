@@ -1,6 +1,12 @@
 """Pydantic schemas for API request/response models."""
 
-from fastsmtp.schemas.common import ErrorResponse, HealthResponse, MessageResponse, ReadyResponse
+from fastsmtp.schemas.common import (
+    ErrorResponse,
+    HealthResponse,
+    MessageResponse,
+    QueueStats,
+    ReadyResponse,
+)
 from fastsmtp.schemas.domain import (
     DomainBase,
     DomainBriefResponse,
@@ -70,6 +76,7 @@ __all__ = [
     "MemberResponse",
     "MemberUpdate",
     "MessageResponse",
+    "QueueStats",
     "ReadyResponse",
     "RecipientBase",
     "RecipientCreate",

@@ -30,6 +30,14 @@ class Settings(BaseSettings):
         default=10 * 1024 * 1024,  # 10MB
         description="Maximum email message size in bytes",
     )
+    smtp_tls_hot_reload: bool = Field(
+        default=False,
+        description="Enable automatic TLS certificate reload when files change.",
+    )
+    smtp_tls_reload_interval: int = Field(
+        default=300,
+        description="Interval (seconds) to check for TLS certificate changes. Default 5 minutes.",
+    )
 
     # Email authentication
     smtp_verify_dkim: bool = True
@@ -74,6 +82,25 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Domains allowed to bypass SSRF protection (e.g., internal services). "
         "Use sparingly and only for trusted internal services.",
+    )
+
+    # Dead Letter Queue
+    dlq_webhook_url: str | None = Field(
+        default=None,
+        description="Webhook URL to notify when deliveries are exhausted (dead letter queue). "
+        "Receives JSON payload with delivery details for alerting/monitoring.",
+    )
+
+    # Queue Backpressure
+    queue_max_pending: int | None = Field(
+        default=None,
+        description="Maximum pending deliveries before rejecting new emails. "
+        "None = unlimited (default). Prevents unbounded queue growth.",
+    )
+    queue_backpressure_action: str = Field(
+        default="reject",
+        description="Action when queue is full: 'reject' (451 temp error) or "
+        "'drop' (accept but don't queue). Reject allows sender to retry later.",
     )
 
     # Security

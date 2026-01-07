@@ -121,6 +121,10 @@ async def process_delivery(
     if delivery.recipient and delivery.recipient.webhook_headers:
         headers = delivery.recipient.webhook_headers
 
+    # Add idempotency key header for duplicate detection
+    # Using delivery ID ensures the same delivery always has the same key
+    headers["X-Idempotency-Key"] = str(delivery.id)
+
     # Track delivery duration
     start_time = time.perf_counter()
 

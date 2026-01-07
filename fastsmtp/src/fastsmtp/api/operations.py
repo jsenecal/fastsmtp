@@ -1,15 +1,18 @@
 """Operations API endpoints (health, ready, delivery logs, test webhook)."""
 
+import asyncio
+import socket
 import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp import __version__
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.config import Settings, get_settings
+from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import DeliveryLog
 from fastsmtp.db.session import get_session
 from fastsmtp.schemas import (
@@ -17,6 +20,7 @@ from fastsmtp.schemas import (
     DeliveryLogResponse,
     HealthResponse,
     MessageResponse,
+    QueueStats,
     ReadyResponse,
     TestWebhookRequest,
     TestWebhookResponse,
@@ -38,11 +42,59 @@ async def health_check(
     )
 
 
+async def _check_smtp_port(host: str, port: int, connect_timeout: float = 2.0) -> str:
+    """Check if SMTP port is accepting connections.
+
+    Returns 'ok' if accepting, 'unavailable' if not.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        # Use async socket check to avoid blocking
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setblocking(False)
+        try:
+            await asyncio.wait_for(
+                loop.sock_connect(sock, (host, port)),
+                timeout=connect_timeout,
+            )
+            return "ok"
+        finally:
+            sock.close()
+    except (OSError, TimeoutError):
+        return "unavailable"
+
+
+async def _get_queue_stats(session: AsyncSession) -> QueueStats:
+    """Get delivery queue statistics."""
+    # Count by status in a single query
+    stmt = (
+        select(DeliveryLog.status, func.count(DeliveryLog.id))
+        .group_by(DeliveryLog.status)
+    )
+    result = await session.execute(stmt)
+    counts = {row[0]: row[1] for row in result.fetchall()}
+
+    return QueueStats(
+        pending=counts.get(DeliveryStatus.PENDING, 0),
+        failed=counts.get(DeliveryStatus.FAILED, 0),
+        exhausted=counts.get(DeliveryStatus.EXHAUSTED, 0),
+    )
+
+
 @router.get("/ready", response_model=ReadyResponse)
 async def ready_check(
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    include_queue: bool = Query(False, description="Include queue statistics"),
+    include_smtp: bool = Query(False, description="Include SMTP server check"),
 ) -> ReadyResponse:
-    """Readiness check endpoint - verifies database connectivity."""
+    """Readiness check endpoint - verifies system health.
+
+    Query parameters:
+    - include_queue: Include delivery queue statistics (pending/failed/exhausted counts)
+    - include_smtp: Check if SMTP server port is accepting connections
+    """
+    # Check database connectivity
     try:
         await session.execute(text("SELECT 1"))
         db_status = "ok"
@@ -52,10 +104,23 @@ async def ready_check(
             detail="Database not ready",
         ) from e
 
-    return ReadyResponse(
+    response = ReadyResponse(
         status="ok",
         database=db_status,
     )
+
+    # Optional: Check SMTP server
+    if include_smtp:
+        response.smtp = await _check_smtp_port(
+            settings.smtp_host,
+            settings.smtp_port,
+        )
+
+    # Optional: Get queue statistics
+    if include_queue:
+        response.queue = await _get_queue_stats(session)
+
+    return response
 
 
 # Delivery Log endpoints
