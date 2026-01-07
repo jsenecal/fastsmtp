@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
+    # CORS settings
+    cors_origins: list[str] = Field(
+        default_factory=list,
+        description="Allowed CORS origins. Empty list disables CORS. Use ['*'] for development only.",
+    )
+
     # Database (PostgreSQL)
     database_url: str = Field(
         default="postgresql+asyncpg://fastsmtp:fastsmtp@localhost:5432/fastsmtp",

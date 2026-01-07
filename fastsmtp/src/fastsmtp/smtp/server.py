@@ -200,21 +200,25 @@ def extract_email_payload(message: Message, envelope: Envelope) -> dict:
                     "size": len(part.get_payload(decode=True) or b""),
                 })
             elif content_type == "text/plain":
-                charset = part.get_content_charset() or "utf-8"
-                try:
-                    payload["body_text"] = part.get_payload(decode=True).decode(charset)
-                except Exception:
-                    payload["body_text"] = part.get_payload(decode=True).decode(
-                        "utf-8", errors="replace"
-                    )
+                payload_bytes = part.get_payload(decode=True)
+                if payload_bytes is not None:
+                    charset = part.get_content_charset() or "utf-8"
+                    try:
+                        payload["body_text"] = payload_bytes.decode(charset)
+                    except Exception:
+                        payload["body_text"] = payload_bytes.decode(
+                            "utf-8", errors="replace"
+                        )
             elif content_type == "text/html":
-                charset = part.get_content_charset() or "utf-8"
-                try:
-                    payload["body_html"] = part.get_payload(decode=True).decode(charset)
-                except Exception:
-                    payload["body_html"] = part.get_payload(decode=True).decode(
-                        "utf-8", errors="replace"
-                    )
+                payload_bytes = part.get_payload(decode=True)
+                if payload_bytes is not None:
+                    charset = part.get_content_charset() or "utf-8"
+                    try:
+                        payload["body_html"] = payload_bytes.decode(charset)
+                    except Exception:
+                        payload["body_html"] = payload_bytes.decode(
+                            "utf-8", errors="replace"
+                        )
     else:
         # Simple message
         charset = message.get_content_charset() or "utf-8"

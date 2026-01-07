@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fastsmtp import __version__
 from fastsmtp.api.router import api_router
-from fastsmtp.config import Settings
+from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.session import engine
 
 
@@ -27,6 +27,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings: Optional settings override for testing. If not provided,
                   default settings will be loaded from environment.
     """
+    if settings is None:
+        settings = get_settings()
+
     app = FastAPI(
         title="FastSMTP",
         description="SMTP-to-Webhook Relay Server",
@@ -34,18 +37,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Store settings on app state for access in routes if provided
-    if settings is not None:
-        app.state.settings = settings
+    # Store settings on app state for access in routes
+    app.state.settings = settings
 
-    # Add CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # Add CORS middleware only if origins are configured
+    if settings.cors_origins:
+        # Don't allow credentials with wildcard origins (security risk)
+        allow_credentials = "*" not in settings.cors_origins
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_credentials=allow_credentials,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # Include API router
     app.include_router(api_router)

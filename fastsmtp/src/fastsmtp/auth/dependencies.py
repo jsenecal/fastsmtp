@@ -1,5 +1,6 @@
 """FastAPI authentication dependencies."""
 
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -137,8 +138,8 @@ async def get_auth_context(
             headers={"WWW-Authenticate": "ApiKey"},
         )
 
-    # Check if this is the root API key
-    if x_api_key == settings.root_api_key.get_secret_value():
+    # Check if this is the root API key (timing-safe comparison)
+    if secrets.compare_digest(x_api_key, settings.root_api_key.get_secret_value()):
         # Create a virtual root user context
         root_user = User(
             id=uuid.UUID("00000000-0000-0000-0000-000000000000"),
