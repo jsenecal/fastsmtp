@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import time
+import uuid
 from typing import Any
 
 import httpx
@@ -180,7 +181,7 @@ class WebhookWorker:
         self._running = False
         self._task: asyncio.Task | None = None
 
-    async def _process_single_delivery(self, delivery_id: str) -> None:
+    async def _process_single_delivery(self, delivery_id: uuid.UUID) -> None:
         """Process a single delivery with its own database session.
 
         Each delivery gets its own session to avoid SQLAlchemy session

@@ -107,6 +107,10 @@ def validate_tls_config(settings: Settings) -> tuple[bool, str]:
     cert_path = settings.smtp_tls_cert
     key_path = settings.smtp_tls_key
 
+    # After the above checks, both must be set if we reach here
+    if cert_path is None or key_path is None:
+        return True, "TLS not configured"
+
     if not cert_path.exists():
         return False, f"TLS certificate not found: {cert_path}"
 

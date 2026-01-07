@@ -110,7 +110,15 @@ class FastSMTPHandler:
         client_ip = session.peer[0] if session.peer else "unknown"
         mail_from = envelope.mail_from or ""
         helo = session.host_name or ""
-        message_size = len(envelope.content)
+
+        # Ensure content is bytes
+        content = envelope.content
+        if content is None:
+            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
+            return "550 Empty message"
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        message_size = len(content)
 
         logger.info(
             f"Received message from {mail_from} to {envelope.rcpt_tos} "
@@ -122,7 +130,7 @@ class FastSMTPHandler:
 
         # Parse the message
         try:
-            message = message_from_bytes(envelope.content)
+            message = message_from_bytes(content)
         except Exception as e:
             logger.error(f"Failed to parse message: {e}")
             SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
@@ -133,7 +141,7 @@ class FastSMTPHandler:
 
         # Run email authentication
         auth_result = await validate_email_auth(
-            message=envelope.content,
+            message=content,
             client_ip=client_ip,
             mail_from=mail_from,
             helo=helo,
@@ -180,8 +188,10 @@ class FastSMTPHandler:
 
 def extract_email_payload(message: Message, envelope: Envelope) -> dict:
     """Extract email content into a webhook payload."""
+    from typing import Any
+
     # Get basic headers
-    payload = {
+    payload: dict[str, Any] = {
         "message_id": message.get("Message-ID", ""),
         "from": message.get("From", ""),
         "to": message.get("To", ""),
@@ -195,11 +205,11 @@ def extract_email_payload(message: Message, envelope: Envelope) -> dict:
     }
 
     # Extract body
-    if message.is_multipart():
-        payload["body_text"] = ""
-        payload["body_html"] = ""
-        payload["attachments"] = []
+    attachments: list[dict[str, Any]] = []
+    body_text = ""
+    body_html = ""
 
+    if message.is_multipart():
         for part in message.walk():
             content_type = part.get_content_type()
             content_disposition = part.get("Content-Disposition", "")
@@ -207,53 +217,50 @@ def extract_email_payload(message: Message, envelope: Envelope) -> dict:
             if "attachment" in content_disposition:
                 # Handle attachment
                 filename = part.get_filename() or "unnamed"
-                payload["attachments"].append({
+                part_payload = part.get_payload(decode=True)
+                attachments.append({
                     "filename": filename,
                     "content_type": content_type,
-                    "size": len(part.get_payload(decode=True) or b""),
+                    "size": len(part_payload) if isinstance(part_payload, bytes) else 0,
                 })
             elif content_type == "text/plain":
                 payload_bytes = part.get_payload(decode=True)
-                if payload_bytes is not None:
+                if isinstance(payload_bytes, bytes):
                     charset = part.get_content_charset() or "utf-8"
                     try:
-                        payload["body_text"] = payload_bytes.decode(charset)
+                        body_text = payload_bytes.decode(charset)
                     except Exception:
-                        payload["body_text"] = payload_bytes.decode(
-                            "utf-8", errors="replace"
-                        )
+                        body_text = payload_bytes.decode("utf-8", errors="replace")
             elif content_type == "text/html":
                 payload_bytes = part.get_payload(decode=True)
-                if payload_bytes is not None:
+                if isinstance(payload_bytes, bytes):
                     charset = part.get_content_charset() or "utf-8"
                     try:
-                        payload["body_html"] = payload_bytes.decode(charset)
+                        body_html = payload_bytes.decode(charset)
                     except Exception:
-                        payload["body_html"] = payload_bytes.decode(
-                            "utf-8", errors="replace"
-                        )
+                        body_html = payload_bytes.decode("utf-8", errors="replace")
     else:
         # Simple message
         charset = message.get_content_charset() or "utf-8"
-        try:
-            body = message.get_payload(decode=True)
-            if isinstance(body, bytes):
-                body = body.decode(charset)
-        except Exception:
-            body = message.get_payload(decode=True)
-            if isinstance(body, bytes):
-                body = body.decode("utf-8", errors="replace")
+        body_bytes = message.get_payload(decode=True)
+        body_str = ""
+        if isinstance(body_bytes, bytes):
+            try:
+                body_str = body_bytes.decode(charset)
+            except Exception:
+                body_str = body_bytes.decode("utf-8", errors="replace")
+        elif isinstance(body_bytes, str):
+            body_str = body_bytes
 
         if message.get_content_type() == "text/html":
-            payload["body_html"] = body
-            payload["body_text"] = ""
+            body_html = body_str
         else:
-            payload["body_text"] = body
-            payload["body_html"] = ""
+            body_text = body_str
 
-        payload["attachments"] = []
-
-    payload["has_attachments"] = len(payload.get("attachments", [])) > 0
+    payload["body_text"] = body_text
+    payload["body_html"] = body_html
+    payload["attachments"] = attachments
+    payload["has_attachments"] = len(attachments) > 0
 
     return payload
 

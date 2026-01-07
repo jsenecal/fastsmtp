@@ -180,7 +180,7 @@ async def get_auth_context(
         )
 
     # Verify the key hash (supports both salted and legacy unsalted keys)
-    if api_key.is_salted:
+    if api_key.is_salted and api_key.key_salt is not None:
         # New salted key verification
         if not verify_api_key_salted(x_api_key, api_key.key_hash, api_key.key_salt):
             raise HTTPException(

@@ -119,7 +119,8 @@ def get_settings() -> Settings:
     Settings are cached after first load. Use clear_settings_cache()
     to reload settings (e.g., in tests or after environment changes).
     """
-    return Settings()
+    # root_api_key is loaded from environment by pydantic-settings
+    return Settings()  # type: ignore[call-arg]
 
 
 def clear_settings_cache() -> None:

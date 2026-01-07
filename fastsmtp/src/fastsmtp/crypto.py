@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+from typing import cast
 
 from cryptography.fernet import Fernet
 
@@ -76,7 +77,7 @@ def encrypt_dict(data: dict[str, str] | None, key: str | None) -> dict[str, str]
     if key is None:
         return data
 
-    return {k: encrypt_data(v, key) for k, v in data.items()}
+    return {k: cast(str, encrypt_data(v, key)) for k, v in data.items()}
 
 
 def decrypt_dict(data: dict[str, str] | None, key: str | None) -> dict[str, str] | None:
@@ -94,4 +95,4 @@ def decrypt_dict(data: dict[str, str] | None, key: str | None) -> dict[str, str]
     if key is None:
         return data
 
-    return {k: decrypt_data(v, key) for k, v in data.items()}
+    return {k: cast(str, decrypt_data(v, key)) for k, v in data.items()}

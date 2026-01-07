@@ -182,40 +182,43 @@ async def validate_email_auth(
     Returns:
         EmailAuthResult with validation results
     """
-    # Run both validations in parallel
-    tasks = []
+    # Set up coroutines based on what's enabled
+    dkim_coro = verify_dkim(message) if verify_dkim_enabled else None
+    spf_coro = verify_spf(client_ip, mail_from, helo) if verify_spf_enabled else None
 
-    async def dkim_none() -> tuple[str, None, None]:
-        return (RESULT_NONE, None, None)
+    # Run validations in parallel if both enabled
+    dkim_result: str = RESULT_NONE
+    dkim_domain: str | None = None
+    dkim_selector: str | None = None
+    spf_result: str = RESULT_NONE
+    spf_domain: str | None = None
 
-    async def spf_none() -> tuple[str, None]:
-        return (RESULT_NONE, None)
-
-    if verify_dkim_enabled:
-        tasks.append(verify_dkim(message))
-    else:
-        tasks.append(dkim_none())
-
-    if verify_spf_enabled:
-        tasks.append(verify_spf(client_ip, mail_from, helo))
-    else:
-        tasks.append(spf_none())
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Process DKIM result
-    if isinstance(results[0], Exception):
-        logger.error(f"DKIM validation exception: {results[0]}")
-        dkim_result, dkim_domain, dkim_selector = RESULT_TEMPERROR, None, None
-    else:
-        dkim_result, dkim_domain, dkim_selector = results[0]
-
-    # Process SPF result
-    if isinstance(results[1], Exception):
-        logger.error(f"SPF validation exception: {results[1]}")
-        spf_result, spf_domain = RESULT_TEMPERROR, None
-    else:
-        spf_result, spf_domain = results[1]
+    if dkim_coro and spf_coro:
+        # Run both in parallel
+        dkim_task = asyncio.create_task(dkim_coro)
+        spf_task = asyncio.create_task(spf_coro)
+        try:
+            dkim_result, dkim_domain, dkim_selector = await dkim_task
+        except Exception as e:
+            logger.error(f"DKIM validation exception: {e}")
+            dkim_result, dkim_domain, dkim_selector = RESULT_TEMPERROR, None, None
+        try:
+            spf_result, spf_domain = await spf_task
+        except Exception as e:
+            logger.error(f"SPF validation exception: {e}")
+            spf_result, spf_domain = RESULT_TEMPERROR, None
+    elif dkim_coro:
+        try:
+            dkim_result, dkim_domain, dkim_selector = await dkim_coro
+        except Exception as e:
+            logger.error(f"DKIM validation exception: {e}")
+            dkim_result, dkim_domain, dkim_selector = RESULT_TEMPERROR, None, None
+    elif spf_coro:
+        try:
+            spf_result, spf_domain = await spf_coro
+        except Exception as e:
+            logger.error(f"SPF validation exception: {e}")
+            spf_result, spf_domain = RESULT_TEMPERROR, None
 
     return EmailAuthResult(
         dkim_result=dkim_result,

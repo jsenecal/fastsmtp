@@ -116,7 +116,7 @@ def validate_webhook_url(url: str, resolve_dns: bool = True) -> None:
                 proto=socket.IPPROTO_TCP,
             )
             for _family, _, _, _, sockaddr in addrinfo:
-                ip_str = sockaddr[0]
+                ip_str = str(sockaddr[0])
                 if is_ip_blocked(ip_str):
                     raise SSRFError(
                         f"Hostname '{hostname}' resolves to blocked IP '{ip_str}'"

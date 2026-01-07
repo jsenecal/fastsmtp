@@ -219,7 +219,7 @@ async def evaluate_rules(
 async def get_domain_auth_settings(
     session: AsyncSession,
     domain_id: uuid.UUID,
-) -> tuple[bool, bool, bool, bool]:
+) -> tuple[bool | None, bool | None, bool | None, bool | None]:
     """Get authentication settings for a domain.
 
     Returns domain-specific settings if set, otherwise falls back to None

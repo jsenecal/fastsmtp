@@ -131,7 +131,6 @@ class RuleResponse(RuleBase):
     id: uuid.UUID
     ruleset_id: uuid.UUID
     order: int
-    webhook_url_override: str | None = None
     created_at: datetime
     updated_at: datetime
 
