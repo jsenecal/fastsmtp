@@ -39,7 +39,28 @@ class TimestampMixin:
     )
 
 
-class User(Base, TimestampMixin):
+class SoftDeleteMixin:
+    """Mixin for soft delete support.
+
+    Adds a deleted_at timestamp field. When set, the record is considered
+    soft deleted and can be filtered out of normal queries while preserving
+    audit history.
+    """
+
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        default=None,
+        nullable=True,
+        index=True,
+    )
+
+    @property
+    def is_deleted(self) -> bool:
+        """Check if this record has been soft deleted."""
+        return self.deleted_at is not None
+
+
+class User(Base, TimestampMixin, SoftDeleteMixin):
     """User account model."""
 
     __tablename__ = "users"
@@ -67,7 +88,7 @@ class User(Base, TimestampMixin):
         return f"<User {self.username}>"
 
 
-class APIKey(Base, TimestampMixin):
+class APIKey(Base, TimestampMixin, SoftDeleteMixin):
     """API key for authentication."""
 
     __tablename__ = "api_keys"
@@ -104,7 +125,7 @@ class APIKey(Base, TimestampMixin):
         return f"<APIKey {self.key_prefix}...>"
 
 
-class Domain(Base, TimestampMixin):
+class Domain(Base, TimestampMixin, SoftDeleteMixin):
     """Email domain configuration."""
 
     __tablename__ = "domains"
@@ -174,7 +195,7 @@ class DomainMember(Base, TimestampMixin):
         return f"<DomainMember user={self.user_id} domain={self.domain_id} role={self.role}>"
 
 
-class Recipient(Base, TimestampMixin):
+class Recipient(Base, TimestampMixin, SoftDeleteMixin):
     """Email recipient configuration with webhook mapping."""
 
     __tablename__ = "recipients"
