@@ -108,15 +108,13 @@ async def get_pending_deliveries(
     result = await session.execute(stmt)
     deliveries = list(result.scalars().all())
 
-    # Claim these deliveries for this instance
+    # Claim these deliveries for this instance by updating the locked rows directly
+    # Using ORM objects ensures we update the exact same rows that are locked
+    for delivery in deliveries:
+        delivery.instance_id = instance_id
+
+    # Flush to persist the changes while rows are still locked
     if deliveries:
-        delivery_ids = [d.id for d in deliveries]
-        update_stmt = (
-            update(DeliveryLog)
-            .where(DeliveryLog.id.in_(delivery_ids))
-            .values(instance_id=instance_id)
-        )
-        await session.execute(update_stmt)
         await session.flush()
 
     return deliveries
