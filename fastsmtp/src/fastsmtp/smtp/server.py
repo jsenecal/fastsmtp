@@ -12,6 +12,7 @@ import idna
 
 if TYPE_CHECKING:
     from fastsmtp.smtp.tls import TLSContextManager
+    from fastsmtp.storage.s3 import S3Storage
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import SMTP, Envelope, Session
 from sqlalchemy import select
@@ -286,8 +287,22 @@ class FastSMTPHandler:
         from fastsmtp.rules.engine import evaluate_rules
         from fastsmtp.webhook.queue import enqueue_delivery
 
+        # Determine domain for S3 storage key (use first recipient's domain)
+        recipient_domain = None
+        if envelope.rcpt_tos:
+            first_rcpt = envelope.rcpt_tos[0]
+            if "@" in first_rcpt:
+                recipient_domain = first_rcpt.rsplit("@", 1)[1].lower()
+
+        # Get S3 storage if enabled
+        s3_storage = None
+        if self.settings.attachment_storage == "s3" and hasattr(self, "_s3_storage"):
+            s3_storage = self._s3_storage
+
         # Extract base payload (same for all recipients)
-        base_payload = extract_email_payload(message, envelope, self.settings)
+        base_payload = await extract_email_payload(
+            message, envelope, self.settings, s3_storage=s3_storage, domain=recipient_domain
+        )
         base_payload["client_ip"] = client_ip
         base_payload["dkim_result"] = auth_result.dkim_result
         base_payload["dkim_domain"] = auth_result.dkim_domain
@@ -346,10 +361,12 @@ class FastSMTPHandler:
         return deliveries_created
 
 
-def extract_email_payload(
+async def extract_email_payload(
     message: Message,
     envelope: Envelope,
     settings: Settings | None = None,
+    s3_storage: "S3Storage | None" = None,
+    domain: str | None = None,
 ) -> dict:
     """Extract email content into a webhook payload.
 
@@ -357,6 +374,8 @@ def extract_email_payload(
         message: Parsed email message
         envelope: SMTP envelope
         settings: Application settings (for attachment size limits)
+        s3_storage: S3 storage client (if S3 enabled)
+        domain: Email domain for S3 key path
     """
     from typing import Any
 
@@ -399,10 +418,44 @@ def extract_email_payload(
                     "size": size,
                 }
 
-                # Include base64-encoded content if within size limit
-                if isinstance(part_payload, bytes) and size <= max_inline_attachment_size:
-                    attachment_info["content"] = base64.b64encode(part_payload).decode("ascii")
+                if isinstance(part_payload, bytes) and s3_storage and domain:
+                    # Upload to S3
+                    try:
+                        s3_info = await s3_storage.upload_attachment(
+                            content=part_payload,
+                            domain=domain,
+                            message_id=message.get("Message-ID", "unknown"),
+                            filename=filename,
+                            content_type=content_type,
+                        )
+                        attachment_info["storage"] = "s3"
+                        attachment_info["bucket"] = s3_info.bucket
+                        attachment_info["key"] = s3_info.key
+                        attachment_info["url"] = s3_info.url
+                        if s3_info.presigned_url:
+                            attachment_info["presigned_url"] = s3_info.presigned_url
+                    except Exception as e:
+                        # Fallback to inline on S3 failure
+                        logger.warning(
+                            f"S3 upload failed for {filename}, falling back to inline: {e}"
+                        )
+                        attachment_info["storage"] = "inline"
+                        attachment_info["storage_fallback"] = True
+                        if size <= max_inline_attachment_size:
+                            attachment_info["content"] = base64.b64encode(
+                                part_payload
+                            ).decode("ascii")
+                            attachment_info["content_transfer_encoding"] = "base64"
+                elif isinstance(part_payload, bytes) and size <= max_inline_attachment_size:
+                    # Inline storage
+                    attachment_info["storage"] = "inline"
+                    attachment_info["content"] = base64.b64encode(part_payload).decode(
+                        "ascii"
+                    )
                     attachment_info["content_transfer_encoding"] = "base64"
+                else:
+                    # Metadata only (too large for inline, no S3)
+                    attachment_info["storage"] = "inline"
 
                 attachments.append(attachment_info)
             elif content_type == "text/plain":
