@@ -50,14 +50,14 @@ uv run fastsmtp serve
 
 ```bash
 # Pull the image
-docker pull ghcr.io/jsenecal/fastsmtp:0.1.1
+docker pull ghcr.io/jsenecal/fastsmtp:v0.1.1
 
 # Run with required environment variables
 docker run -d \
   -p 8000:8000 -p 2525:2525 -p 4650:4650 \
   -e FASTSMTP_DATABASE_URL="postgresql+asyncpg://user:pass@host/fastsmtp" \
   -e FASTSMTP_ROOT_API_KEY="your-secure-key" \
-  ghcr.io/jsenecal/fastsmtp:0.1.1
+  ghcr.io/jsenecal/fastsmtp:v0.1.1
 ```
 
 ### Docker Compose
@@ -79,7 +79,7 @@ services:
       retries: 5
 
   fastsmtp:
-    image: ghcr.io/jsenecal/fastsmtp:0.1.1
+    image: ghcr.io/jsenecal/fastsmtp:v0.1.1
     ports:
       - "8000:8000"   # API
       - "2525:2525"   # SMTP
@@ -94,7 +94,7 @@ services:
         condition: service_healthy
 
   worker:
-    image: ghcr.io/jsenecal/fastsmtp:0.1.1
+    image: ghcr.io/jsenecal/fastsmtp:v0.1.1
     command: ["fastsmtp", "serve", "--worker-only"]
     environment:
       FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres/fastsmtp
@@ -159,7 +159,7 @@ services:
       "
 
   fastsmtp:
-    image: ghcr.io/jsenecal/fastsmtp:0.1.1
+    image: ghcr.io/jsenecal/fastsmtp:v0.1.1
     ports:
       - "8000:8000"
       - "2525:2525"
@@ -182,7 +182,7 @@ services:
         condition: service_completed_successfully
 
   worker:
-    image: ghcr.io/jsenecal/fastsmtp:0.1.1
+    image: ghcr.io/jsenecal/fastsmtp:v0.1.1
     command: ["fastsmtp", "serve", "--worker-only"]
     environment:
       FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres/fastsmtp
