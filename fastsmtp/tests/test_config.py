@@ -1,7 +1,6 @@
 """Tests for configuration settings."""
 
 import pytest
-
 from fastsmtp.config import Settings
 
 

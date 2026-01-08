@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiosmtpd.smtp import Envelope
-
 from fastsmtp.config import Settings
 from fastsmtp.smtp.server import extract_email_payload
 from fastsmtp.storage.s3 import S3AttachmentInfo, S3Storage, S3UploadError
