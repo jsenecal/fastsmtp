@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
@@ -16,6 +17,14 @@ from fastsmtp.db.models import DeliveryLog, Domain
 
 # Set required environment variables before any imports
 os.environ.setdefault("FASTSMTP_ROOT_API_KEY", "test_root_api_key_12345")
+
+# ANSI escape code pattern for stripping colors from CLI output
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE.sub("", text)
 
 
 class TestCleanupSettings:
@@ -322,13 +331,14 @@ class TestCleanupCLI:
         """Test cleanup command is registered with expected flags."""
         from fastsmtp.cli import app
 
-        result = runner.invoke(app, ["cleanup", "--help"], color=False)
+        result = runner.invoke(app, ["cleanup", "--help"])
         assert result.exit_code == 0
+        output = strip_ansi(result.stdout)
         # Check command description
-        assert "delivery log" in result.stdout.lower() or "cleanup" in result.stdout.lower()
+        assert "delivery log" in output.lower() or "cleanup" in output.lower()
         # Check required flags are present
-        assert "--dry-run" in result.stdout
-        assert "--older-than" in result.stdout
+        assert "--dry-run" in output
+        assert "--older-than" in output
 
 
 class TestCleanupWorker:

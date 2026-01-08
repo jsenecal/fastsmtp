@@ -1,5 +1,6 @@
 """Tests for CLI commands."""
 
+import re
 import tempfile
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +12,14 @@ from fastsmtp_cli.main import app
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+# ANSI escape code pattern for stripping colors from CLI output
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE.sub("", text)
 
 
 @pytest.fixture
@@ -29,22 +38,23 @@ class TestMainApp:
 
     def test_version(self):
         """Test --version flag."""
-        result = runner.invoke(app, ["--version"], color=False)
+        result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
-        assert "FastSMTP CLI version" in result.stdout
+        assert "FastSMTP CLI version" in strip_ansi(result.stdout)
 
     def test_help(self):
         """Test --help flag."""
-        result = runner.invoke(app, ["--help"], color=False)
+        result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert "FastSMTP CLI" in result.stdout
+        assert "FastSMTP CLI" in strip_ansi(result.stdout)
 
     def test_no_args_shows_help(self):
         """Test running with no arguments shows help (exit code 0 with no_args_is_help)."""
-        result = runner.invoke(app, [], color=False)
+        result = runner.invoke(app, [])
+        output = strip_ansi(result.stdout)
         # no_args_is_help=True shows help with exit code 0
         # But typer exits with 0 here
-        assert "FastSMTP CLI" in result.stdout or result.exit_code in (0, 2)
+        assert "FastSMTP CLI" in output or result.exit_code in (0, 2)
 
 
 class TestConfigCommands:
