@@ -111,6 +111,17 @@ class FastSMTPHandler:
     def __init__(self, settings: Settings):
         self.settings = settings
 
+        # S3 storage client (initialized if attachment_storage == "s3")
+        self._s3_storage = None
+        if self.settings.attachment_storage == "s3":
+            try:
+                from fastsmtp.storage.s3 import S3Storage
+
+                self._s3_storage = S3Storage(self.settings)
+                logger.info("S3 attachment storage initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize S3 storage: {e}")
+
     async def handle_RCPT(
         self,
         server: SMTP,
