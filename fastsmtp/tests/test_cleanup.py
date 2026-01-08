@@ -322,7 +322,7 @@ class TestCleanupCLI:
         """Test cleanup command is registered."""
         from fastsmtp.cli import app
 
-        result = runner.invoke(app, ["cleanup", "--help"])
+        result = runner.invoke(app, ["cleanup", "--help"], color=False)
         assert result.exit_code == 0
         assert "delivery log" in result.stdout.lower() or "cleanup" in result.stdout.lower()
 
@@ -330,14 +330,14 @@ class TestCleanupCLI:
         """Test --dry-run flag is available."""
         from fastsmtp.cli import app
 
-        result = runner.invoke(app, ["cleanup", "--help"])
+        result = runner.invoke(app, ["cleanup", "--help"], color=False)
         assert "--dry-run" in result.stdout
 
     def test_cleanup_older_than_flag(self):
         """Test --older-than flag is available."""
         from fastsmtp.cli import app
 
-        result = runner.invoke(app, ["cleanup", "--help"])
+        result = runner.invoke(app, ["cleanup", "--help"], color=False)
         assert "--older-than" in result.stdout
 
 
