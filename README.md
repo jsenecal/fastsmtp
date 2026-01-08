@@ -29,7 +29,7 @@ A TLS-capable, async SMTP server that receives emails and forwards them to webho
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/fastsmtp.git
+git clone https://github.com/jsenecal/fastsmtp.git
 cd fastsmtp
 
 # Install dependencies
@@ -514,69 +514,224 @@ For example:
 attachments/yourdomain.com/abc123@sender.com/invoice.pdf
 ```
 
-## CLI Usage
+## CLI Reference
 
-### Server CLI
+FastSMTP provides two CLI tools:
+
+- **`fastsmtp`** - Server-side CLI for running the server and administration
+- **`fsmtp`** - Remote CLI client for managing FastSMTP from anywhere
+
+### Server CLI (`fastsmtp`)
+
+The server CLI is used to run the FastSMTP server and perform local administration tasks.
+
+#### Starting the Server
 
 ```bash
-# Start all services
+# Start all services (SMTP, API, webhook worker)
 fastsmtp serve
 
-# Start only SMTP server
-fastsmtp serve --smtp-only
+# Start individual components (for horizontal scaling)
+fastsmtp serve --smtp-only      # Only SMTP server
+fastsmtp serve --api-only       # Only REST API
+fastsmtp serve --worker-only    # Only webhook worker
 
-# Start only API server
-fastsmtp serve --api-only
+# Custom shutdown timeout
+fastsmtp serve --shutdown-timeout 60
+```
 
-# Start only webhook worker
-fastsmtp serve --worker-only
+#### Database Management
 
-# Database migrations
+```bash
+# Apply all pending migrations
 fastsmtp db upgrade
-fastsmtp db downgrade
+
+# Upgrade to specific revision
+fastsmtp db upgrade abc123
+
+# Rollback one migration
+fastsmtp db downgrade -1
+
+# Show current revision
 fastsmtp db current
 
-# User management
-fastsmtp user create admin admin@example.com
-fastsmtp user list
-fastsmtp user set-superuser admin
-fastsmtp user generate-key admin
+# Show migration history
+fastsmtp db history
 
-# Domain management
-fastsmtp domain create example.com
-fastsmtp domain add-member example.com admin --role owner
+# Create new migration (development)
+fastsmtp db revision -m "Add new table"
 ```
 
-### Remote CLI
-
-The `fsmtp` command provides remote management:
+#### User Management
 
 ```bash
-# Configure profile
-fsmtp config set-url https://fastsmtp.example.com
-fsmtp config set-api-key your-api-key
+# Create a new user
+fastsmtp user create alice alice@example.com
 
-# Domain operations
+# List all users
+fastsmtp user list
+
+# Grant superuser privileges
+fastsmtp user set-superuser alice
+
+# Revoke superuser privileges
+fastsmtp user set-superuser alice --revoke
+
+# Generate API key for user
+fastsmtp user generate-key alice
+
+# Delete a user
+fastsmtp user delete alice
+```
+
+#### Domain Management
+
+```bash
+# Create a domain
+fastsmtp domain create example.com
+
+# List all domains
+fastsmtp domain list
+
+# Add a member to domain
+fastsmtp domain add-member example.com alice --role owner
+fastsmtp domain add-member example.com bob --role admin
+fastsmtp domain add-member example.com charlie --role member
+
+# Remove member from domain
+fastsmtp domain remove-member example.com charlie
+
+# Delete a domain
+fastsmtp domain delete example.com
+```
+
+#### Maintenance
+
+```bash
+# Clean up old delivery logs (respects retention settings)
+fastsmtp cleanup
+
+# Preview what would be deleted
+fastsmtp cleanup --dry-run
+
+# Override retention period
+fastsmtp cleanup --older-than 30d
+
+# Show current configuration
+fastsmtp show-config
+
+# Show version
+fastsmtp version
+```
+
+### Remote CLI (`fsmtp`)
+
+The remote CLI connects to a FastSMTP server over HTTPS for remote management.
+
+#### Configuration
+
+```bash
+# Initialize configuration interactively
+fsmtp config init
+
+# Create/update a profile
+fsmtp config set myprofile \
+  --url https://fastsmtp.example.com \
+  --api-key "your-api-key"
+
+# Set default profile
+fsmtp config use myprofile
+
+# Show current configuration
+fsmtp config show
+
+# Delete a profile
+fsmtp config delete myprofile
+```
+
+#### Authentication
+
+```bash
+# Show current user info
+fsmtp auth whoami
+
+# List your API keys
+fsmtp auth keys
+
+# Create a new API key
+fsmtp auth create-key --name "CI/CD"
+
+# Rotate an API key
+fsmtp auth rotate-key <key-id>
+
+# Delete an API key
+fsmtp auth delete-key <key-id>
+```
+
+#### Domain Management
+
+```bash
+# List domains you have access to
 fsmtp domain list
+
+# Get domain details
+fsmtp domain get example.com
+
+# Create a new domain
 fsmtp domain create example.com
 
-# Recipient management
-fsmtp recipient list example.com
-fsmtp recipient create example.com support https://webhook.site/xxx
+# Update domain settings
+fsmtp domain update example.com --description "Production domain"
 
-# Check health
-fsmtp ops health
+# Delete a domain
+fsmtp domain delete example.com
+
+# Manage domain members
+fsmtp domain member list example.com
+fsmtp domain member add example.com alice@example.com --role admin
+fsmtp domain member remove example.com alice@example.com
 ```
 
-## Rule Engine
-
-Rules allow conditional processing of emails:
+#### Recipient Management
 
 ```bash
-# Create a ruleset
-fsmtp rules ruleset create example.com "Spam Filter" --priority 10
+# List recipients for a domain
+fsmtp recipient list example.com
 
-# Add a rule to tag spam
+# Get recipient details
+fsmtp recipient get example.com support
+
+# Create a recipient with webhook
+fsmtp recipient create example.com support \
+  --webhook-url https://n8n.example.com/webhook/email
+
+# Update recipient
+fsmtp recipient update example.com support \
+  --webhook-url https://new-webhook.example.com/email
+
+# Delete recipient
+fsmtp recipient delete example.com support
+```
+
+#### Rule Management
+
+```bash
+# List rulesets for a domain
+fsmtp rules list example.com
+
+# Get ruleset with all rules
+fsmtp rules get example.com <ruleset-id>
+
+# Create a ruleset
+fsmtp rules create example.com "Spam Filter" --priority 10
+
+# Update ruleset
+fsmtp rules update example.com <ruleset-id> --priority 20
+
+# Delete ruleset
+fsmtp rules delete example.com <ruleset-id>
+
+# Create a rule within a ruleset
 fsmtp rules rule create example.com <ruleset-id> \
   --field subject \
   --operator contains \
@@ -584,14 +739,40 @@ fsmtp rules rule create example.com <ruleset-id> \
   --action tag \
   --action-value spam
 
-# Add a rule to forward to different webhook
-fsmtp rules rule create example.com <ruleset-id> \
-  --field from \
-  --operator equals \
-  --value "vip@important.com" \
-  --action forward \
-  --webhook-override https://special-webhook.example.com/vip
+# Update a rule
+fsmtp rules rule update example.com <ruleset-id> <rule-id> \
+  --action drop
+
+# Delete a rule
+fsmtp rules rule delete example.com <ruleset-id> <rule-id>
 ```
+
+#### Operations
+
+```bash
+# Check server health
+fsmtp ops health
+
+# Check server readiness (includes DB)
+fsmtp ops ready
+
+# Test a webhook URL
+fsmtp ops test-webhook https://webhook.site/xxx
+
+# View delivery logs
+fsmtp ops log list example.com
+fsmtp ops log list example.com --status failed --limit 50
+
+# Get delivery log details
+fsmtp ops log get <log-id>
+
+# Retry a failed delivery
+fsmtp ops log retry <log-id>
+```
+
+## Rule Engine
+
+The rule engine allows conditional processing of emails based on various attributes.
 
 ### Rule Fields
 - `from`, `to`, `cc`, `subject`, `body`
@@ -631,4 +812,4 @@ uv run ruff format .
 
 ## License
 
-MIT License - see LICENSE file for details.
+AGPL-3.0 - see [LICENSE](LICENSE) file for details.
