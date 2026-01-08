@@ -781,12 +781,14 @@ dev = [
     { name = "aiosqlite" },
     { name = "bumpver" },
     { name = "httpx" },
+    { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "respx" },
     { name = "ruff" },
+    { name = "testcontainers" },
 ]
 
 [package.metadata]
@@ -796,12 +798,14 @@ dev = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "bumpver", specifier = ">=2025.1131" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "mypy", specifier = ">=1.19" },
     { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-cov", specifier = ">=4.0" },
     { name = "respx", specifier = ">=0.21" },
     { name = "ruff", specifier = ">=0.4" },
+    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.13" },
 ]
 
 [[package]]
