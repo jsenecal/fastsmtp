@@ -19,8 +19,10 @@ from fastsmtp.webhook.dispatcher import (
     send_webhook,
 )
 from fastsmtp.webhook.queue import (
+    check_queue_backpressure,
     compute_payload_hash,
     enqueue_delivery,
+    get_pending_count,
     get_pending_deliveries,
     mark_delivered,
     mark_failed,
@@ -778,3 +780,632 @@ class TestWebhookWorker:
             await worker.stop()
             await worker.wait()
             assert worker._running is False
+
+
+class TestDeadLetterQueue:
+    """Tests for Dead Letter Queue (DLQ) notification feature."""
+
+    @pytest_asyncio.fixture
+    async def exhausted_delivery(self, test_session: AsyncSession) -> DeliveryLog:
+        """Create a delivery that's about to be exhausted."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="dlq-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+
+        delivery = DeliveryLog(
+            id=uuid.uuid4(),
+            domain_id=domain.id,
+            message_id="<dlq@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={"test": "data"},
+            status="failed",
+            attempts=4,  # One more failure will exhaust (default max is 5)
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        test_session.add(delivery)
+        await test_session.flush()
+        return delivery
+
+    @pytest.mark.asyncio
+    async def test_no_dlq_notification_when_url_not_configured(
+        self, test_session: AsyncSession, exhausted_delivery: DeliveryLog, test_settings: Settings
+    ):
+        """Test that no DLQ notification is sent when dlq_webhook_url is not configured."""
+        # Ensure DLQ URL is not set
+        assert test_settings.dlq_webhook_url is None
+
+        with patch("fastsmtp.webhook.queue._send_dlq_notification") as mock_dlq:
+            await mark_failed(
+                test_session,
+                exhausted_delivery.id,
+                "Final failure",
+                status_code=500,
+                settings=test_settings,
+            )
+            await test_session.flush()
+
+            # DLQ notification should not be called when URL is not configured
+            mock_dlq.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dlq_notification_sent_when_exhausted(
+        self, test_session: AsyncSession, exhausted_delivery: DeliveryLog
+    ):
+        """Test that DLQ notification is sent when delivery is exhausted."""
+        # Create settings with DLQ URL configured
+        settings_with_dlq = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            dlq_webhook_url="https://alerts.example.com/dlq",
+            webhook_max_retries=5,
+        )
+
+        with patch("fastsmtp.webhook.queue._send_dlq_notification") as mock_dlq:
+            await mark_failed(
+                test_session,
+                exhausted_delivery.id,
+                "Final failure",
+                status_code=500,
+                settings=settings_with_dlq,
+            )
+            await test_session.flush()
+
+            # DLQ notification should be called via asyncio.create_task
+            # We're patching the function, so create_task will call the mock
+            mock_dlq.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_dlq_notification_not_sent_for_non_exhausted(
+        self, test_session: AsyncSession
+    ):
+        """Test that DLQ notification is NOT sent when delivery still has retries."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="dlq-retry-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+
+        # Create delivery with only 1 attempt - still has retries left
+        delivery = DeliveryLog(
+            id=uuid.uuid4(),
+            domain_id=domain.id,
+            message_id="<retry@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={"test": "data"},
+            status="pending",
+            attempts=1,
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        test_session.add(delivery)
+        await test_session.flush()
+
+        settings_with_dlq = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            dlq_webhook_url="https://alerts.example.com/dlq",
+            webhook_max_retries=5,
+        )
+
+        with patch("fastsmtp.webhook.queue._send_dlq_notification") as mock_dlq:
+            await mark_failed(
+                test_session,
+                delivery.id,
+                "Temporary failure",
+                status_code=503,
+                settings=settings_with_dlq,
+            )
+            await test_session.flush()
+            await test_session.refresh(delivery)
+
+            # Should NOT call DLQ because delivery still has retries
+            mock_dlq.assert_not_called()
+            assert delivery.status == "failed"  # Not exhausted
+
+    @pytest.mark.asyncio
+    async def test_dlq_payload_structure(
+        self, test_session: AsyncSession, exhausted_delivery: DeliveryLog
+    ):
+        """Test that DLQ notification payload has correct structure."""
+        from fastsmtp.webhook.queue import _send_dlq_notification
+
+        settings_with_dlq = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            dlq_webhook_url="https://alerts.example.com/dlq",
+        )
+
+        # Update the delivery to simulate exhaustion
+        exhausted_delivery.attempts = 5
+        exhausted_delivery.last_error = "Connection refused"
+        exhausted_delivery.last_status_code = None
+
+        # Patch at source location since _send_dlq_notification imports locally
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            mock_send.return_value = (True, 200, None)
+
+            with patch("fastsmtp.webhook.url_validator.create_ssrf_safe_client") as mock_client:
+                mock_client.return_value.__aenter__ = AsyncMock()
+                mock_client.return_value.__aexit__ = AsyncMock()
+
+                await _send_dlq_notification(exhausted_delivery, settings_with_dlq)
+
+                # Verify send_webhook was called
+                mock_send.assert_called_once()
+                call_kwargs = mock_send.call_args.kwargs
+
+                # Check URL
+                assert call_kwargs["url"] == "https://alerts.example.com/dlq"
+
+                # Check payload structure
+                payload = call_kwargs["payload"]
+                assert payload["event"] == "delivery.exhausted"
+                assert payload["delivery_id"] == str(exhausted_delivery.id)
+                assert payload["message_id"] == exhausted_delivery.message_id
+                assert payload["webhook_url"] == exhausted_delivery.webhook_url
+                assert payload["attempts"] == 5
+                assert payload["last_error"] == "Connection refused"
+                assert payload["last_status_code"] is None
+                assert "exhausted_at" in payload
+
+                # Check headers
+                assert call_kwargs["headers"]["X-FastSMTP-Event"] == "dlq"
+
+    @pytest.mark.asyncio
+    async def test_dlq_notification_failure_is_logged_not_raised(
+        self, test_session: AsyncSession, exhausted_delivery: DeliveryLog
+    ):
+        """Test that DLQ notification failures don't propagate (fire-and-forget)."""
+        from fastsmtp.webhook.queue import _send_dlq_notification
+
+        settings_with_dlq = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            dlq_webhook_url="https://alerts.example.com/dlq",
+        )
+
+        exhausted_delivery.attempts = 5
+        exhausted_delivery.last_error = "Test error"
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            # Simulate webhook failure
+            mock_send.return_value = (False, 500, "Server error")
+
+            with patch("fastsmtp.webhook.url_validator.create_ssrf_safe_client") as mock_client:
+                mock_client.return_value.__aenter__ = AsyncMock()
+                mock_client.return_value.__aexit__ = AsyncMock()
+
+                # Should not raise exception even though webhook failed
+                await _send_dlq_notification(exhausted_delivery, settings_with_dlq)
+
+    @pytest.mark.asyncio
+    async def test_dlq_notification_exception_is_caught(
+        self, test_session: AsyncSession, exhausted_delivery: DeliveryLog
+    ):
+        """Test that exceptions in DLQ notification are caught and logged."""
+        from fastsmtp.webhook.queue import _send_dlq_notification
+
+        settings_with_dlq = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            dlq_webhook_url="https://alerts.example.com/dlq",
+        )
+
+        exhausted_delivery.attempts = 5
+        exhausted_delivery.last_error = "Test error"
+
+        with patch("fastsmtp.webhook.url_validator.create_ssrf_safe_client") as mock_client:
+            # Simulate exception during client creation
+            mock_client.side_effect = Exception("Network error")
+
+            # Should not raise exception
+            await _send_dlq_notification(exhausted_delivery, settings_with_dlq)
+
+    @pytest.mark.asyncio
+    async def test_dlq_notification_skipped_when_no_url(
+        self, test_session: AsyncSession, exhausted_delivery: DeliveryLog
+    ):
+        """Test that DLQ notification is skipped when no URL is configured."""
+        from fastsmtp.webhook.queue import _send_dlq_notification
+
+        settings_no_dlq = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            dlq_webhook_url=None,
+        )
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            await _send_dlq_notification(exhausted_delivery, settings_no_dlq)
+
+            # Should not call send_webhook when no URL configured
+            mock_send.assert_not_called()
+
+
+class TestQueueBackpressure:
+    """Tests for queue backpressure feature."""
+
+    @pytest_asyncio.fixture
+    async def test_domain(self, test_session: AsyncSession) -> Domain:
+        """Create a test domain for deliveries."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="backpressure-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+        return domain
+
+    @pytest.mark.asyncio
+    async def test_get_pending_count_empty(self, test_session: AsyncSession):
+        """Test get_pending_count returns 0 when no deliveries exist."""
+        count = await get_pending_count(test_session)
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_get_pending_count_counts_pending(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test get_pending_count counts pending deliveries."""
+        # Create 3 pending deliveries
+        for i in range(3):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<pending{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash="abc123",
+                payload={"index": i},
+                status="pending",
+                attempts=0,
+                next_retry_at=datetime.now(UTC),
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+        await test_session.flush()
+
+        count = await get_pending_count(test_session)
+        assert count == 3
+
+    @pytest.mark.asyncio
+    async def test_get_pending_count_counts_failed(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test get_pending_count counts failed deliveries (for retry)."""
+        # Create 2 failed deliveries (will be retried)
+        for i in range(2):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<failed{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash="abc123",
+                payload={"index": i},
+                status="failed",
+                attempts=2,
+                next_retry_at=datetime.now(UTC) + timedelta(minutes=5),
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+        await test_session.flush()
+
+        count = await get_pending_count(test_session)
+        assert count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_pending_count_excludes_delivered(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test get_pending_count excludes delivered messages."""
+        # Create 1 pending and 1 delivered
+        pending = DeliveryLog(
+            id=uuid.uuid4(),
+            domain_id=test_domain.id,
+            message_id="<pending@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={},
+            status="pending",
+            attempts=0,
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        delivered = DeliveryLog(
+            id=uuid.uuid4(),
+            domain_id=test_domain.id,
+            message_id="<delivered@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="def456",
+            payload={},
+            status="delivered",
+            attempts=1,
+            delivered_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        test_session.add(pending)
+        test_session.add(delivered)
+        await test_session.flush()
+
+        count = await get_pending_count(test_session)
+        assert count == 1  # Only pending, not delivered
+
+    @pytest.mark.asyncio
+    async def test_get_pending_count_excludes_exhausted(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test get_pending_count excludes exhausted deliveries."""
+        # Create 1 pending and 1 exhausted
+        pending = DeliveryLog(
+            id=uuid.uuid4(),
+            domain_id=test_domain.id,
+            message_id="<pending@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={},
+            status="pending",
+            attempts=0,
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        exhausted = DeliveryLog(
+            id=uuid.uuid4(),
+            domain_id=test_domain.id,
+            message_id="<exhausted@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="def456",
+            payload={},
+            status="exhausted",
+            attempts=5,
+            last_error="Max retries exceeded",
+            instance_id="test-instance",
+        )
+        test_session.add(pending)
+        test_session.add(exhausted)
+        await test_session.flush()
+
+        count = await get_pending_count(test_session)
+        assert count == 1  # Only pending, not exhausted
+
+    @pytest.mark.asyncio
+    async def test_get_pending_count_mixed_statuses(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test get_pending_count with mixed delivery statuses."""
+        # Create deliveries with various statuses
+        statuses = [
+            ("pending", 0, None),
+            ("pending", 0, None),
+            ("failed", 2, datetime.now(UTC) + timedelta(minutes=5)),
+            ("delivered", 1, None),
+            ("exhausted", 5, None),
+        ]
+        for i, (status, attempts, next_retry) in enumerate(statuses):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<msg{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash=f"hash{i}",
+                payload={},
+                status=status,
+                attempts=attempts,
+                next_retry_at=next_retry,
+                instance_id="test-instance",
+            )
+            if status == "delivered":
+                delivery.delivered_at = datetime.now(UTC)
+            test_session.add(delivery)
+        await test_session.flush()
+
+        count = await get_pending_count(test_session)
+        assert count == 3  # 2 pending + 1 failed
+
+    @pytest.mark.asyncio
+    async def test_check_backpressure_no_limit_configured(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test check_queue_backpressure returns False when no limit is configured."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            queue_max_pending=None,  # No limit
+        )
+
+        # Create some pending deliveries
+        for i in range(10):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<nolimit{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash=f"hash{i}",
+                payload={},
+                status="pending",
+                attempts=0,
+                next_retry_at=datetime.now(UTC),
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+        await test_session.flush()
+
+        is_backpressured, count = await check_queue_backpressure(test_session, settings)
+        assert is_backpressured is False
+        assert count == 0  # Returns 0 when no limit configured
+
+    @pytest.mark.asyncio
+    async def test_check_backpressure_under_limit(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test check_queue_backpressure returns False when under limit."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            queue_max_pending=10,
+        )
+
+        # Create 5 pending deliveries (under limit of 10)
+        for i in range(5):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<under{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash=f"hash{i}",
+                payload={},
+                status="pending",
+                attempts=0,
+                next_retry_at=datetime.now(UTC),
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+        await test_session.flush()
+
+        is_backpressured, count = await check_queue_backpressure(test_session, settings)
+        assert is_backpressured is False
+        assert count == 5
+
+    @pytest.mark.asyncio
+    async def test_check_backpressure_at_limit(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test check_queue_backpressure returns True when at limit."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            queue_max_pending=5,
+        )
+
+        # Create exactly 5 pending deliveries (at limit)
+        for i in range(5):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<atlimit{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash=f"hash{i}",
+                payload={},
+                status="pending",
+                attempts=0,
+                next_retry_at=datetime.now(UTC),
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+        await test_session.flush()
+
+        is_backpressured, count = await check_queue_backpressure(test_session, settings)
+        assert is_backpressured is True
+        assert count == 5
+
+    @pytest.mark.asyncio
+    async def test_check_backpressure_over_limit(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test check_queue_backpressure returns True when over limit."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            queue_max_pending=5,
+        )
+
+        # Create 8 pending deliveries (over limit of 5)
+        for i in range(8):
+            delivery = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<over{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash=f"hash{i}",
+                payload={},
+                status="pending",
+                attempts=0,
+                next_retry_at=datetime.now(UTC),
+                instance_id="test-instance",
+            )
+            test_session.add(delivery)
+        await test_session.flush()
+
+        is_backpressured, count = await check_queue_backpressure(test_session, settings)
+        assert is_backpressured is True
+        assert count == 8
+
+    @pytest.mark.asyncio
+    async def test_check_backpressure_counts_failed_towards_limit(
+        self, test_session: AsyncSession, test_domain: Domain
+    ):
+        """Test check_queue_backpressure includes failed deliveries in count."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            queue_max_pending=5,
+        )
+
+        # Create 3 pending + 3 failed = 6 total (over limit of 5)
+        for i in range(3):
+            pending = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<pending{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash=f"pending{i}",
+                payload={},
+                status="pending",
+                attempts=0,
+                next_retry_at=datetime.now(UTC),
+                instance_id="test-instance",
+            )
+            failed = DeliveryLog(
+                id=uuid.uuid4(),
+                domain_id=test_domain.id,
+                message_id=f"<failed{i}@example.com>",
+                webhook_url="https://example.com/webhook",
+                payload_hash=f"failed{i}",
+                payload={},
+                status="failed",
+                attempts=2,
+                next_retry_at=datetime.now(UTC) + timedelta(minutes=5),
+                instance_id="test-instance",
+            )
+            test_session.add(pending)
+            test_session.add(failed)
+        await test_session.flush()
+
+        is_backpressured, count = await check_queue_backpressure(test_session, settings)
+        assert is_backpressured is True
+        assert count == 6  # 3 pending + 3 failed
+
+    @pytest.mark.asyncio
+    async def test_backpressure_action_reject_is_default(self):
+        """Test that default backpressure action is 'reject'."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+        )
+        assert settings.queue_backpressure_action == "reject"
+
+    @pytest.mark.asyncio
+    async def test_backpressure_action_drop_configurable(self):
+        """Test that backpressure action can be set to 'drop'."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            queue_backpressure_action="drop",
+        )
+        assert settings.queue_backpressure_action == "drop"
+
+    @pytest.mark.asyncio
+    async def test_queue_max_pending_default_is_none(self):
+        """Test that default queue_max_pending is None (unlimited)."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+        )
+        assert settings.queue_max_pending is None
