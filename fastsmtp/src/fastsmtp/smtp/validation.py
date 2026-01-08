@@ -101,7 +101,7 @@ async def verify_dkim(message: bytes) -> tuple[str, str | None, str | None]:
     Returns:
         Tuple of (result, domain, selector)
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, partial(_verify_dkim_sync, message))
 
 
@@ -155,7 +155,7 @@ async def verify_spf(client_ip: str, mail_from: str, helo: str) -> tuple[str, st
     Returns:
         Tuple of (result, domain)
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, partial(_verify_spf_sync, client_ip, mail_from, helo))
 
 
@@ -192,19 +192,24 @@ async def validate_email_auth(
     spf_domain: str | None = None
 
     if dkim_coro and spf_coro:
-        # Run both in parallel
-        dkim_task = asyncio.create_task(dkim_coro)
-        spf_task = asyncio.create_task(spf_coro)
-        try:
-            dkim_result, dkim_domain, dkim_selector = await dkim_task
-        except Exception as e:
-            logger.error(f"DKIM validation exception: {e}")
+        # Run both in parallel using gather (safer than create_task in mixed event loop contexts)
+        results = await asyncio.gather(dkim_coro, spf_coro, return_exceptions=True)
+
+        # Process DKIM result
+        dkim_raw = results[0]
+        if isinstance(dkim_raw, Exception):
+            logger.error(f"DKIM validation exception: {dkim_raw}")
             dkim_result, dkim_domain, dkim_selector = RESULT_TEMPERROR, None, None
-        try:
-            spf_result, spf_domain = await spf_task
-        except Exception as e:
-            logger.error(f"SPF validation exception: {e}")
+        else:
+            dkim_result, dkim_domain, dkim_selector = dkim_raw
+
+        # Process SPF result
+        spf_raw = results[1]
+        if isinstance(spf_raw, Exception):
+            logger.error(f"SPF validation exception: {spf_raw}")
             spf_result, spf_domain = RESULT_TEMPERROR, None
+        else:
+            spf_result, spf_domain = spf_raw
     elif dkim_coro:
         try:
             dkim_result, dkim_domain, dkim_selector = await dkim_coro
