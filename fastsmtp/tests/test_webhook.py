@@ -740,6 +740,144 @@ class TestProcessDelivery:
             call_kwargs = mock_send.call_args.kwargs
             assert call_kwargs["headers"]["X-Auth"] == "secret123"
 
+    @pytest.mark.asyncio
+    async def test_process_delivery_adds_idempotency_key(
+        self, test_session: AsyncSession, test_settings: Settings
+    ):
+        """Test that process_delivery adds X-Idempotency-Key header."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="idempotency-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+
+        delivery_id = uuid.uuid4()
+        delivery = DeliveryLog(
+            id=delivery_id,
+            domain_id=domain.id,
+            message_id="<idempotency@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={"test": "data"},
+            status="pending",
+            attempts=0,
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        test_session.add(delivery)
+        await test_session.flush()
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            mock_send.return_value = (True, 200, None)
+
+            await process_delivery(delivery, test_settings, test_session)
+
+            # Verify idempotency key header is set to delivery ID
+            call_kwargs = mock_send.call_args.kwargs
+            assert "X-Idempotency-Key" in call_kwargs["headers"]
+            assert call_kwargs["headers"]["X-Idempotency-Key"] == str(delivery_id)
+
+    @pytest.mark.asyncio
+    async def test_process_delivery_idempotency_key_with_recipient_headers(
+        self, test_session: AsyncSession, test_settings: Settings
+    ):
+        """Test that idempotency key is added alongside recipient headers."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="idempotency-headers-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+
+        recipient = Recipient(
+            id=uuid.uuid4(),
+            domain_id=domain.id,
+            local_part="test",
+            webhook_url="https://example.com/webhook",
+            webhook_headers={"X-Custom-Auth": "token123"},
+            is_enabled=True,
+        )
+        test_session.add(recipient)
+        await test_session.flush()
+
+        delivery_id = uuid.uuid4()
+        delivery = DeliveryLog(
+            id=delivery_id,
+            domain_id=domain.id,
+            recipient_id=recipient.id,
+            message_id="<idempotency-headers@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={"test": "data"},
+            status="pending",
+            attempts=0,
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        test_session.add(delivery)
+        await test_session.flush()
+
+        # Re-fetch delivery with recipient relationship eagerly loaded
+        stmt = (
+            select(DeliveryLog)
+            .options(selectinload(DeliveryLog.recipient))
+            .where(DeliveryLog.id == delivery.id)
+        )
+        result = await test_session.execute(stmt)
+        loaded_delivery = result.scalar_one()
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            mock_send.return_value = (True, 200, None)
+
+            await process_delivery(loaded_delivery, test_settings, test_session)
+
+            # Verify both custom headers and idempotency key are present
+            call_kwargs = mock_send.call_args.kwargs
+            headers = call_kwargs["headers"]
+            assert headers["X-Custom-Auth"] == "token123"
+            assert headers["X-Idempotency-Key"] == str(delivery_id)
+
+    @pytest.mark.asyncio
+    async def test_process_delivery_idempotency_key_consistent_on_retry(
+        self, test_session: AsyncSession, test_settings: Settings
+    ):
+        """Test that idempotency key remains consistent across retries."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="idempotency-retry-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+
+        delivery_id = uuid.uuid4()
+        delivery = DeliveryLog(
+            id=delivery_id,
+            domain_id=domain.id,
+            message_id="<idempotency-retry@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={"test": "data"},
+            status="failed",
+            attempts=2,  # Already retried twice
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        test_session.add(delivery)
+        await test_session.flush()
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            mock_send.return_value = (True, 200, None)
+
+            await process_delivery(delivery, test_settings, test_session)
+
+            # Idempotency key should still be the same delivery ID
+            call_kwargs = mock_send.call_args.kwargs
+            assert call_kwargs["headers"]["X-Idempotency-Key"] == str(delivery_id)
+
 
 class TestWebhookWorker:
     """Tests for WebhookWorker class."""
