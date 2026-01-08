@@ -68,14 +68,14 @@ class Settings(BaseSettings):
     webhook_timeout: int = 30
     webhook_max_retries: int = 5
     webhook_retry_base_delay: float = 1.0
-    webhook_max_attachment_size: int = Field(
+    webhook_max_inline_attachment_size: int = Field(
         default=10 * 1024 * 1024,  # 10MB
-        description="Maximum attachment size to include in webhook payload (bytes). "
-        "Attachments larger than this will only include metadata, not content.",
+        description="Maximum attachment size to include inline in webhook payload (bytes). "
+        "Only applies when attachment_storage='inline'. Larger attachments include metadata only.",
     )
-    webhook_max_payload_size: int = Field(
+    webhook_max_inline_payload_size: int = Field(
         default=50 * 1024 * 1024,  # 50MB
-        description="Maximum total webhook payload size (bytes). "
+        description="Maximum total webhook payload size for inline storage (bytes). "
         "Payloads exceeding this will have body/attachments truncated.",
     )
     webhook_allowed_internal_domains: list[str] = Field(

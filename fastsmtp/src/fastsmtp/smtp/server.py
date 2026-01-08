@@ -361,7 +361,7 @@ def extract_email_payload(
     from typing import Any
 
     settings = settings or get_settings()
-    max_attachment_size = settings.webhook_max_attachment_size
+    max_inline_attachment_size = settings.webhook_max_inline_attachment_size
 
     # Get basic headers
     payload: dict[str, Any] = {
@@ -400,7 +400,7 @@ def extract_email_payload(
                 }
 
                 # Include base64-encoded content if within size limit
-                if isinstance(part_payload, bytes) and size <= max_attachment_size:
+                if isinstance(part_payload, bytes) and size <= max_inline_attachment_size:
                     attachment_info["content"] = base64.b64encode(part_payload).decode("ascii")
                     attachment_info["content_transfer_encoding"] = "base64"
 
@@ -444,8 +444,8 @@ def extract_email_payload(
     payload["attachments"] = attachments
     payload["has_attachments"] = len(attachments) > 0
 
-    # Enforce maximum payload size
-    max_payload_size = settings.webhook_max_payload_size
+    # Enforce maximum payload size for inline storage
+    max_payload_size = settings.webhook_max_inline_payload_size
     payload = _enforce_payload_size_limit(payload, max_payload_size)
 
     return payload
