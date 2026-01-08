@@ -604,8 +604,7 @@ class SMTPServer:
         )
         self.tls_controller.start()
         logger.info(
-            f"SMTP TLS server restarted on "
-            f"{self.settings.smtp_host}:{self.settings.smtp_tls_port}"
+            f"SMTP TLS server restarted on {self.settings.smtp_host}:{self.settings.smtp_tls_port}"
         )
 
     async def _tls_hot_reload_loop(self) -> None:
