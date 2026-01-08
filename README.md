@@ -80,6 +80,86 @@ volumes:
   postgres_data:
 ```
 
+### Docker Compose with S3 (MinIO)
+
+For attachment storage with MinIO:
+
+```yaml
+version: "3.8"
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: fastsmtp
+      POSTGRES_USER: fastsmtp
+      POSTGRES_PASSWORD: fastsmtp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+
+  createbucket:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing myminio/attachments;
+      exit 0;
+      "
+
+  fastsmtp:
+    build: .
+    ports:
+      - "8000:8000"
+      - "2525:2525"
+      - "4650:4650"
+    environment:
+      FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@db/fastsmtp
+      FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY}
+      FASTSMTP_ATTACHMENT_STORAGE: s3
+      FASTSMTP_S3_ENDPOINT_URL: http://minio:9000
+      FASTSMTP_S3_BUCKET: attachments
+      FASTSMTP_S3_ACCESS_KEY: minioadmin
+      FASTSMTP_S3_SECRET_KEY: minioadmin
+      FASTSMTP_S3_PRESIGNED_URLS: "true"
+    depends_on:
+      - db
+      - minio
+      - createbucket
+
+  worker:
+    build: .
+    command: fastsmtp serve --worker-only
+    environment:
+      FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@db/fastsmtp
+      FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY}
+      FASTSMTP_ATTACHMENT_STORAGE: s3
+      FASTSMTP_S3_ENDPOINT_URL: http://minio:9000
+      FASTSMTP_S3_BUCKET: attachments
+      FASTSMTP_S3_ACCESS_KEY: minioadmin
+      FASTSMTP_S3_SECRET_KEY: minioadmin
+    depends_on:
+      - db
+      - minio
+
+volumes:
+  postgres_data:
+  minio_data:
+```
+
 ## Configuration
 
 All configuration is via environment variables with the `FASTSMTP_` prefix.
@@ -126,6 +206,44 @@ All configuration is via environment variables with the `FASTSMTP_` prefix.
 | `FASTSMTP_WEBHOOK_TIMEOUT` | `30` | Request timeout (seconds) |
 | `FASTSMTP_WEBHOOK_MAX_RETRIES` | `5` | Max retry attempts |
 | `FASTSMTP_WEBHOOK_RETRY_BASE_DELAY` | `1.0` | Base delay for exponential backoff |
+| `FASTSMTP_WEBHOOK_MAX_INLINE_ATTACHMENT_SIZE` | `10485760` | Max attachment size (bytes) for inline storage |
+| `FASTSMTP_WEBHOOK_MAX_INLINE_PAYLOAD_SIZE` | `52428800` | Max total payload size (bytes) for inline storage |
+
+### Attachment Storage (S3)
+
+Store attachments in S3-compatible storage (AWS S3, MinIO, Ceph) instead of inline base64.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_ATTACHMENT_STORAGE` | `inline` | Storage backend: `inline` or `s3` |
+| `FASTSMTP_S3_ENDPOINT_URL` | - | S3 endpoint (for MinIO/Ceph). Omit for AWS |
+| `FASTSMTP_S3_BUCKET` | - | S3 bucket name (required when `s3`) |
+| `FASTSMTP_S3_ACCESS_KEY` | - | S3 access key ID (required when `s3`) |
+| `FASTSMTP_S3_SECRET_KEY` | - | S3 secret access key (required when `s3`) |
+| `FASTSMTP_S3_REGION` | `us-east-1` | S3 region |
+| `FASTSMTP_S3_PREFIX` | `attachments` | Key prefix for stored files |
+| `FASTSMTP_S3_PRESIGNED_URLS` | `false` | Include presigned URLs in webhook payload |
+| `FASTSMTP_S3_PRESIGNED_URL_EXPIRY` | `3600` | Presigned URL expiry (seconds) |
+
+**Example: AWS S3**
+```bash
+export FASTSMTP_ATTACHMENT_STORAGE=s3
+export FASTSMTP_S3_BUCKET=my-email-attachments
+export FASTSMTP_S3_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE
+export FASTSMTP_S3_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+export FASTSMTP_S3_REGION=us-west-2
+export FASTSMTP_S3_PRESIGNED_URLS=true
+```
+
+**Example: MinIO**
+```bash
+export FASTSMTP_ATTACHMENT_STORAGE=s3
+export FASTSMTP_S3_ENDPOINT_URL=http://minio:9000
+export FASTSMTP_S3_BUCKET=attachments
+export FASTSMTP_S3_ACCESS_KEY=minioadmin
+export FASTSMTP_S3_SECRET_KEY=minioadmin
+export FASTSMTP_S3_PRESIGNED_URLS=true
+```
 
 ### Security
 
@@ -209,39 +327,186 @@ Full API documentation available at `/docs` (Swagger UI) or `/redoc`.
 
 ## Webhook Payload
 
-When an email is received, FastSMTP sends a POST request to the configured webhook:
+When an email is received, FastSMTP sends a POST request to the configured webhook. The payload structure depends on your attachment storage configuration.
+
+### Inline Storage (Default)
+
+With `FASTSMTP_ATTACHMENT_STORAGE=inline` (default), attachments are base64-encoded directly in the payload:
 
 ```json
 {
-  "message_id": "<unique-id@domain.com>",
+  "message_id": "<abc123@sender.com>",
   "from": "sender@example.com",
   "to": "recipient@yourdomain.com",
-  "subject": "Email Subject",
+  "subject": "Invoice for January",
   "date": "Mon, 06 Jan 2025 10:00:00 +0000",
   "envelope_from": "sender@example.com",
   "envelope_to": ["recipient@yourdomain.com"],
   "headers": {
-    "From": "sender@example.com",
+    "From": "John Doe <sender@example.com>",
     "To": "recipient@yourdomain.com",
-    "Subject": "Email Subject"
+    "Subject": "Invoice for January",
+    "Content-Type": "multipart/mixed"
   },
-  "body_text": "Plain text content",
-  "body_html": "<html>HTML content</html>",
+  "body_text": "Please find attached the invoice for January 2025.",
+  "body_html": "<p>Please find attached the invoice for January 2025.</p>",
   "has_attachments": true,
   "attachments": [
     {
-      "filename": "document.pdf",
+      "filename": "invoice-2025-01.pdf",
       "content_type": "application/pdf",
-      "size": 12345
+      "size": 45678,
+      "content": "JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9UeXBlL..."
     }
   ],
   "dkim_result": "pass",
   "dkim_domain": "example.com",
   "spf_result": "pass",
   "spf_domain": "example.com",
-  "client_ip": "192.168.1.100",
-  "tags": ["important"]
+  "client_ip": "203.0.113.50",
+  "tags": []
 }
+```
+
+### S3 Storage
+
+With `FASTSMTP_ATTACHMENT_STORAGE=s3`, attachments are uploaded to S3 and the payload contains bucket/key references:
+
+```json
+{
+  "message_id": "<abc123@sender.com>",
+  "from": "sender@example.com",
+  "to": "recipient@yourdomain.com",
+  "subject": "Invoice for January",
+  "date": "Mon, 06 Jan 2025 10:00:00 +0000",
+  "envelope_from": "sender@example.com",
+  "envelope_to": ["recipient@yourdomain.com"],
+  "headers": {
+    "From": "John Doe <sender@example.com>",
+    "To": "recipient@yourdomain.com",
+    "Subject": "Invoice for January"
+  },
+  "body_text": "Please find attached the invoice for January 2025.",
+  "body_html": "<p>Please find attached the invoice for January 2025.</p>",
+  "has_attachments": true,
+  "attachments": [
+    {
+      "filename": "invoice-2025-01.pdf",
+      "content_type": "application/pdf",
+      "size": 45678,
+      "storage": "s3",
+      "bucket": "my-email-attachments",
+      "key": "attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf"
+    }
+  ],
+  "dkim_result": "pass",
+  "dkim_domain": "example.com",
+  "spf_result": "pass",
+  "spf_domain": "example.com",
+  "client_ip": "203.0.113.50",
+  "tags": []
+}
+```
+
+### S3 Storage with Presigned URLs
+
+With `FASTSMTP_S3_PRESIGNED_URLS=true`, the payload includes time-limited download URLs:
+
+```json
+{
+  "message_id": "<abc123@sender.com>",
+  "from": "sender@example.com",
+  "to": "recipient@yourdomain.com",
+  "subject": "Invoice for January",
+  "has_attachments": true,
+  "attachments": [
+    {
+      "filename": "invoice-2025-01.pdf",
+      "content_type": "application/pdf",
+      "size": 45678,
+      "storage": "s3",
+      "bucket": "my-email-attachments",
+      "key": "attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf",
+      "presigned_url": "https://my-email-attachments.s3.us-west-2.amazonaws.com/attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20250106%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20250106T100000Z&X-Amz-Expires=3600&X-Amz-Signature=abc123..."
+    }
+  ]
+}
+```
+
+### S3 Fallback to Inline
+
+If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attachment will have `storage_fallback: true` to indicate this:
+
+```json
+{
+  "attachments": [
+    {
+      "filename": "invoice-2025-01.pdf",
+      "content_type": "application/pdf",
+      "size": 45678,
+      "storage_fallback": true,
+      "content": "JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9UeXBlL..."
+    }
+  ]
+}
+```
+
+### Multiple Attachments Example
+
+```json
+{
+  "message_id": "<xyz789@sender.com>",
+  "from": "hr@company.com",
+  "to": "onboarding@yourdomain.com",
+  "subject": "New Employee Documents",
+  "has_attachments": true,
+  "attachments": [
+    {
+      "filename": "offer-letter.pdf",
+      "content_type": "application/pdf",
+      "size": 89012,
+      "storage": "s3",
+      "bucket": "my-email-attachments",
+      "key": "attachments/yourdomain.com/xyz789@sender.com/offer-letter.pdf",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/offer-letter.pdf",
+      "presigned_url": "https://..."
+    },
+    {
+      "filename": "headshot.jpg",
+      "content_type": "image/jpeg",
+      "size": 234567,
+      "storage": "s3",
+      "bucket": "my-email-attachments",
+      "key": "attachments/yourdomain.com/xyz789@sender.com/headshot.jpg",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/headshot.jpg",
+      "presigned_url": "https://..."
+    },
+    {
+      "filename": "w4-form.pdf",
+      "content_type": "application/pdf",
+      "size": 56789,
+      "storage": "s3",
+      "bucket": "my-email-attachments",
+      "key": "attachments/yourdomain.com/xyz789@sender.com/w4-form.pdf",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/w4-form.pdf",
+      "presigned_url": "https://..."
+    }
+  ]
+}
+```
+
+### S3 Key Structure
+
+Attachments are stored with the following key structure:
+```
+{prefix}/{domain}/{message_id}/{filename}
+```
+
+For example:
+```
+attachments/yourdomain.com/abc123@sender.com/invoice.pdf
 ```
 
 ## CLI Usage
