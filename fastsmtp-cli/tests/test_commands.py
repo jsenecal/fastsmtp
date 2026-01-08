@@ -29,19 +29,19 @@ class TestMainApp:
 
     def test_version(self):
         """Test --version flag."""
-        result = runner.invoke(app, ["--version"])
+        result = runner.invoke(app, ["--version"], color=False)
         assert result.exit_code == 0
         assert "FastSMTP CLI version" in result.stdout
 
     def test_help(self):
         """Test --help flag."""
-        result = runner.invoke(app, ["--help"])
+        result = runner.invoke(app, ["--help"], color=False)
         assert result.exit_code == 0
         assert "FastSMTP CLI" in result.stdout
 
     def test_no_args_shows_help(self):
         """Test running with no arguments shows help (exit code 0 with no_args_is_help)."""
-        result = runner.invoke(app, [])
+        result = runner.invoke(app, [], color=False)
         # no_args_is_help=True shows help with exit code 0
         # But typer exits with 0 here
         assert "FastSMTP CLI" in result.stdout or result.exit_code in (0, 2)
