@@ -155,7 +155,8 @@ class TestFindRecipientForAddress:
 class TestExtractEmailPayload:
     """Tests for email payload extraction."""
 
-    def test_extract_simple_text_email(self):
+    @pytest.mark.asyncio
+    async def test_extract_simple_text_email(self):
         """Test extracting payload from simple text email."""
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"
@@ -168,7 +169,7 @@ class TestExtractEmailPayload:
         message["Message-ID"] = "<test123@example.com>"
         message.set_content("This is the body")
 
-        payload = extract_email_payload(message, envelope)
+        payload = await extract_email_payload(message, envelope)
 
         assert payload["from"] == "sender@example.com"
         assert payload["to"] == "recipient@example.com"
@@ -177,7 +178,8 @@ class TestExtractEmailPayload:
         assert "This is the body" in payload["body_text"]
         assert payload["has_attachments"] is False
 
-    def test_extract_html_email(self):
+    @pytest.mark.asyncio
+    async def test_extract_html_email(self):
         """Test extracting payload from HTML email."""
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"
@@ -189,12 +191,13 @@ class TestExtractEmailPayload:
         message["Subject"] = "HTML Email"
         message.set_content("<html><body><p>HTML content</p></body></html>", subtype="html")
 
-        payload = extract_email_payload(message, envelope)
+        payload = await extract_email_payload(message, envelope)
 
         assert "HTML content" in payload["body_html"]
         assert payload["body_text"] == ""
 
-    def test_extract_multipart_email(self):
+    @pytest.mark.asyncio
+    async def test_extract_multipart_email(self):
         """Test extracting payload from multipart email."""
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"
@@ -207,12 +210,13 @@ class TestExtractEmailPayload:
         message.set_content("Plain text version")
         message.add_alternative("<html><body><p>HTML version</p></body></html>", subtype="html")
 
-        payload = extract_email_payload(message, envelope)
+        payload = await extract_email_payload(message, envelope)
 
         assert "Plain text" in payload["body_text"]
         assert "HTML version" in payload["body_html"]
 
-    def test_extract_email_with_attachment(self):
+    @pytest.mark.asyncio
+    async def test_extract_email_with_attachment(self):
         """Test extracting payload from email with attachment."""
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"
@@ -230,7 +234,7 @@ class TestExtractEmailPayload:
             filename="test.txt",
         )
 
-        payload = extract_email_payload(message, envelope)
+        payload = await extract_email_payload(message, envelope)
 
         assert payload["has_attachments"] is True
         assert len(payload["attachments"]) == 1
