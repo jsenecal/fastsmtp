@@ -318,26 +318,16 @@ runner = CliRunner()
 class TestCleanupCLI:
     """Tests for cleanup CLI command."""
 
-    def test_cleanup_command_exists(self):
-        """Test cleanup command is registered."""
+    def test_cleanup_command_help(self):
+        """Test cleanup command is registered with expected flags."""
         from fastsmtp.cli import app
 
         result = runner.invoke(app, ["cleanup", "--help"], color=False)
         assert result.exit_code == 0
+        # Check command description
         assert "delivery log" in result.stdout.lower() or "cleanup" in result.stdout.lower()
-
-    def test_cleanup_dry_run_flag(self):
-        """Test --dry-run flag is available."""
-        from fastsmtp.cli import app
-
-        result = runner.invoke(app, ["cleanup", "--help"], color=False)
+        # Check required flags are present
         assert "--dry-run" in result.stdout
-
-    def test_cleanup_older_than_flag(self):
-        """Test --older-than flag is available."""
-        from fastsmtp.cli import app
-
-        result = runner.invoke(app, ["cleanup", "--help"], color=False)
         assert "--older-than" in result.stdout
 
 
@@ -398,7 +388,7 @@ class TestCleanupIntegration:
         """Test serve command doesn't have explicit cleanup flags (auto-enabled)."""
         from fastsmtp.cli import app
 
-        result = runner.invoke(app, ["serve", "--help"])
+        result = runner.invoke(app, ["serve", "--help"], color=False)
         # Cleanup worker starts automatically based on config
         # No explicit flag needed
         assert result.exit_code == 0
