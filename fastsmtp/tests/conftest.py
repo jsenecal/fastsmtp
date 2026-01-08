@@ -14,12 +14,13 @@ os.environ.setdefault("FASTSMTP_DATABASE_URL", "postgresql+asyncpg://test:test@l
 
 import pytest_asyncio
 from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
 from fastsmtp.config import Settings, clear_settings_cache, get_settings
 from fastsmtp.db.models import Base
 from fastsmtp.db.session import get_session
 from fastsmtp.main import create_app
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
 @pytest.fixture(scope="session")

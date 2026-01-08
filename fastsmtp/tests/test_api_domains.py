@@ -4,9 +4,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastsmtp.db.models import Domain, DomainMember, User
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.db.models import Domain, DomainMember, User
 
 
 class TestListDomains:
@@ -111,9 +112,7 @@ class TestGetDomain:
     """Tests for GET /api/v1/domains/{domain_id}."""
 
     @pytest.mark.asyncio
-    async def test_get_domain_success(
-        self, auth_client: AsyncClient, test_session: AsyncSession
-    ):
+    async def test_get_domain_success(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test getting a domain by ID."""
         domain = Domain(domain_name="gettest.com", is_enabled=True)
         test_session.add(domain)
@@ -193,9 +192,7 @@ class TestDomainMembers:
         return user
 
     @pytest_asyncio.fixture
-    async def test_domain_with_member(
-        self, test_session: AsyncSession, test_user: User
-    ) -> Domain:
+    async def test_domain_with_member(self, test_session: AsyncSession, test_user: User) -> Domain:
         """Create a domain with a member."""
         domain = Domain(domain_name="membertest.com", is_enabled=True)
         test_session.add(domain)
@@ -212,22 +209,16 @@ class TestDomainMembers:
         return domain
 
     @pytest.mark.asyncio
-    async def test_list_members(
-        self, auth_client: AsyncClient, test_domain_with_member: Domain
-    ):
+    async def test_list_members(self, auth_client: AsyncClient, test_domain_with_member: Domain):
         """Test listing domain members."""
-        response = await auth_client.get(
-            f"/api/v1/domains/{test_domain_with_member.id}/members"
-        )
+        response = await auth_client.get(f"/api/v1/domains/{test_domain_with_member.id}/members")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
         assert data[0]["role"] == "member"
 
     @pytest.mark.asyncio
-    async def test_add_member(
-        self, auth_client: AsyncClient, test_session: AsyncSession
-    ):
+    async def test_add_member(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test adding a member to a domain."""
         domain = Domain(domain_name="addmember.com", is_enabled=True)
         test_session.add(domain)

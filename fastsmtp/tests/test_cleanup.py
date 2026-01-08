@@ -8,10 +8,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-from fastsmtp.config import Settings
-from fastsmtp.db.models import DeliveryLog, Domain
 from sqlalchemy.ext.asyncio import AsyncSession
 from typer.testing import CliRunner
+
+from fastsmtp.config import Settings
+from fastsmtp.db.models import DeliveryLog, Domain
 
 # Set required environment variables before any imports
 os.environ.setdefault("FASTSMTP_ROOT_API_KEY", "test_root_api_key_12345")
@@ -188,8 +189,9 @@ class TestDeliveryLogCleanupService:
         recent_deliveries: list[DeliveryLog],
     ):
         """Test dry run counts records but doesn't delete them."""
-        from fastsmtp.cleanup.service import DeliveryLogCleanupService
         from sqlalchemy import select
+
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
 
         service = DeliveryLogCleanupService(test_settings, test_session)
         result = await service.cleanup(dry_run=True)
@@ -213,8 +215,9 @@ class TestDeliveryLogCleanupService:
         recent_deliveries: list[DeliveryLog],
     ):
         """Test cleanup deletes old records and keeps recent ones."""
-        from fastsmtp.cleanup.service import DeliveryLogCleanupService
         from sqlalchemy import select
+
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
 
         service = DeliveryLogCleanupService(test_settings, test_session)
         result = await service.cleanup(dry_run=False)
@@ -263,8 +266,9 @@ class TestDeliveryLogCleanupService:
         test_domain: Domain,
     ):
         """Test cleanup with custom retention period."""
-        from fastsmtp.cleanup.service import DeliveryLogCleanupService
         from sqlalchemy import select
+
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
 
         # Create deliveries at different ages
         now = datetime.now(UTC)
@@ -410,8 +414,9 @@ class TestCleanupEndToEnd:
         test_settings: Settings,
     ):
         """Test complete cleanup workflow: create records, run cleanup, verify."""
-        from fastsmtp.cleanup.service import DeliveryLogCleanupService
         from sqlalchemy import select
+
+        from fastsmtp.cleanup.service import DeliveryLogCleanupService
 
         # Create a domain
         domain = Domain(

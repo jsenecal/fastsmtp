@@ -4,6 +4,8 @@ from email import message_from_bytes
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.smtp.server import (
     extract_email_payload,
@@ -17,7 +19,6 @@ from fastsmtp.smtp.validation import (
     RESULT_SOFTFAIL,
     EmailAuthResult,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestExtractEmailPayload:
@@ -93,9 +94,7 @@ class TestLookupRecipient:
     """Tests for lookup_recipient function."""
 
     @pytest_asyncio.fixture
-    async def test_domain_with_recipients(
-        self, test_session: AsyncSession
-    ) -> Domain:
+    async def test_domain_with_recipients(self, test_session: AsyncSession) -> Domain:
         """Create a test domain with recipients."""
         domain = Domain(domain_name="lookup-test.com", is_enabled=True)
         test_session.add(domain)
@@ -132,9 +131,7 @@ class TestLookupRecipient:
         self, test_session: AsyncSession, test_domain_with_recipients: Domain
     ):
         """Test looking up a specific recipient."""
-        domain, recipient, error = await lookup_recipient(
-            "info@lookup-test.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("info@lookup-test.com", test_session)
         assert error is None
         assert domain is not None
         assert domain.domain_name == "lookup-test.com"
@@ -146,9 +143,7 @@ class TestLookupRecipient:
         self, test_session: AsyncSession, test_domain_with_recipients: Domain
     ):
         """Test looking up a recipient that falls to catch-all."""
-        domain, recipient, error = await lookup_recipient(
-            "unknown@lookup-test.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("unknown@lookup-test.com", test_session)
         assert error is None
         assert domain is not None
         assert recipient is not None
@@ -159,9 +154,7 @@ class TestLookupRecipient:
         self, test_session: AsyncSession, test_domain_with_recipients: Domain
     ):
         """Test looking up disabled recipient falls to catch-all."""
-        domain, recipient, error = await lookup_recipient(
-            "disabled@lookup-test.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("disabled@lookup-test.com", test_session)
         assert error is None
         assert recipient is not None
         assert recipient.local_part is None  # catch-all
@@ -169,9 +162,7 @@ class TestLookupRecipient:
     @pytest.mark.asyncio
     async def test_lookup_unknown_domain(self, test_session: AsyncSession):
         """Test looking up address with unknown domain."""
-        domain, recipient, error = await lookup_recipient(
-            "test@unknown-domain.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("test@unknown-domain.com", test_session)
         assert domain is None
         assert recipient is None
         assert "not configured" in error
@@ -179,9 +170,7 @@ class TestLookupRecipient:
     @pytest.mark.asyncio
     async def test_lookup_invalid_address(self, test_session: AsyncSession):
         """Test looking up invalid address (no @)."""
-        domain, recipient, error = await lookup_recipient(
-            "invalid-address", test_session
-        )
+        domain, recipient, error = await lookup_recipient("invalid-address", test_session)
         assert domain is None
         assert recipient is None
         assert "Invalid recipient" in error
@@ -209,9 +198,7 @@ class TestLookupRecipient:
         self, test_session: AsyncSession, test_domain_no_catchall: Domain
     ):
         """Test looking up address with no matching recipient and no catch-all."""
-        domain, recipient, error = await lookup_recipient(
-            "unknown@no-catchall.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("unknown@no-catchall.com", test_session)
         assert domain is not None
         assert recipient is None
         assert "not found" in error
@@ -221,9 +208,7 @@ class TestLookupRecipient:
         self, test_session: AsyncSession, test_domain_with_recipients: Domain
     ):
         """Test that recipient lookup is case-insensitive."""
-        domain, recipient, error = await lookup_recipient(
-            "INFO@LOOKUP-TEST.COM", test_session
-        )
+        domain, recipient, error = await lookup_recipient("INFO@LOOKUP-TEST.COM", test_session)
         assert error is None
         assert recipient is not None
         assert recipient.local_part == "info"
@@ -233,9 +218,7 @@ class TestFindRecipientForAddress:
     """Tests for find_recipient_for_address wrapper."""
 
     @pytest.mark.asyncio
-    async def test_find_recipient_wrapper(
-        self, test_session: AsyncSession
-    ):
+    async def test_find_recipient_wrapper(self, test_session: AsyncSession):
         """Test the wrapper function."""
         domain = Domain(domain_name="wrapper-test.com", is_enabled=True)
         test_session.add(domain)

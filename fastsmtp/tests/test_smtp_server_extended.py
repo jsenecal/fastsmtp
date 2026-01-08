@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 from aiosmtpd.smtp import Envelope
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.smtp.server import (
@@ -15,16 +17,13 @@ from fastsmtp.smtp.server import (
     find_recipient_for_address,
     lookup_recipient,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestLookupRecipient:
     """Tests for recipient lookup function."""
 
     @pytest_asyncio.fixture
-    async def test_domain_with_recipients(
-        self, test_session: AsyncSession
-    ) -> Domain:
+    async def test_domain_with_recipients(self, test_session: AsyncSession) -> Domain:
         """Create a test domain with recipients."""
         domain = Domain(domain_name="smtp-test.com", is_enabled=True)
         test_session.add(domain)
@@ -70,9 +69,7 @@ class TestLookupRecipient:
     @pytest.mark.asyncio
     async def test_lookup_unknown_domain(self, test_session: AsyncSession):
         """Test lookup with unknown domain."""
-        domain, recipient, error = await lookup_recipient(
-            "user@unknown.example.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("user@unknown.example.com", test_session)
         assert domain is None
         assert recipient is None
         assert "not configured" in error
@@ -84,9 +81,7 @@ class TestLookupRecipient:
         test_domain_with_recipients: Domain,
     ):
         """Test lookup finds specific recipient."""
-        domain, recipient, error = await lookup_recipient(
-            "info@smtp-test.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("info@smtp-test.com", test_session)
         assert domain is not None
         assert recipient is not None
         assert recipient.local_part == "info"
@@ -99,9 +94,7 @@ class TestLookupRecipient:
         test_domain_with_recipients: Domain,
     ):
         """Test lookup falls back to catch-all."""
-        domain, recipient, error = await lookup_recipient(
-            "unknown@smtp-test.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("unknown@smtp-test.com", test_session)
         assert domain is not None
         assert recipient is not None
         assert recipient.local_part is None  # Catch-all
@@ -114,9 +107,7 @@ class TestLookupRecipient:
         test_domain_with_recipients: Domain,
     ):
         """Test disabled recipient falls back to catch-all."""
-        domain, recipient, error = await lookup_recipient(
-            "disabled@smtp-test.com", test_session
-        )
+        domain, recipient, error = await lookup_recipient("disabled@smtp-test.com", test_session)
         assert domain is not None
         assert recipient is not None
         # Should get catch-all since disabled recipient is skipped
@@ -130,9 +121,7 @@ class TestLookupRecipient:
         test_domain_with_recipients: Domain,
     ):
         """Test lookup is case-insensitive."""
-        domain, recipient, error = await lookup_recipient(
-            "INFO@SMTP-TEST.COM", test_session
-        )
+        domain, recipient, error = await lookup_recipient("INFO@SMTP-TEST.COM", test_session)
         assert domain is not None
         assert recipient is not None
         assert recipient.local_part == "info"
@@ -145,9 +134,7 @@ class TestFindRecipientForAddress:
     @pytest.mark.asyncio
     async def test_find_recipient_returns_tuple(self, test_session: AsyncSession):
         """Test that find_recipient_for_address returns domain and recipient."""
-        domain, recipient = await find_recipient_for_address(
-            "user@unknown.com", test_session
-        )
+        domain, recipient = await find_recipient_for_address("user@unknown.com", test_session)
         assert domain is None
         assert recipient is None
 
@@ -274,9 +261,7 @@ class TestFastSMTPHandler:
             with patch("fastsmtp.smtp.server.lookup_recipient") as mock_lookup:
                 mock_lookup.return_value = (None, None, "Invalid address")
 
-                result = await handler.handle_RCPT(
-                    server, session, envelope, "invalid", []
-                )
+                result = await handler.handle_RCPT(server, session, envelope, "invalid", [])
 
                 assert "550" in result
                 assert "Invalid" in result

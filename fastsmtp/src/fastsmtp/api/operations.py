@@ -67,10 +67,7 @@ async def _check_smtp_port(host: str, port: int, connect_timeout: float = 2.0) -
 async def _get_queue_stats(session: AsyncSession) -> QueueStats:
     """Get delivery queue statistics."""
     # Count by status in a single query
-    stmt = (
-        select(DeliveryLog.status, func.count(DeliveryLog.id))
-        .group_by(DeliveryLog.status)
-    )
+    stmt = select(DeliveryLog.status, func.count(DeliveryLog.id)).group_by(DeliveryLog.status)
     result = await session.execute(stmt)
     counts = {row[0]: row[1] for row in result.fetchall()}
 

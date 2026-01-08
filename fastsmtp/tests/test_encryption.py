@@ -4,6 +4,7 @@ Tests follow TDD - written before implementation.
 """
 
 import pytest
+
 from fastsmtp.config import Settings
 
 

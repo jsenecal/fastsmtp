@@ -124,9 +124,7 @@ def update_recipient(
     ] = None,
 ) -> None:
     """Update a recipient."""
-    if all(
-        v is None for v in [local_part, webhook_url, description, enabled, tags]
-    ):
+    if all(v is None for v in [local_part, webhook_url, description, enabled, tags]):
         print_error("At least one option must be provided")
         raise typer.Exit(1)
 

@@ -6,9 +6,9 @@ import ssl
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from fastsmtp.config import Settings
 from fastsmtp.smtp.tls import (
     TLSContextManager,
@@ -34,12 +34,20 @@ class TestCreateTLSContext:
             # Generate a self-signed cert using openssl
             result = run(
                 [
-                    "openssl", "req", "-x509", "-newkey", "rsa:2048",
-                    "-keyout", str(key_path),
-                    "-out", str(cert_path),
-                    "-days", "1",
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-keyout",
+                    str(key_path),
+                    "-out",
+                    str(cert_path),
+                    "-days",
+                    "1",
                     "-nodes",
-                    "-subj", "/CN=localhost",
+                    "-subj",
+                    "/CN=localhost",
                 ],
                 capture_output=True,
                 text=True,
@@ -240,12 +248,20 @@ class TestTLSContextManager:
             # Generate a self-signed cert using openssl
             result = run(
                 [
-                    "openssl", "req", "-x509", "-newkey", "rsa:2048",
-                    "-keyout", str(key_path),
-                    "-out", str(cert_path),
-                    "-days", "1",
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-keyout",
+                    str(key_path),
+                    "-out",
+                    str(cert_path),
+                    "-days",
+                    "1",
                     "-nodes",
-                    "-subj", "/CN=localhost",
+                    "-subj",
+                    "/CN=localhost",
                 ],
                 capture_output=True,
                 text=True,
@@ -570,7 +586,7 @@ class TestTLSContextManager:
             manager.start_hot_reload()
 
             # Modify the cert file to trigger reload
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
             cert_path.touch()
 
             # Wait for monitor to detect and reload (> 1 second)
@@ -603,7 +619,7 @@ class TestTLSContextManager:
             manager.start_hot_reload()
 
             # Corrupt the cert file
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
             cert_path.write_text("invalid cert content")
 
             # Wait for monitor to detect change (> 1 second)

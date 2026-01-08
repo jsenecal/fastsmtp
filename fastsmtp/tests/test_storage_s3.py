@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from fastsmtp.config import Settings
 from fastsmtp.storage.s3 import (
     S3AttachmentInfo,

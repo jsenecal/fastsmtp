@@ -58,6 +58,7 @@ class TestFastSMTPClient:
     def test_client_init_with_profile_name(self, temp_config, monkeypatch):
         """Test client initialization with profile name."""
         from fastsmtp_cli.config import set_profile
+
         set_profile("test", url="https://test.example.com")
 
         client = FastSMTPClient(profile_name="test")
@@ -116,9 +117,7 @@ class TestFastSMTPClient:
     @respx.mock
     def test_client_delete_request(self, test_profile):
         """Test DELETE request."""
-        respx.delete("https://api.example.com/api/test/123").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.delete("https://api.example.com/api/test/123").mock(return_value=httpx.Response(204))
 
         with FastSMTPClient(profile=test_profile) as client:
             result = client.delete("/api/test/123")
@@ -292,7 +291,9 @@ class TestClientEndpoints:
         """Test create recipient endpoint."""
         domain_id = str(uuid4())
         respx.post(f"https://api.example.com/api/domains/{domain_id}/recipients").mock(
-            return_value=httpx.Response(201, json={"id": "r1", "webhook_url": "https://hook.example.com"})
+            return_value=httpx.Response(
+                201, json={"id": "r1", "webhook_url": "https://hook.example.com"}
+            )
         )
 
         with mock_client as client:
@@ -300,7 +301,7 @@ class TestClientEndpoints:
                 domain_id,
                 webhook_url="https://hook.example.com",
                 local_part="info",
-                tags=["important"]
+                tags=["important"],
             )
             assert result["webhook_url"] == "https://hook.example.com"
 
@@ -330,7 +331,7 @@ class TestClientEndpoints:
                 from_address="test@example.com",
                 to_address="user@example.com",
                 subject="Test",
-                body="Test body"
+                body="Test body",
             )
             assert result["success"] is True
 

@@ -4,10 +4,11 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastsmtp.auth import generate_api_key
-from fastsmtp.db.models import APIKey, Domain, DomainMember, User
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.auth import generate_api_key
+from fastsmtp.db.models import APIKey, Domain, DomainMember, User
 
 
 class TestDomainMembersExtended:
@@ -37,9 +38,7 @@ class TestDomainMembersExtended:
         return user
 
     @pytest.mark.asyncio
-    async def test_add_member_user_not_found(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_add_member_user_not_found(self, auth_client: AsyncClient, test_domain: Domain):
         """Test adding non-existent user as member fails."""
         fake_user_id = uuid.uuid4()
         response = await auth_client.post(
@@ -50,9 +49,7 @@ class TestDomainMembersExtended:
         assert "User not found" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_update_member_not_found(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_update_member_not_found(self, auth_client: AsyncClient, test_domain: Domain):
         """Test updating non-existent member fails."""
         fake_user_id = uuid.uuid4()
         response = await auth_client.put(
@@ -62,9 +59,7 @@ class TestDomainMembersExtended:
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_remove_member_not_found(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_remove_member_not_found(self, auth_client: AsyncClient, test_domain: Domain):
         """Test removing non-existent member fails."""
         fake_user_id = uuid.uuid4()
         response = await auth_client.delete(

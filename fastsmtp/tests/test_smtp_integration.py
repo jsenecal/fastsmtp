@@ -9,11 +9,12 @@ import aiosmtplib
 import pytest
 import pytest_asyncio
 from aiosmtpd.smtp import Envelope
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from fastsmtp.config import Settings
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.smtp.server import FastSMTPHandler, SMTPServer
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestSMTPIntegration:
@@ -78,7 +79,7 @@ class TestSMTPIntegration:
         self, smtp_server, smtp_settings: Settings
     ):
         """Test that SMTP server starts and accepts connections."""
-        server = smtp_server
+        _ = smtp_server  # Ensure fixture runs
 
         # Try to connect to the SMTP server
         smtp = aiosmtplib.SMTP(
@@ -95,11 +96,9 @@ class TestSMTPIntegration:
         await smtp.quit()
 
     @pytest.mark.asyncio
-    async def test_smtp_ehlo_returns_capabilities(
-        self, smtp_server, smtp_settings: Settings
-    ):
+    async def test_smtp_ehlo_returns_capabilities(self, smtp_server, smtp_settings: Settings):
         """Test that EHLO returns server capabilities."""
-        server = smtp_server
+        _ = smtp_server  # Ensure fixture runs
 
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
@@ -131,9 +130,7 @@ class TestFastSMTPHandlerIntegration:
         )
 
     @pytest_asyncio.fixture
-    async def test_domain_with_recipient(
-        self, test_session: AsyncSession
-    ) -> Domain:
+    async def test_domain_with_recipient(self, test_session: AsyncSession) -> Domain:
         """Create a domain with recipient for handler testing."""
         domain = Domain(
             domain_name="handler-test.com",
@@ -240,9 +237,7 @@ class TestFastSMTPHandlerIntegration:
             mock_ctx.__aexit__.return_value = None
             mock_async_session.return_value = mock_ctx
 
-            result = await handler.handle_RCPT(
-                server, session, envelope, "invalid-no-at-sign", []
-            )
+            result = await handler.handle_RCPT(server, session, envelope, "invalid-no-at-sign", [])
 
         assert "550" in result
         assert "Invalid" in result
@@ -285,9 +280,7 @@ This is a test message body.
         assert result == "250 Message accepted for delivery"
 
         # Check that delivery was persisted
-        stmt = select(DeliveryLog).where(
-            DeliveryLog.message_id == "<test-123@example.com>"
-        )
+        stmt = select(DeliveryLog).where(DeliveryLog.message_id == "<test-123@example.com>")
         db_result = await test_session.execute(stmt)
         delivery = db_result.scalar_one_or_none()
         assert delivery is not None
@@ -427,9 +420,7 @@ class TestSMTPSTARTTLS:
             server.stop()
 
     @pytest.mark.asyncio
-    async def test_starttls_plain_port_connects(
-        self, tls_settings: Settings | None
-    ):
+    async def test_starttls_plain_port_connects(self, tls_settings: Settings | None):
         """Test connection to plain SMTP port when TLS is configured."""
         if tls_settings is None:
             pytest.skip("TLS settings not available")
@@ -506,9 +497,7 @@ class TestSMTPAuthSettings:
         )
 
     @pytest.mark.asyncio
-    async def test_server_starts_with_strict_auth(
-        self, strict_auth_settings: Settings
-    ):
+    async def test_server_starts_with_strict_auth(self, strict_auth_settings: Settings):
         """Test that server starts with strict auth settings."""
         server = SMTPServer(settings=strict_auth_settings)
         server.start()

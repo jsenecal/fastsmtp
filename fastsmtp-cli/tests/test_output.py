@@ -1,10 +1,7 @@
 """Tests for CLI output formatting utilities."""
 
-from datetime import datetime, timezone
-from io import StringIO
-from unittest.mock import patch
+from datetime import UTC, datetime
 
-import pytest
 from fastsmtp_cli.output import (
     format_datetime,
     print_api_key,
@@ -46,7 +43,7 @@ class TestFormatDateTime:
 
     def test_format_datetime_object(self):
         """Test formatting datetime object."""
-        dt = datetime(2024, 1, 15, 10, 30, 45, tzinfo=timezone.utc)
+        dt = datetime(2024, 1, 15, 10, 30, 45, tzinfo=UTC)
         result = format_datetime(dt)
         assert "2024-01-15" in result
         assert "10:30:45" in result

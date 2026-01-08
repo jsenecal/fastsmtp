@@ -1,6 +1,7 @@
 """Tests for SMTP email authentication validation to improve coverage."""
 
 import pytest
+
 from fastsmtp.smtp.validation import (
     RESULT_FAIL,
     RESULT_NONE,

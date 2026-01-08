@@ -3,13 +3,14 @@
 import hashlib
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
-from fastsmtp.db.enums import DeliveryStatus
-from fastsmtp.db.models import DeliveryLog, Domain
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.db.enums import DeliveryStatus
+from fastsmtp.db.models import DeliveryLog, Domain
 
 
 class TestDeliveryLogsExtended:

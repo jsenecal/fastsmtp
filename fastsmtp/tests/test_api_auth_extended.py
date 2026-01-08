@@ -4,11 +4,12 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from fastsmtp.auth import generate_api_key
 from fastsmtp.config import Settings
 from fastsmtp.db.models import APIKey, User
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestAuthWhoami:
@@ -28,9 +29,7 @@ class TestAuthKeysExtended:
     """Extended tests for API key management."""
 
     @pytest_asyncio.fixture
-    async def regular_user_with_key(
-        self, test_session: AsyncSession
-    ) -> tuple[User, str]:
+    async def regular_user_with_key(self, test_session: AsyncSession) -> tuple[User, str]:
         """Create a regular user with an API key."""
         user = User(
             username="keyuser",
@@ -179,9 +178,7 @@ class TestAuthDependencies:
     """Tests for auth dependencies."""
 
     @pytest.mark.asyncio
-    async def test_invalid_api_key(
-        self, app, test_settings: Settings
-    ):
+    async def test_invalid_api_key(self, app, test_settings: Settings):
         """Test invalid API key returns 401."""
         transport = ASGITransport(app=app)
         async with AsyncClient(
@@ -201,9 +198,7 @@ class TestAuthDependencies:
         assert "API key required" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_inactive_api_key(
-        self, app, test_session: AsyncSession
-    ):
+    async def test_inactive_api_key(self, app, test_session: AsyncSession):
         """Test inactive API key returns 401."""
         user = User(
             username="inactivekey",
@@ -236,9 +231,7 @@ class TestAuthDependencies:
             assert "inactive" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_inactive_user(
-        self, app, test_session: AsyncSession
-    ):
+    async def test_inactive_user(self, app, test_session: AsyncSession):
         """Test inactive user returns 401."""
         user = User(
             username="inactiveuser",

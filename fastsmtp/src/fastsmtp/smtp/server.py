@@ -453,16 +453,14 @@ async def extract_email_payload(
                         attachment_info["storage"] = "inline"
                         attachment_info["storage_fallback"] = True
                         if size <= max_inline_attachment_size:
-                            attachment_info["content"] = base64.b64encode(
-                                part_payload
-                            ).decode("ascii")
+                            attachment_info["content"] = base64.b64encode(part_payload).decode(
+                                "ascii"
+                            )
                             attachment_info["content_transfer_encoding"] = "base64"
                 elif isinstance(part_payload, bytes) and size <= max_inline_attachment_size:
                     # Inline storage
                     attachment_info["storage"] = "inline"
-                    attachment_info["content"] = base64.b64encode(part_payload).decode(
-                        "ascii"
-                    )
+                    attachment_info["content"] = base64.b64encode(part_payload).decode("ascii")
                     attachment_info["content_transfer_encoding"] = "base64"
                 else:
                     # Metadata only (too large for inline, no S3)

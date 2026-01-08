@@ -4,9 +4,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastsmtp.db.models import Domain, Rule, RuleSet
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.db.models import Domain, Rule, RuleSet
 
 
 class TestRuleSetUpdateExtended:
@@ -74,9 +75,7 @@ class TestRuleSetUpdateExtended:
         await test_session.refresh(domain)
 
         fake_id = uuid.uuid4()
-        response = await auth_client.delete(
-            f"/api/v1/domains/{domain.id}/rulesets/{fake_id}"
-        )
+        response = await auth_client.delete(f"/api/v1/domains/{domain.id}/rulesets/{fake_id}")
         assert response.status_code == 404
 
 
@@ -84,9 +83,7 @@ class TestRuleUpdateExtended:
     """Extended tests for rule update operations."""
 
     @pytest_asyncio.fixture
-    async def test_domain_and_ruleset(
-        self, test_session: AsyncSession
-    ) -> tuple[Domain, RuleSet]:
+    async def test_domain_and_ruleset(self, test_session: AsyncSession) -> tuple[Domain, RuleSet]:
         """Create a domain and ruleset."""
         domain = Domain(domain_name="rule-update-test.com", is_enabled=True)
         test_session.add(domain)

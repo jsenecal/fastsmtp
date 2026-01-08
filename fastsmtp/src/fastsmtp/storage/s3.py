@@ -137,6 +137,4 @@ class S3Storage:
 
         except Exception as e:
             logger.warning(f"S3 upload failed for {filename}: {e}")
-            raise S3UploadError(
-                f"Failed to upload {filename}: {e}", filename, cause=e
-            ) from e
+            raise S3UploadError(f"Failed to upload {filename}: {e}", filename, cause=e) from e

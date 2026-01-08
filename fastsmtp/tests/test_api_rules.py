@@ -4,9 +4,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastsmtp.db.models import Domain, Rule, RuleSet
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.db.models import Domain, Rule, RuleSet
 
 
 class TestRuleSetsCRUD:
@@ -22,20 +23,14 @@ class TestRuleSetsCRUD:
         return domain
 
     @pytest.mark.asyncio
-    async def test_list_rulesets_empty(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_list_rulesets_empty(self, auth_client: AsyncClient, test_domain: Domain):
         """Test listing rulesets when none exist."""
-        response = await auth_client.get(
-            f"/api/v1/domains/{test_domain.id}/rulesets"
-        )
+        response = await auth_client.get(f"/api/v1/domains/{test_domain.id}/rulesets")
         assert response.status_code == 200
         assert response.json() == []
 
     @pytest.mark.asyncio
-    async def test_create_ruleset(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_create_ruleset(self, auth_client: AsyncClient, test_domain: Domain):
         """Test creating a ruleset."""
         response = await auth_client.post(
             f"/api/v1/domains/{test_domain.id}/rulesets",
@@ -82,9 +77,7 @@ class TestRuleSetsCRUD:
         test_session.add_all([rs1, rs2])
         await test_session.commit()
 
-        response = await auth_client.get(
-            f"/api/v1/domains/{test_domain.id}/rulesets"
-        )
+        response = await auth_client.get(f"/api/v1/domains/{test_domain.id}/rulesets")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 2
@@ -106,9 +99,7 @@ class TestRuleSetsCRUD:
         await test_session.commit()
         await test_session.refresh(ruleset)
 
-        response = await auth_client.get(
-            f"/api/v1/domains/{test_domain.id}/rulesets/{ruleset.id}"
-        )
+        response = await auth_client.get(f"/api/v1/domains/{test_domain.id}/rulesets/{ruleset.id}")
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "Get Test"
@@ -116,14 +107,10 @@ class TestRuleSetsCRUD:
         assert data["rules"] == []
 
     @pytest.mark.asyncio
-    async def test_get_ruleset_not_found(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_get_ruleset_not_found(self, auth_client: AsyncClient, test_domain: Domain):
         """Test getting non-existent ruleset returns 404."""
         fake_id = uuid.uuid4()
-        response = await auth_client.get(
-            f"/api/v1/domains/{test_domain.id}/rulesets/{fake_id}"
-        )
+        response = await auth_client.get(f"/api/v1/domains/{test_domain.id}/rulesets/{fake_id}")
         assert response.status_code == 404
 
     @pytest.mark.asyncio
@@ -175,9 +162,7 @@ class TestRulesCRUD:
     """Tests for rule CRUD operations."""
 
     @pytest_asyncio.fixture
-    async def test_domain_and_ruleset(
-        self, test_session: AsyncSession
-    ) -> tuple[Domain, RuleSet]:
+    async def test_domain_and_ruleset(self, test_session: AsyncSession) -> tuple[Domain, RuleSet]:
         """Create a test domain and ruleset."""
         domain = Domain(domain_name="rules-crud-test.com", is_enabled=True)
         test_session.add(domain)
@@ -384,9 +369,7 @@ class TestRulesCRUD:
         await test_session.commit()
         await test_session.refresh(rule)
 
-        response = await auth_client.delete(
-            f"/api/v1/domains/{domain.id}/rules/{rule.id}"
-        )
+        response = await auth_client.delete(f"/api/v1/domains/{domain.id}/rules/{rule.id}")
         assert response.status_code == 200
         assert "deleted" in response.json()["message"]
 

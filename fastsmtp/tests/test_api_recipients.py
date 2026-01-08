@@ -4,9 +4,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastsmtp.db.models import Domain, Recipient
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.db.models import Domain, Recipient
 
 
 class TestRecipientsCRUD:
@@ -22,20 +23,14 @@ class TestRecipientsCRUD:
         return domain
 
     @pytest.mark.asyncio
-    async def test_list_recipients_empty(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_list_recipients_empty(self, auth_client: AsyncClient, test_domain: Domain):
         """Test listing recipients when none exist."""
-        response = await auth_client.get(
-            f"/api/v1/domains/{test_domain.id}/recipients"
-        )
+        response = await auth_client.get(f"/api/v1/domains/{test_domain.id}/recipients")
         assert response.status_code == 200
         assert response.json() == []
 
     @pytest.mark.asyncio
-    async def test_create_recipient(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_create_recipient(self, auth_client: AsyncClient, test_domain: Domain):
         """Test creating a recipient."""
         response = await auth_client.post(
             f"/api/v1/domains/{test_domain.id}/recipients",
@@ -51,9 +46,7 @@ class TestRecipientsCRUD:
         assert data["is_enabled"] is True
 
     @pytest.mark.asyncio
-    async def test_create_catchall_recipient(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_create_catchall_recipient(self, auth_client: AsyncClient, test_domain: Domain):
         """Test creating a catch-all recipient (null local_part)."""
         response = await auth_client.post(
             f"/api/v1/domains/{test_domain.id}/recipients",
@@ -126,9 +119,7 @@ class TestRecipientsCRUD:
         test_session.add_all([r1, r2])
         await test_session.commit()
 
-        response = await auth_client.get(
-            f"/api/v1/domains/{test_domain.id}/recipients"
-        )
+        response = await auth_client.get(f"/api/v1/domains/{test_domain.id}/recipients")
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 2
@@ -156,14 +147,10 @@ class TestRecipientsCRUD:
         assert data["local_part"] == "gettest"
 
     @pytest.mark.asyncio
-    async def test_get_recipient_not_found(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_get_recipient_not_found(self, auth_client: AsyncClient, test_domain: Domain):
         """Test getting non-existent recipient returns 404."""
         fake_id = uuid.uuid4()
-        response = await auth_client.get(
-            f"/api/v1/domains/{test_domain.id}/recipients/{fake_id}"
-        )
+        response = await auth_client.get(f"/api/v1/domains/{test_domain.id}/recipients/{fake_id}")
         assert response.status_code == 404
 
     @pytest.mark.asyncio

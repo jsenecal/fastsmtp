@@ -4,8 +4,6 @@ Tests follow TDD - written before implementation.
 """
 
 
-
-
 class TestSettingsCacheClearing:
     """Test settings cache clearing functionality."""
 

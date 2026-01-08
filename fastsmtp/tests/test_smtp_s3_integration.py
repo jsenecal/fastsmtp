@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiosmtpd.smtp import Envelope
+
 from fastsmtp.config import Settings
 from fastsmtp.smtp.server import extract_email_payload
 from fastsmtp.storage.s3 import S3AttachmentInfo, S3Storage, S3UploadError
@@ -85,9 +86,7 @@ class TestExtractEmailPayloadWithS3:
         msg["Subject"] = "Test"
         msg["Message-ID"] = "<test@example.com>"
         msg.set_content("Body")
-        msg.add_attachment(
-            b"content", maintype="application", subtype="pdf", filename="file.pdf"
-        )
+        msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
 
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"
@@ -118,9 +117,7 @@ class TestExtractEmailPayloadWithS3:
         msg["Subject"] = "Test"
         msg["Message-ID"] = "<test@example.com>"
         msg.set_content("Body")
-        msg.add_attachment(
-            b"content", maintype="application", subtype="pdf", filename="file.pdf"
-        )
+        msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
 
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"
@@ -149,9 +146,7 @@ class TestExtractEmailPayloadWithS3:
         msg["Subject"] = "Test"
         msg["Message-ID"] = "<test@example.com>"
         msg.set_content("Body")
-        msg.add_attachment(
-            b"content", maintype="application", subtype="pdf", filename="file.pdf"
-        )
+        msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
 
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"
@@ -180,9 +175,7 @@ class TestExtractEmailPayloadWithS3:
         msg.add_attachment(
             b"pdf content", maintype="application", subtype="pdf", filename="doc.pdf"
         )
-        msg.add_attachment(
-            b"image content", maintype="image", subtype="png", filename="image.png"
-        )
+        msg.add_attachment(b"image content", maintype="image", subtype="png", filename="image.png")
 
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"
@@ -227,9 +220,7 @@ class TestExtractEmailPayloadWithS3:
         msg.add_attachment(
             b"pdf content", maintype="application", subtype="pdf", filename="doc.pdf"
         )
-        msg.add_attachment(
-            b"image content", maintype="image", subtype="png", filename="image.png"
-        )
+        msg.add_attachment(b"image content", maintype="image", subtype="png", filename="image.png")
 
         envelope = Envelope()
         envelope.mail_from = "sender@example.com"

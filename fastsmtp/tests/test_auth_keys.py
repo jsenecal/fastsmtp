@@ -1,6 +1,5 @@
 """Tests for API key generation and authentication."""
 
-
 from fastsmtp.auth.keys import (
     API_KEY_PREFIX,
     generate_api_key,

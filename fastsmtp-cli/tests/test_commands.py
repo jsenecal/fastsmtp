@@ -7,10 +7,8 @@ from uuid import uuid4
 import httpx
 import pytest
 import respx
-from typer.testing import CliRunner
-
 from fastsmtp_cli.main import app
-
+from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -59,7 +57,9 @@ class TestConfigCommands:
 
     def test_config_set_profile(self, temp_config):
         """Test config set command with URL."""
-        result = runner.invoke(app, ["config", "set", "default", "--url", "https://new.example.com"])
+        result = runner.invoke(
+            app, ["config", "set", "default", "--url", "https://new.example.com"]
+        )
         assert result.exit_code == 0
 
     def test_config_set_profile_api_key(self, temp_config):
@@ -705,8 +705,19 @@ class TestRulesCommands:
 
         result = runner.invoke(
             app,
-            ["rules", "rule", "create", ruleset_id, "Block spam",
-             "--field", "from", "--operator", "contains", "--value", "@spam.com"],
+            [
+                "rules",
+                "rule",
+                "create",
+                ruleset_id,
+                "Block spam",
+                "--field",
+                "from",
+                "--operator",
+                "contains",
+                "--value",
+                "@spam.com",
+            ],
         )
         assert result.exit_code == 0
 
@@ -845,8 +856,19 @@ class TestRulesErrorPaths:
 
         result = runner.invoke(
             app,
-            ["rules", "rule", "create", ruleset_id, "Bad Rule",
-             "--field", "from", "--operator", "equals", "--value", "test"],
+            [
+                "rules",
+                "rule",
+                "create",
+                ruleset_id,
+                "Bad Rule",
+                "--field",
+                "from",
+                "--operator",
+                "equals",
+                "--value",
+                "test",
+            ],
         )
         assert result.exit_code == 1
 

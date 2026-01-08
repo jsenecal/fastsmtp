@@ -9,6 +9,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from fastsmtp.config import Settings
@@ -28,7 +29,6 @@ from fastsmtp.webhook.queue import (
     mark_failed,
     retry_delivery,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestComputePayloadHash:
@@ -999,9 +999,7 @@ class TestDeadLetterQueue:
             mock_dlq.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_dlq_notification_not_sent_for_non_exhausted(
-        self, test_session: AsyncSession
-    ):
+    async def test_dlq_notification_not_sent_for_non_exhausted(self, test_session: AsyncSession):
         """Test that DLQ notification is NOT sent when delivery still has retries."""
         domain = Domain(
             id=uuid.uuid4(),

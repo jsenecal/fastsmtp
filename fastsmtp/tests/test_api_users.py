@@ -4,9 +4,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastsmtp.db.models import APIKey, User
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.db.models import APIKey, User
 
 
 class TestUsersCRUD:
@@ -56,9 +57,7 @@ class TestUsersCRUD:
         assert response.status_code == 409
 
     @pytest.mark.asyncio
-    async def test_get_user(
-        self, auth_client: AsyncClient, test_session: AsyncSession
-    ):
+    async def test_get_user(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test getting a user by ID."""
         user = User(username="getuser", email="get@test.com", is_active=True)
         test_session.add(user)
@@ -78,9 +77,7 @@ class TestUsersCRUD:
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_update_user(
-        self, auth_client: AsyncClient, test_session: AsyncSession
-    ):
+    async def test_update_user(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test updating a user."""
         user = User(username="updateuser", email="update@test.com", is_active=True)
         test_session.add(user)
@@ -97,9 +94,7 @@ class TestUsersCRUD:
         assert data["is_active"] is False
 
     @pytest.mark.asyncio
-    async def test_delete_user(
-        self, auth_client: AsyncClient, test_session: AsyncSession
-    ):
+    async def test_delete_user(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test deleting a user."""
         user = User(username="deleteuser", email="delete@test.com", is_active=True)
         test_session.add(user)
@@ -176,9 +171,7 @@ class TestAPIKeysWithRegularUser:
     """Tests for API key operations with regular user."""
 
     @pytest_asyncio.fixture
-    async def regular_user_client(
-        self, app, test_session: AsyncSession
-    ) -> AsyncClient:
+    async def regular_user_client(self, app, test_session: AsyncSession) -> AsyncClient:
         """Create a regular user and authenticated client."""
         from fastsmtp.auth import generate_api_key
 
@@ -273,9 +266,7 @@ class TestAPIKeysWithRegularUser:
         assert "deleted" in response.json()["message"]
 
     @pytest.mark.asyncio
-    async def test_regular_user_cannot_list_all_users(
-        self, regular_user_client: AsyncClient
-    ):
+    async def test_regular_user_cannot_list_all_users(self, regular_user_client: AsyncClient):
         """Test regular user cannot access user management."""
         response = await regular_user_client.get("/api/v1/users")
         assert response.status_code == 403

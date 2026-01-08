@@ -3,9 +3,10 @@
 import uuid
 
 import pytest
-from fastsmtp.db.models import User
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.db.models import User
 
 
 class TestUsersCRUDExtended:
@@ -88,9 +89,7 @@ class TestUsersCRUDExtended:
         assert "already exists" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_get_user_success(
-        self, auth_client: AsyncClient, test_session: AsyncSession
-    ):
+    async def test_get_user_success(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test getting a user by ID."""
         user = User(username="getuser", email="get@example.com", is_active=True)
         test_session.add(user)
@@ -110,9 +109,7 @@ class TestUsersCRUDExtended:
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_update_user_success(
-        self, auth_client: AsyncClient, test_session: AsyncSession
-    ):
+    async def test_update_user_success(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test updating a user."""
         user = User(username="updateuser", email="update@example.com", is_active=True)
         test_session.add(user)
@@ -157,9 +154,7 @@ class TestUsersCRUDExtended:
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_delete_user_success(
-        self, auth_client: AsyncClient, test_session: AsyncSession
-    ):
+    async def test_delete_user_success(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test deleting a user."""
         user = User(username="deleteuser", email="delete@example.com", is_active=True)
         test_session.add(user)

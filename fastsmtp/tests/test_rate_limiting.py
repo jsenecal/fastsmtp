@@ -8,12 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Base
 from fastsmtp.db.session import get_session
 from fastsmtp.main import create_app
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class TestRateLimitingConfig:
@@ -64,9 +65,7 @@ class TestRateLimitingMiddleware:
         )
 
     @pytest_asyncio.fixture
-    async def rate_limited_app(
-        self, rate_limited_settings: Settings, test_engine
-    ) -> FastAPI:
+    async def rate_limited_app(self, rate_limited_settings: Settings, test_engine) -> FastAPI:
         """Create app with rate limiting enabled."""
 
         application = create_app(rate_limited_settings)
@@ -119,13 +118,14 @@ class TestRateLimitingMiddleware:
             ),
         ):
             # Create app with rate limiting enabled
-            from fastsmtp.config import get_settings
-            from fastsmtp.db.models import Base
             from sqlalchemy.ext.asyncio import (
                 AsyncSession,
                 async_sessionmaker,
                 create_async_engine,
             )
+
+            from fastsmtp.config import get_settings
+            from fastsmtp.db.models import Base
 
             engine = create_async_engine(rate_limited_settings.database_url, echo=False)
             async with engine.begin() as conn:
@@ -178,13 +178,14 @@ class TestRateLimitingMiddleware:
                 return_value=rate_limited_settings,
             ),
         ):
-            from fastsmtp.config import get_settings
-            from fastsmtp.db.models import Base
             from sqlalchemy.ext.asyncio import (
                 AsyncSession,
                 async_sessionmaker,
                 create_async_engine,
             )
+
+            from fastsmtp.config import get_settings
+            from fastsmtp.db.models import Base
 
             engine = create_async_engine(rate_limited_settings.database_url, echo=False)
             async with engine.begin() as conn:
@@ -259,13 +260,14 @@ class TestRateLimitingMiddleware:
                 return_value=rate_limited_settings,
             ),
         ):
-            from fastsmtp.config import get_settings
-            from fastsmtp.db.models import Base
             from sqlalchemy.ext.asyncio import (
                 AsyncSession,
                 async_sessionmaker,
                 create_async_engine,
             )
+
+            from fastsmtp.config import get_settings
+            from fastsmtp.db.models import Base
 
             engine = create_async_engine(rate_limited_settings.database_url, echo=False)
             async with engine.begin() as conn:
@@ -298,13 +300,13 @@ class TestRateLimitingMiddleware:
 
             # Rate limit key should include API key identifier
             rate_limit_keys = [k for k in request_counts if "rate_limit" in k.lower()]
-            assert len(rate_limit_keys) > 0, (
-                f"Should track rate limits by key. Keys: {request_counts.keys()}"
-            )
+            assert (
+                len(rate_limit_keys) > 0
+            ), f"Should track rate limits by key. Keys: {request_counts.keys()}"
             # Verify the key format includes api key prefix
-            assert any("test_root_ap" in k for k in rate_limit_keys), (
-                f"Key should include API key prefix. Keys: {rate_limit_keys}"
-            )
+            assert any(
+                "test_root_ap" in k for k in rate_limit_keys
+            ), f"Key should include API key prefix. Keys: {rate_limit_keys}"
 
             await engine.dispose()
 
@@ -347,8 +349,9 @@ class TestAuthRateLimiting:
             rate_limit_auth_attempts_per_minute=3,
         )
 
-        from fastsmtp.config import get_settings
         from sqlalchemy.ext.asyncio import create_async_engine
+
+        from fastsmtp.config import get_settings
 
         engine = create_async_engine(settings.database_url, echo=False)
         async with engine.begin() as conn:

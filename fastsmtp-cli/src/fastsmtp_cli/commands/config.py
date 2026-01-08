@@ -120,9 +120,7 @@ def init_config(
     """Initialize CLI configuration."""
     config_path = cfg.get_config_path()
 
-    if config_path.exists() and not typer.confirm(
-        "Configuration already exists. Overwrite?"
-    ):
+    if config_path.exists() and not typer.confirm("Configuration already exists. Overwrite?"):
         raise typer.Exit(0)
 
     cfg.set_profile(name=profile, url=url, api_key=api_key)

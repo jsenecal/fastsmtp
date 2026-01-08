@@ -4,9 +4,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from fastsmtp.db.models import Domain, Recipient
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastsmtp.db.models import Domain, Recipient
 
 
 class TestRecipientsUpdateExtended:
@@ -96,9 +97,7 @@ class TestRecipientsUpdateExtended:
         assert "already exists" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_update_recipient_not_found(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_update_recipient_not_found(self, auth_client: AsyncClient, test_domain: Domain):
         """Test updating non-existent recipient returns 404."""
         fake_id = uuid.uuid4()
         response = await auth_client.put(
@@ -131,9 +130,7 @@ class TestRecipientsUpdateExtended:
         assert data["webhook_url"] == "https://new.example.com/hook"
 
     @pytest.mark.asyncio
-    async def test_delete_recipient_not_found(
-        self, auth_client: AsyncClient, test_domain: Domain
-    ):
+    async def test_delete_recipient_not_found(self, auth_client: AsyncClient, test_domain: Domain):
         """Test deleting non-existent recipient returns 404."""
         fake_id = uuid.uuid4()
         response = await auth_client.delete(

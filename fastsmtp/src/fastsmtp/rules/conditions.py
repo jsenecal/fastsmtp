@@ -115,7 +115,7 @@ def match_exists(value: Any, pattern: str, case_sensitive: bool = False) -> bool
         return False
     if isinstance(value, str):
         return len(value.strip()) > 0
-    if isinstance(value, (list, dict)):
+    if isinstance(value, list | dict):
         return len(value) > 0
     return True
 
