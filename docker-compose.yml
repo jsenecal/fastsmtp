@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # PostgreSQL Database
   postgres:
@@ -20,19 +18,18 @@ services:
   fastsmtp:
     build: .
     ports:
-      - "8000:8000"    # API
-      - "2525:25"      # SMTP
-      - "4465:465"     # SMTP TLS
+      - "8888:8000"    # API
+      - "2525:2525"    # SMTP
+      - "4650:4650"    # SMTP TLS
     environment:
       FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres:5432/fastsmtp
       FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY:?FASTSMTP_ROOT_API_KEY is required}
       FASTSMTP_API_HOST: 0.0.0.0
       FASTSMTP_SMTP_HOST: 0.0.0.0
-      FASTSMTP_CORS_ORIGINS: ${FASTSMTP_CORS_ORIGINS:-}
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["python", "-m", "fastsmtp.cli", "serve"]
+    command: ["fastsmtp", "serve"]
 
   # Webhook Worker (separate instance for horizontal scaling)
   worker:
@@ -43,7 +40,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["python", "-m", "fastsmtp.cli", "serve", "--worker-only"]
+    command: ["fastsmtp", "serve", "--worker-only"]
     deploy:
       replicas: 2
 
