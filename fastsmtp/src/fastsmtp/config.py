@@ -3,9 +3,10 @@
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -82,6 +83,44 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Domains allowed to bypass SSRF protection (e.g., internal services). "
         "Use sparingly and only for trusted internal services.",
+    )
+
+    # Attachment Storage
+    attachment_storage: Literal["inline", "s3"] = Field(
+        default="inline",
+        description="Storage backend for attachments: 'inline' (base64 in payload) or 's3'",
+    )
+    s3_endpoint_url: str | None = Field(
+        default=None,
+        description="S3 endpoint URL (for MinIO/Ceph). None = AWS default",
+    )
+    s3_bucket: str | None = Field(
+        default=None,
+        description="S3 bucket name for attachments",
+    )
+    s3_access_key: SecretStr | None = Field(
+        default=None,
+        description="S3 access key ID",
+    )
+    s3_secret_key: SecretStr | None = Field(
+        default=None,
+        description="S3 secret access key",
+    )
+    s3_region: str = Field(
+        default="us-east-1",
+        description="S3 region",
+    )
+    s3_prefix: str = Field(
+        default="attachments",
+        description="S3 key prefix for attachments",
+    )
+    s3_presigned_urls: bool = Field(
+        default=False,
+        description="Include presigned URLs in webhook payload",
+    )
+    s3_presigned_url_expiry: int = Field(
+        default=3600,
+        description="Presigned URL expiry in seconds",
     )
 
     # Dead Letter Queue
@@ -184,6 +223,21 @@ class Settings(BaseSettings):
         default=100,
         description="Maximum recipients per SMTP message",
     )
+
+    @model_validator(mode="after")
+    def validate_s3_config(self) -> "Settings":
+        """Validate S3 configuration when attachment_storage is 's3'."""
+        if self.attachment_storage == "s3":
+            missing = []
+            if not self.s3_bucket:
+                missing.append("s3_bucket")
+            if not self.s3_access_key:
+                missing.append("s3_access_key")
+            if not self.s3_secret_key:
+                missing.append("s3_secret_key")
+            if missing:
+                raise ValueError(f"S3 storage requires: {', '.join(missing)}")
+        return self
 
 
 @lru_cache(maxsize=1)
