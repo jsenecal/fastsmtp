@@ -12,41 +12,7 @@ env:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: fastsmtp
-          POSTGRES_PASSWORD: fastsmtp
-          POSTGRES_DB: fastsmtp_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-packages --dev
-
-      - name: Run tests
-        env:
-          FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@localhost:5432/fastsmtp_test
-          FASTSMTP_ROOT_API_KEY: test-api-key-for-ci
-        run: uv run pytest
+    uses: ./.github/workflows/test.yml
 
   build-and-push:
     name: Build and Push Docker Image
