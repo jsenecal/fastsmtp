@@ -39,6 +39,9 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["fastsmtp/tests", "fastsmtp-cli/tests"]
 filterwarnings = [
     "ignore::DeprecationWarning:aiosmtpd.*",
+    "ignore::DeprecationWarning:testcontainers.*",
+    "ignore::DeprecationWarning:spf.*",
+    "ignore::SyntaxWarning:spf.*",
 ]
 
 [tool.bumpver]
