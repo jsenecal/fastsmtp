@@ -296,13 +296,13 @@ class TestRateLimitingMiddleware:
 
             # Rate limit key should include API key identifier
             rate_limit_keys = [k for k in request_counts if "rate_limit" in k.lower()]
-            assert (
-                len(rate_limit_keys) > 0
-            ), f"Should track rate limits by key. Keys: {request_counts.keys()}"
+            assert len(rate_limit_keys) > 0, (
+                f"Should track rate limits by key. Keys: {request_counts.keys()}"
+            )
             # Verify the key format includes api key prefix
-            assert any(
-                "test_root_ap" in k for k in rate_limit_keys
-            ), f"Key should include API key prefix. Keys: {rate_limit_keys}"
+            assert any("test_root_ap" in k for k in rate_limit_keys), (
+                f"Key should include API key prefix. Keys: {rate_limit_keys}"
+            )
 
             await engine.dispose()
 
