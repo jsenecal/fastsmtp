@@ -6,10 +6,9 @@ Tests follow TDD - written before implementation.
 from datetime import UTC, datetime
 
 import pytest
+from fastsmtp.db.models import APIKey, Domain, Recipient, User
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from fastsmtp.db.models import APIKey, Domain, Recipient, User
 
 
 class TestSoftDeleteMixin:

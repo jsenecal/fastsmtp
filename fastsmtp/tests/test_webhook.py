@@ -8,10 +8,6 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
-
 from fastsmtp.config import Settings
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.webhook.dispatcher import (
@@ -29,6 +25,9 @@ from fastsmtp.webhook.queue import (
     mark_failed,
     retry_delivery,
 )
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 
 class TestComputePayloadHash:

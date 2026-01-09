@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from fastsmtp.config import Settings
 from fastsmtp.smtp.tls import (
     TLSContextManager,

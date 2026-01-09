@@ -9,11 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from fastsmtp.db.models import DeliveryLog, Domain, DomainMember, Recipient, Rule, RuleSet, User
 from fastsmtp.schemas.recipient import RecipientCreate, RecipientUpdate
 from fastsmtp.schemas.rule import RuleCreate, RuleSetCreate, RuleSetUpdate, RuleUpdate
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestRecipientAPIUnit:

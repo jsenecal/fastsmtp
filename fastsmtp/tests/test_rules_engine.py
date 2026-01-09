@@ -5,8 +5,6 @@ from email.message import EmailMessage
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from fastsmtp.db.models import Domain, Rule, RuleSet
 from fastsmtp.rules.conditions import (
     MATCHERS,
@@ -27,6 +25,7 @@ from fastsmtp.rules.engine import (
     get_domain_auth_settings,
 )
 from fastsmtp.smtp.validation import EmailAuthResult
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestMatchers:

@@ -3,10 +3,9 @@
 import uuid
 
 import pytest
+from fastsmtp.db.models import User
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from fastsmtp.db.models import User
 
 
 class TestUsersCRUDExtended:

@@ -4,8 +4,6 @@ from email import message_from_bytes
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.smtp.server import (
     extract_email_payload,
@@ -19,6 +17,7 @@ from fastsmtp.smtp.validation import (
     RESULT_SOFTFAIL,
     EmailAuthResult,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestExtractEmailPayload:

@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosmtplib
 import pytest
 import pytest_asyncio
-
 from fastsmtp.config import Settings
 from fastsmtp.smtp.server import SMTPServer
 

@@ -4,10 +4,9 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from fastsmtp.db.models import Domain, Recipient
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from fastsmtp.db.models import Domain, Recipient
 
 
 class TestRecipientsCRUD:
