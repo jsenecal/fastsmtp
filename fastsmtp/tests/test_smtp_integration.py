@@ -9,11 +9,12 @@ import aiosmtplib
 import pytest
 import pytest_asyncio
 from aiosmtpd.smtp import Envelope
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from fastsmtp.config import Settings
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.smtp.server import FastSMTPHandler, SMTPServer
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class TestSMTPIntegration:
@@ -38,9 +39,9 @@ class TestSMTPIntegration:
     async def smtp_server(self, smtp_settings: Settings):
         """Start an actual SMTP server for testing."""
         server = SMTPServer(settings=smtp_settings)
-        server.start()
+        await server.start()
         yield server
-        server.stop()
+        await server.stop()
 
     @pytest_asyncio.fixture
     async def test_domain_setup(self, test_session: AsyncSession) -> Domain:
@@ -332,7 +333,7 @@ class TestSMTPLargeMessageHandling:
         )
 
         server = SMTPServer(settings=settings)
-        server.start()
+        await server.start()
 
         try:
             smtp = aiosmtplib.SMTP(
@@ -349,7 +350,7 @@ class TestSMTPLargeMessageHandling:
 
             await smtp.quit()
         finally:
-            server.stop()
+            await server.stop()
 
 
 class TestSMTPSTARTTLS:
@@ -409,14 +410,14 @@ class TestSMTPSTARTTLS:
             pytest.skip("TLS settings not available")
 
         server = SMTPServer(settings=tls_settings)
-        server.start()
+        await server.start()
 
         try:
             # Verify both controllers are started
             assert server.controller is not None
             assert server.tls_controller is not None
         finally:
-            server.stop()
+            await server.stop()
 
     @pytest.mark.asyncio
     async def test_starttls_plain_port_connects(self, tls_settings: Settings | None):
@@ -425,7 +426,7 @@ class TestSMTPSTARTTLS:
             pytest.skip("TLS settings not available")
 
         server = SMTPServer(settings=tls_settings)
-        server.start()
+        await server.start()
 
         try:
             smtp = aiosmtplib.SMTP(
@@ -440,7 +441,7 @@ class TestSMTPSTARTTLS:
             await smtp.quit()
 
         finally:
-            server.stop()
+            await server.stop()
 
     @pytest.mark.asyncio
     async def test_implicit_tls_connection(self, tls_settings: Settings | None):
@@ -449,7 +450,7 @@ class TestSMTPSTARTTLS:
             pytest.skip("TLS settings not available")
 
         server = SMTPServer(settings=tls_settings)
-        server.start()
+        await server.start()
 
         try:
             import ssl
@@ -474,7 +475,7 @@ class TestSMTPSTARTTLS:
             await smtp.quit()
 
         finally:
-            server.stop()
+            await server.stop()
 
 
 class TestSMTPAuthSettings:
@@ -499,7 +500,7 @@ class TestSMTPAuthSettings:
     async def test_server_starts_with_strict_auth(self, strict_auth_settings: Settings):
         """Test that server starts with strict auth settings."""
         server = SMTPServer(settings=strict_auth_settings)
-        server.start()
+        await server.start()
 
         try:
             assert server.controller is not None
@@ -513,7 +514,7 @@ class TestSMTPAuthSettings:
             await smtp.quit()
 
         finally:
-            server.stop()
+            await server.stop()
 
     @pytest.mark.asyncio
     async def test_handler_rejects_dkim_fail_when_configured(self):

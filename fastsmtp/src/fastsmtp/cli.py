@@ -88,7 +88,7 @@ def serve(
                 console.print("[dim]Stopping API server...[/dim]")
 
             if smtp_server is not None:
-                smtp_server.stop()
+                shutdown_tasks.append(smtp_server.stop())
                 console.print("[dim]Stopping SMTP server...[/dim]")
 
             # Wait for async shutdowns with timeout
@@ -121,9 +121,9 @@ def serve(
         tasks = []
 
         if not api_only and not worker_only:
-            # Start SMTP server
+            # Start SMTP server (async - runs on same event loop)
             smtp_server = SMTPServer(settings)
-            smtp_server.start()
+            await smtp_server.start()
             console.print(
                 f"[green]SMTP server started on {settings.smtp_host}:{settings.smtp_port}[/green]"
             )

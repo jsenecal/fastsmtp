@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextlib
 import logging
 import uuid
 from email import message_from_bytes
@@ -13,7 +14,7 @@ import idna
 if TYPE_CHECKING:
     from fastsmtp.smtp.tls import TLSContextManager
     from fastsmtp.storage.s3 import S3Storage
-from aiosmtpd.controller import Controller
+from aiosmtpd.controller import UnthreadedController
 from aiosmtpd.smtp import SMTP, Envelope, Session
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -568,6 +569,10 @@ def _enforce_payload_size_limit(payload: dict, max_size: int) -> dict:
 class SMTPServer:
     """FastSMTP server wrapper with optional TLS support.
 
+    Uses UnthreadedController to run the SMTP server on the same event loop
+    as the rest of the application. This is critical for async database
+    operations since SQLAlchemy's AsyncEngine binds to a specific event loop.
+
     Messages are persisted directly to the database in handle_DATA before
     acknowledging receipt. This ensures no data loss if the server crashes.
     The webhook worker processes deliveries asynchronously from the database.
@@ -579,30 +584,36 @@ class SMTPServer:
     ):
         self.settings = settings or get_settings()
         self.handler = FastSMTPHandler(self.settings)
-        self.controller: Controller | None = None
-        self.tls_controller: Controller | None = None
+        self.controller: UnthreadedController | None = None
+        self.tls_controller: UnthreadedController | None = None
+        self._server: asyncio.AbstractServer | None = None
+        self._tls_server: asyncio.AbstractServer | None = None
         self._tls_manager: TLSContextManager | None = None
         self._hot_reload_task: asyncio.Task | None = None
 
-    def _restart_tls_controller(self) -> None:
+    async def _restart_tls_controller(self) -> None:
         """Restart the TLS controller with a new context."""
         if not self._tls_manager or not self._tls_manager.context:
             return
 
-        # Stop existing TLS controller
-        if self.tls_controller:
-            self.tls_controller.stop()
+        # Stop existing TLS server
+        if self._tls_server:
+            self._tls_server.close()
+            await self._tls_server.wait_closed()
             logger.info("SMTP TLS server stopped for reload")
 
-        # Start new TLS controller with updated context
-        self.tls_controller = Controller(
+        # Create new TLS controller with updated context
+        loop = asyncio.get_running_loop()
+        self.tls_controller = UnthreadedController(
             self.handler,
             hostname=self.settings.smtp_host,
             port=self.settings.smtp_tls_port,
+            loop=loop,
             ssl_context=self._tls_manager.context,
             data_size_limit=self.settings.smtp_max_message_size,
         )
-        self.tls_controller.start()
+        # Start the server by awaiting _create_server() directly
+        self._tls_server = await self.tls_controller._create_server()
         logger.info(
             f"SMTP TLS server restarted on {self.settings.smtp_host}:{self.settings.smtp_tls_port}"
         )
@@ -622,7 +633,7 @@ class SMTPServer:
                     logger.info("TLS certificate files changed, reloading...")
                     new_context = self._tls_manager.load_context()
                     if new_context:
-                        self._restart_tls_controller()
+                        await self._restart_tls_controller()
                     else:
                         logger.error("Failed to reload TLS context, keeping old config")
             except asyncio.CancelledError:
@@ -632,18 +643,29 @@ class SMTPServer:
 
         logger.info("TLS hot-reload monitor stopped")
 
-    def start(self) -> None:
-        """Start the SMTP server(s)."""
+    async def start(self) -> None:
+        """Start the SMTP server(s).
+
+        This method must be called from within a running asyncio event loop.
+        Uses UnthreadedController to run on the same loop, ensuring database
+        operations work correctly with SQLAlchemy's AsyncEngine.
+        """
         from fastsmtp.smtp.tls import TLSContextManager
 
-        # Start plain SMTP server
-        self.controller = Controller(
+        loop = asyncio.get_running_loop()
+
+        # Start plain SMTP server using UnthreadedController
+        self.controller = UnthreadedController(
             self.handler,
             hostname=self.settings.smtp_host,
             port=self.settings.smtp_port,
+            loop=loop,
             data_size_limit=self.settings.smtp_max_message_size,
         )
-        self.controller.start()
+        # Await _create_server() directly instead of calling begin()
+        # This properly integrates with the running event loop
+        self._server = await self.controller._create_server()
+
         max_size_mb = self.settings.smtp_max_message_size / (1024 * 1024)
         logger.info(
             f"SMTP server started on {self.settings.smtp_host}:{self.settings.smtp_port} "
@@ -654,14 +676,15 @@ class SMTPServer:
         self._tls_manager = TLSContextManager(self.settings)
         tls_context = self._tls_manager.load_context()
         if tls_context:
-            self.tls_controller = Controller(
+            self.tls_controller = UnthreadedController(
                 self.handler,
                 hostname=self.settings.smtp_host,
                 port=self.settings.smtp_tls_port,
+                loop=loop,
                 ssl_context=tls_context,
                 data_size_limit=self.settings.smtp_max_message_size,
             )
-            self.tls_controller.start()
+            self._tls_server = await self.tls_controller._create_server()
             logger.info(
                 f"SMTP TLS server started on "
                 f"{self.settings.smtp_host}:{self.settings.smtp_tls_port}"
@@ -675,17 +698,22 @@ class SMTPServer:
             if self.settings.smtp_tls_hot_reload:
                 self._hot_reload_task = asyncio.create_task(self._tls_hot_reload_loop())
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         """Stop the SMTP server(s)."""
         # Stop hot-reload task
         if self._hot_reload_task and not self._hot_reload_task.done():
             self._hot_reload_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._hot_reload_task
 
-        if self.controller:
-            self.controller.stop()
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
             logger.info("SMTP server stopped")
-        if self.tls_controller:
-            self.tls_controller.stop()
+
+        if self._tls_server:
+            self._tls_server.close()
+            await self._tls_server.wait_closed()
             logger.info("SMTP TLS server stopped")
 
 
