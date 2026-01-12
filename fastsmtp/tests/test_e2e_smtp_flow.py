@@ -15,12 +15,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosmtplib
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Base, Domain, Recipient
 from fastsmtp.smtp.server import SMTPServer
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
 class TestSMTPProtocolE2E:

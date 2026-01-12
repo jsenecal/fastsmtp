@@ -659,7 +659,7 @@ wheels = [
 
 [[package]]
 name = "fastsmtp"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "fastsmtp" }
 dependencies = [
     { name = "aiobotocore" },
@@ -737,7 +737,7 @@ dev = [
 
 [[package]]
 name = "fastsmtp-cli"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "fastsmtp-cli" }
 dependencies = [
     { name = "httpx" },
@@ -773,7 +773,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "fastsmtp-workspace"
-version = "0.1.2"
+version = "0.1.3"
 source = { virtual = "." }
 
 [package.dev-dependencies]
