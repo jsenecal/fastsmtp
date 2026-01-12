@@ -654,27 +654,46 @@ class SMTPServer:
 
         loop = asyncio.get_running_loop()
 
+        # Load TLS context first (needed for both STARTTLS and implicit TLS)
+        self._tls_manager = TLSContextManager(self.settings)
+        tls_context = self._tls_manager.load_context()
+
+        # Build kwargs for plain SMTP server
+        plain_smtp_kwargs: dict = {
+            "data_size_limit": self.settings.smtp_max_message_size,
+        }
+
+        # Enable STARTTLS on plain port if TLS is configured
+        if tls_context:
+            plain_smtp_kwargs["tls_context"] = tls_context
+            if self.settings.smtp_require_starttls:
+                plain_smtp_kwargs["require_starttls"] = True
+
         # Start plain SMTP server using UnthreadedController
         self.controller = UnthreadedController(
             self.handler,
             hostname=self.settings.smtp_host,
             port=self.settings.smtp_port,
             loop=loop,
-            data_size_limit=self.settings.smtp_max_message_size,
+            **plain_smtp_kwargs,
         )
         # Await _create_server() directly instead of calling begin()
         # This properly integrates with the running event loop
         self._server = await self.controller._create_server()
 
         max_size_mb = self.settings.smtp_max_message_size / (1024 * 1024)
+        starttls_status = ""
+        if tls_context:
+            if self.settings.smtp_require_starttls:
+                starttls_status = ", STARTTLS required"
+            else:
+                starttls_status = ", STARTTLS available"
         logger.info(
             f"SMTP server started on {self.settings.smtp_host}:{self.settings.smtp_port} "
-            f"(max message size: {max_size_mb:.1f}MB)"
+            f"(max message size: {max_size_mb:.1f}MB{starttls_status})"
         )
 
-        # Start TLS SMTP server if configured
-        self._tls_manager = TLSContextManager(self.settings)
-        tls_context = self._tls_manager.load_context()
+        # Start implicit TLS SMTP server if configured (port 465)
         if tls_context:
             self.tls_controller = UnthreadedController(
                 self.handler,
@@ -687,12 +706,8 @@ class SMTPServer:
             self._tls_server = await self.tls_controller._create_server()
             logger.info(
                 f"SMTP TLS server started on "
-                f"{self.settings.smtp_host}:{self.settings.smtp_tls_port}"
+                f"{self.settings.smtp_host}:{self.settings.smtp_tls_port} (implicit TLS)"
             )
-
-            # Also enable STARTTLS on the plain server
-            if self.settings.smtp_require_starttls:
-                logger.info("STARTTLS required for plain SMTP connections")
 
             # Start hot-reload monitoring if enabled
             if self.settings.smtp_tls_hot_reload:

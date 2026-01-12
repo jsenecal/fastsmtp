@@ -429,12 +429,58 @@ class TestSMTPSTARTTLS:
         await server.start()
 
         try:
+            # Disable automatic STARTTLS - we're testing plain port connectivity
+            # and that STARTTLS is advertised, not actual TLS upgrade
             smtp = aiosmtplib.SMTP(
                 hostname=tls_settings.smtp_host,
                 port=tls_settings.smtp_port,
+                start_tls=False,
             )
             await smtp.connect()
 
+            response = await smtp.ehlo()
+            assert response.code == 250
+
+            # Verify STARTTLS is advertised
+            assert smtp.supports_extension("STARTTLS")
+
+            await smtp.quit()
+
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_starttls_upgrade(self, tls_settings: Settings | None):
+        """Test STARTTLS upgrade with self-signed certificate."""
+        if tls_settings is None:
+            pytest.skip("TLS settings not available")
+
+        import ssl
+
+        server = SMTPServer(settings=tls_settings)
+        await server.start()
+
+        try:
+            # Create SSL context that accepts self-signed certs
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            smtp = aiosmtplib.SMTP(
+                hostname=tls_settings.smtp_host,
+                port=tls_settings.smtp_port,
+                start_tls=False,  # Don't auto-upgrade, we'll do it manually
+            )
+            await smtp.connect()
+            await smtp.ehlo()
+
+            # Verify STARTTLS is available
+            assert smtp.supports_extension("STARTTLS")
+
+            # Manually upgrade to TLS
+            await smtp.starttls(tls_context=context)
+
+            # Verify we're now using TLS
             response = await smtp.ehlo()
             assert response.code == 250
 
