@@ -1,6 +1,6 @@
 [project]
 name = "fastsmtp"
-version = "0.1.2"
+version = "0.1.3"
 description = "TLS-capable async SMTP server that receives emails, validates DKIM/SPF, and forwards contents to configurable webhooks"
 requires-python = ">=3.12"
 dependencies = [
