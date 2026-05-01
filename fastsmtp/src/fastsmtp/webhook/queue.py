@@ -63,6 +63,7 @@ async def _send_dlq_notification(
                 request_timeout=10.0,
                 client=client,
                 validate_url=True,
+                allowed_internal_domains=settings.webhook_allowed_internal_domains,
             )
             if success:
                 logger.info(f"DLQ notification sent for delivery {delivery.id}")

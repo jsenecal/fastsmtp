@@ -238,6 +238,7 @@ async def retry_delivery_endpoint(
 async def test_webhook(
     data: TestWebhookRequest,
     auth: Auth,
+    settings: Settings = Depends(get_settings),
 ) -> TestWebhookResponse:
     """Test a webhook URL by sending a test payload."""
     # Require authentication
@@ -273,6 +274,7 @@ async def test_webhook(
         url=str(data.webhook_url),
         payload=payload,
         request_timeout=30.0,
+        allowed_internal_domains=settings.webhook_allowed_internal_domains,
     )
     elapsed_ms = (time.time() - start_time) * 1000
 
