@@ -35,7 +35,7 @@ class FastSMTPClient:
         if self._client is None:
             headers = {}
             if self.profile.api_key:
-                headers["Authorization"] = f"Bearer {self.profile.api_key}"
+                headers["X-API-Key"] = self.profile.api_key
 
             self._client = httpx.Client(
                 base_url=self.profile.url,
@@ -103,21 +103,21 @@ class FastSMTPClient:
 
     def health(self) -> dict:
         """Get server health status."""
-        return self.get("/api/health")
+        return self.get("/api/v1/health")
 
     def ready(self) -> dict:
         """Get server readiness status."""
-        return self.get("/api/ready")
+        return self.get("/api/v1/ready")
 
     # Auth endpoints
 
     def whoami(self) -> dict:
         """Get current authenticated user info."""
-        return self.get("/api/auth/whoami")
+        return self.get("/api/v1/auth/me")
 
     def list_api_keys(self) -> list[dict]:
         """List user's API keys."""
-        return self.get("/api/auth/keys")
+        return self.get("/api/v1/auth/keys")
 
     def create_api_key(
         self,
@@ -131,21 +131,21 @@ class FastSMTPClient:
             data["scopes"] = scopes
         if expires_days:
             data["expires_days"] = expires_days
-        return self.post("/api/auth/keys", json=data)
+        return self.post("/api/v1/auth/keys", json=data)
 
     def delete_api_key(self, key_id: UUID | str) -> None:
         """Delete an API key."""
-        self.delete(f"/api/auth/keys/{key_id}")
+        self.delete(f"/api/v1/auth/keys/{key_id}")
 
     def rotate_api_key(self, key_id: UUID | str) -> dict:
         """Rotate an API key."""
-        return self.post(f"/api/auth/keys/{key_id}/rotate")
+        return self.post(f"/api/v1/auth/keys/{key_id}/rotate")
 
     # User endpoints (superuser only)
 
     def list_users(self, limit: int = 50, offset: int = 0) -> list[dict]:
         """List all users."""
-        return self.get("/api/users", params={"limit": limit, "offset": offset})
+        return self.get("/api/v1/users", params={"limit": limit, "offset": offset})
 
     def create_user(
         self,
@@ -156,7 +156,7 @@ class FastSMTPClient:
     ) -> dict:
         """Create a new user."""
         return self.post(
-            "/api/users",
+            "/api/v1/users",
             json={
                 "username": username,
                 "email": email,
@@ -167,7 +167,7 @@ class FastSMTPClient:
 
     def get_user(self, user_id: UUID | str) -> dict:
         """Get a user by ID."""
-        return self.get(f"/api/users/{user_id}")
+        return self.get(f"/api/v1/users/{user_id}")
 
     def update_user(
         self,
@@ -190,17 +190,17 @@ class FastSMTPClient:
             data["is_active"] = is_active
         if is_superuser is not None:
             data["is_superuser"] = is_superuser
-        return self.patch(f"/api/users/{user_id}", json=data)
+        return self.patch(f"/api/v1/users/{user_id}", json=data)
 
     def delete_user(self, user_id: UUID | str) -> None:
         """Delete a user."""
-        self.delete(f"/api/users/{user_id}")
+        self.delete(f"/api/v1/users/{user_id}")
 
     # Domain endpoints
 
     def list_domains(self, limit: int = 50, offset: int = 0) -> list[dict]:
         """List domains the user has access to."""
-        return self.get("/api/domains", params={"limit": limit, "offset": offset})
+        return self.get("/api/v1/domains", params={"limit": limit, "offset": offset})
 
     def create_domain(
         self,
@@ -211,11 +211,11 @@ class FastSMTPClient:
         data: dict[str, Any] = {"domain_name": domain_name}
         if description:
             data["description"] = description
-        return self.post("/api/domains", json=data)
+        return self.post("/api/v1/domains", json=data)
 
     def get_domain(self, domain_id: UUID | str) -> dict:
         """Get a domain by ID."""
-        return self.get(f"/api/domains/{domain_id}")
+        return self.get(f"/api/v1/domains/{domain_id}")
 
     def update_domain(
         self,
@@ -229,11 +229,11 @@ class FastSMTPClient:
             data["description"] = description
         if is_enabled is not None:
             data["is_enabled"] = is_enabled
-        return self.patch(f"/api/domains/{domain_id}", json=data)
+        return self.patch(f"/api/v1/domains/{domain_id}", json=data)
 
     def delete_domain(self, domain_id: UUID | str) -> None:
         """Delete a domain."""
-        self.delete(f"/api/domains/{domain_id}")
+        self.delete(f"/api/v1/domains/{domain_id}")
 
     # Domain members
 
@@ -245,7 +245,7 @@ class FastSMTPClient:
     ) -> list[dict]:
         """List domain members."""
         return self.get(
-            f"/api/domains/{domain_id}/members",
+            f"/api/v1/domains/{domain_id}/members",
             params={"limit": limit, "offset": offset},
         )
 
@@ -257,7 +257,7 @@ class FastSMTPClient:
     ) -> dict:
         """Add a member to a domain."""
         return self.post(
-            f"/api/domains/{domain_id}/members",
+            f"/api/v1/domains/{domain_id}/members",
             json={"user_id": str(user_id), "role": role},
         )
 
@@ -269,13 +269,13 @@ class FastSMTPClient:
     ) -> dict:
         """Update a member's role."""
         return self.patch(
-            f"/api/domains/{domain_id}/members/{user_id}",
+            f"/api/v1/domains/{domain_id}/members/{user_id}",
             json={"role": role},
         )
 
     def remove_member(self, domain_id: UUID | str, user_id: UUID | str) -> None:
         """Remove a member from a domain."""
-        self.delete(f"/api/domains/{domain_id}/members/{user_id}")
+        self.delete(f"/api/v1/domains/{domain_id}/members/{user_id}")
 
     # Recipient endpoints
 
@@ -287,7 +287,7 @@ class FastSMTPClient:
     ) -> list[dict]:
         """List recipients for a domain."""
         return self.get(
-            f"/api/domains/{domain_id}/recipients",
+            f"/api/v1/domains/{domain_id}/recipients",
             params={"limit": limit, "offset": offset},
         )
 
@@ -307,11 +307,11 @@ class FastSMTPClient:
             data["description"] = description
         if tags:
             data["tags"] = tags
-        return self.post(f"/api/domains/{domain_id}/recipients", json=data)
+        return self.post(f"/api/v1/domains/{domain_id}/recipients", json=data)
 
     def get_recipient(self, recipient_id: UUID | str) -> dict:
         """Get a recipient by ID."""
-        return self.get(f"/api/recipients/{recipient_id}")
+        return self.get(f"/api/v1/recipients/{recipient_id}")
 
     def update_recipient(
         self,
@@ -334,11 +334,11 @@ class FastSMTPClient:
             data["is_enabled"] = is_enabled
         if tags is not None:
             data["tags"] = tags
-        return self.patch(f"/api/recipients/{recipient_id}", json=data)
+        return self.patch(f"/api/v1/recipients/{recipient_id}", json=data)
 
     def delete_recipient(self, recipient_id: UUID | str) -> None:
         """Delete a recipient."""
-        self.delete(f"/api/recipients/{recipient_id}")
+        self.delete(f"/api/v1/recipients/{recipient_id}")
 
     # RuleSet endpoints
 
@@ -350,7 +350,7 @@ class FastSMTPClient:
     ) -> list[dict]:
         """List rulesets for a domain."""
         return self.get(
-            f"/api/domains/{domain_id}/rulesets",
+            f"/api/v1/domains/{domain_id}/rulesets",
             params={"limit": limit, "offset": offset},
         )
 
@@ -365,11 +365,11 @@ class FastSMTPClient:
         data: dict[str, Any] = {"name": name, "priority": priority}
         if description:
             data["description"] = description
-        return self.post(f"/api/domains/{domain_id}/rulesets", json=data)
+        return self.post(f"/api/v1/domains/{domain_id}/rulesets", json=data)
 
     def get_ruleset(self, ruleset_id: UUID | str) -> dict:
         """Get a ruleset by ID."""
-        return self.get(f"/api/rulesets/{ruleset_id}")
+        return self.get(f"/api/v1/rulesets/{ruleset_id}")
 
     def update_ruleset(
         self,
@@ -389,17 +389,17 @@ class FastSMTPClient:
             data["priority"] = priority
         if is_enabled is not None:
             data["is_enabled"] = is_enabled
-        return self.patch(f"/api/rulesets/{ruleset_id}", json=data)
+        return self.patch(f"/api/v1/rulesets/{ruleset_id}", json=data)
 
     def delete_ruleset(self, ruleset_id: UUID | str) -> None:
         """Delete a ruleset."""
-        self.delete(f"/api/rulesets/{ruleset_id}")
+        self.delete(f"/api/v1/rulesets/{ruleset_id}")
 
     # Rule endpoints
 
     def list_rules(self, ruleset_id: UUID | str) -> list[dict]:
         """List rules in a ruleset."""
-        return self.get(f"/api/rulesets/{ruleset_id}/rules")
+        return self.get(f"/api/v1/rulesets/{ruleset_id}/rules")
 
     def create_rule(
         self,
@@ -423,11 +423,11 @@ class FastSMTPClient:
         }
         if action_params:
             data["action_params"] = action_params
-        return self.post(f"/api/rulesets/{ruleset_id}/rules", json=data)
+        return self.post(f"/api/v1/rulesets/{ruleset_id}/rules", json=data)
 
     def get_rule(self, rule_id: UUID | str) -> dict:
         """Get a rule by ID."""
-        return self.get(f"/api/rules/{rule_id}")
+        return self.get(f"/api/v1/rules/{rule_id}")
 
     def update_rule(
         self,
@@ -459,11 +459,11 @@ class FastSMTPClient:
             data["priority"] = priority
         if is_enabled is not None:
             data["is_enabled"] = is_enabled
-        return self.patch(f"/api/rules/{rule_id}", json=data)
+        return self.patch(f"/api/v1/rules/{rule_id}", json=data)
 
     def delete_rule(self, rule_id: UUID | str) -> None:
         """Delete a rule."""
-        self.delete(f"/api/rules/{rule_id}")
+        self.delete(f"/api/v1/rules/{rule_id}")
 
     # Delivery log endpoints
 
@@ -481,15 +481,15 @@ class FastSMTPClient:
             params["status"] = status
         if message_id:
             params["message_id"] = message_id
-        return self.get(f"/api/domains/{domain_id}/delivery-log", params=params)
+        return self.get(f"/api/v1/domains/{domain_id}/delivery-log", params=params)
 
     def get_delivery_log(self, log_id: UUID | str) -> dict:
         """Get a delivery log entry."""
-        return self.get(f"/api/delivery-log/{log_id}")
+        return self.get(f"/api/v1/delivery-log/{log_id}")
 
     def retry_delivery(self, log_id: UUID | str) -> dict:
         """Retry a failed delivery."""
-        return self.post(f"/api/delivery-log/{log_id}/retry")
+        return self.post(f"/api/v1/delivery-log/{log_id}/retry")
 
     # Test webhook
 
@@ -503,7 +503,7 @@ class FastSMTPClient:
     ) -> dict:
         """Test a webhook URL."""
         return self.post(
-            "/api/test-webhook",
+            "/api/v1/test-webhook",
             json={
                 "webhook_url": webhook_url,
                 "from_address": from_address,
