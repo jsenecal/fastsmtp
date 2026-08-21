@@ -26,7 +26,7 @@ from fastsmtp.webhook.queue import (
     retry_delivery,
 )
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 
@@ -600,6 +600,22 @@ class TestRetryDelivery:
         assert delivery.status == "delivered"
 
 
+async def load_delivery_with_recipient(
+    session: AsyncSession, delivery_id: uuid.UUID
+) -> DeliveryLog:
+    """Fetch a delivery with its recipient eagerly loaded, as production does.
+
+    DeliveryLog.recipient is lazy="raise", so process_delivery must be given
+    a delivery whose recipient relationship has been loaded.
+    """
+    stmt = (
+        select(DeliveryLog)
+        .options(selectinload(DeliveryLog.recipient))
+        .where(DeliveryLog.id == delivery_id)
+    )
+    return (await session.execute(stmt)).scalar_one()
+
+
 class TestProcessDelivery:
     """Tests for process_delivery function."""
 
@@ -630,6 +646,7 @@ class TestProcessDelivery:
         )
         test_session.add(delivery)
         await test_session.flush()
+        delivery = await load_delivery_with_recipient(test_session, delivery.id)
 
         # Mock successful webhook
         with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
@@ -668,6 +685,7 @@ class TestProcessDelivery:
         )
         test_session.add(delivery)
         await test_session.flush()
+        delivery = await load_delivery_with_recipient(test_session, delivery.id)
 
         # Mock failed webhook
         with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
@@ -767,6 +785,7 @@ class TestProcessDelivery:
         )
         test_session.add(delivery)
         await test_session.flush()
+        delivery = await load_delivery_with_recipient(test_session, delivery.id)
 
         with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
             mock_send.return_value = (True, 200, None)
@@ -867,6 +886,7 @@ class TestProcessDelivery:
         )
         test_session.add(delivery)
         await test_session.flush()
+        delivery = await load_delivery_with_recipient(test_session, delivery.id)
 
         with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
             mock_send.return_value = (True, 200, None)
@@ -917,6 +937,121 @@ class TestWebhookWorker:
             await worker.stop()
             await worker.wait()
             assert worker._running is False
+
+
+class TestWorkerDeliversRecipientHeaders:
+    """Regression tests for the worker path dropping recipient webhook_headers.
+
+    WebhookWorker._process_single_delivery re-fetches each delivery in its own
+    session; the recipient relationship must be eagerly loaded there, or the
+    configured auth headers are silently dropped from the outgoing request.
+    """
+
+    @pytest.mark.asyncio
+    async def test_worker_path_sends_recipient_headers(
+        self, test_session: AsyncSession, test_engine, test_settings: Settings
+    ):
+        """Headers configured on the recipient reach send_webhook via the worker path."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="worker-headers-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+
+        recipient = Recipient(
+            id=uuid.uuid4(),
+            domain_id=domain.id,
+            local_part="support",
+            webhook_url="https://example.com/webhook",
+            webhook_headers={"X-Webhook-Secret": "secret123"},
+            is_enabled=True,
+        )
+        test_session.add(recipient)
+        await test_session.flush()
+
+        delivery = DeliveryLog(
+            id=uuid.uuid4(),
+            domain_id=domain.id,
+            recipient_id=recipient.id,
+            message_id="<worker-headers@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={"test": "data"},
+            status="pending",
+            attempts=0,
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        test_session.add(delivery)
+        await test_session.commit()
+
+        worker = WebhookWorker(settings=test_settings)
+        session_factory = async_sessionmaker(
+            test_engine, class_=AsyncSession, expire_on_commit=False
+        )
+        try:
+            with (
+                patch("fastsmtp.webhook.dispatcher.async_session", session_factory),
+                patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send,
+            ):
+                mock_send.return_value = (True, 200, None)
+
+                await worker._process_single_delivery(delivery.id)
+
+                call_kwargs = mock_send.call_args.kwargs
+                assert call_kwargs["headers"]["X-Webhook-Secret"] == "secret123"
+                assert call_kwargs["headers"]["X-Idempotency-Key"] == str(delivery.id)
+        finally:
+            await worker._close_http_client()
+
+    @pytest.mark.asyncio
+    async def test_worker_path_no_recipient_still_delivers(
+        self, test_session: AsyncSession, test_engine, test_settings: Settings
+    ):
+        """A delivery without a recipient (SET NULL) still goes out, sans auth headers."""
+        domain = Domain(
+            id=uuid.uuid4(),
+            domain_name="worker-norecipient-test.com",
+            is_enabled=True,
+        )
+        test_session.add(domain)
+        await test_session.flush()
+
+        delivery = DeliveryLog(
+            id=uuid.uuid4(),
+            domain_id=domain.id,
+            recipient_id=None,
+            message_id="<worker-norecipient@example.com>",
+            webhook_url="https://example.com/webhook",
+            payload_hash="abc123",
+            payload={"test": "data"},
+            status="pending",
+            attempts=0,
+            next_retry_at=datetime.now(UTC),
+            instance_id="test-instance",
+        )
+        test_session.add(delivery)
+        await test_session.commit()
+
+        worker = WebhookWorker(settings=test_settings)
+        session_factory = async_sessionmaker(
+            test_engine, class_=AsyncSession, expire_on_commit=False
+        )
+        try:
+            with (
+                patch("fastsmtp.webhook.dispatcher.async_session", session_factory),
+                patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send,
+            ):
+                mock_send.return_value = (True, 200, None)
+
+                await worker._process_single_delivery(delivery.id)
+
+                call_kwargs = mock_send.call_args.kwargs
+                assert list(call_kwargs["headers"]) == ["X-Idempotency-Key"]
+        finally:
+            await worker._close_http_client()
 
 
 class TestDeadLetterQueue:

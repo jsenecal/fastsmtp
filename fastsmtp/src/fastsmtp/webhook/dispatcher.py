@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import DeliveryLog
@@ -213,8 +214,13 @@ class WebhookWorker:
         client = await self._get_http_client()
 
         async with async_session() as session:
-            # Re-fetch the delivery in this session
-            stmt = select(DeliveryLog).where(DeliveryLog.id == delivery_id)
+            # Re-fetch the delivery in this session; the recipient must be
+            # eagerly loaded or its webhook_headers are dropped from the request
+            stmt = (
+                select(DeliveryLog)
+                .options(selectinload(DeliveryLog.recipient))
+                .where(DeliveryLog.id == delivery_id)
+            )
             result = await session.execute(stmt)
             delivery = result.scalar_one_or_none()
 

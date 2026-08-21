@@ -339,11 +339,13 @@ class DeliveryLog(Base, TimestampMixin):
         ForeignKey("recipients.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Relationship for eager loading (used by webhook worker to get headers)
+    # Relationship for eager loading (used by webhook worker to get headers).
+    # lazy="raise" so an unloaded access fails loudly instead of silently
+    # evaluating to None and stripping the recipient's auth headers.
     recipient: Mapped["Recipient | None"] = relationship(
         "Recipient",
         foreign_keys=[recipient_id],
-        lazy="noload",  # Default to not loading, use selectinload explicitly
+        lazy="raise",
     )
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
