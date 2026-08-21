@@ -17,6 +17,9 @@ dev = [
     "ruff>=0.4",
     "testcontainers[postgres]>=4.13",
 ]
+docs = [
+    "zensical>=0.0.56",
+]
 
 [tool.uv.workspace]
 members = ["fastsmtp", "fastsmtp-cli"]
