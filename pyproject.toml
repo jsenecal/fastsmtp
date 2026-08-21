@@ -70,7 +70,9 @@ regex = true
 [[tool.bumpversion.files]]
 filename = "fastsmtp/src/fastsmtp/__init__.py"
 search = "__version__ = \"{current_version}\""
+replace = "__version__ = \"{new_version}\""
 
 [[tool.bumpversion.files]]
 filename = "fastsmtp-cli/src/fastsmtp_cli/__init__.py"
 search = "__version__ = \"{current_version}\""
+replace = "__version__ = \"{new_version}\""
