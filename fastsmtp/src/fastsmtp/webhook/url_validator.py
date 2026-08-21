@@ -67,12 +67,34 @@ def is_ip_blocked(ip_str: str) -> bool:
         return False
 
 
-def validate_webhook_url(url: str, resolve_dns: bool = True) -> None:
+def is_host_in_allowlist(host: str, allowed_internal_domains: list[str] | None) -> bool:
+    """Check if a host matches an entry in the internal-domains allowlist.
+
+    A host matches if it equals an allowed entry exactly or is a subdomain of it.
+    """
+    if not allowed_internal_domains:
+        return False
+    host_lower = host.lower()
+    for allowed in allowed_internal_domains:
+        allowed_lower = allowed.lower()
+        if host_lower == allowed_lower or host_lower.endswith("." + allowed_lower):
+            return True
+    return False
+
+
+def validate_webhook_url(
+    url: str,
+    resolve_dns: bool = True,
+    allowed_internal_domains: list[str] | None = None,
+) -> None:
     """Validate a webhook URL for SSRF protection.
 
     Args:
         url: The URL to validate
         resolve_dns: Whether to resolve DNS and check the resolved IP
+        allowed_internal_domains: Hostnames (and subdomains thereof) that are
+            permitted to resolve to otherwise-blocked private/internal IPs.
+            Intended for in-cluster service discovery via split-horizon DNS.
 
     Raises:
         SSRFError: If the URL is blocked due to SSRF protection
@@ -95,6 +117,12 @@ def validate_webhook_url(url: str, resolve_dns: bool = True) -> None:
 
     # Normalize hostname
     hostname_lower = hostname.lower()
+
+    # Allowlisted hostnames bypass the rest of the SSRF checks. The connection
+    # pool (SSRFSafeAsyncConnectionPool) applies the same allowlist at connect
+    # time, so DNS rebinding is still mitigated.
+    if is_host_in_allowlist(hostname, allowed_internal_domains):
+        return
 
     # Check against blocked hostnames
     if hostname_lower in BLOCKED_HOSTNAMES:
@@ -130,18 +158,28 @@ def validate_webhook_url(url: str, resolve_dns: bool = True) -> None:
             pass
 
 
-def is_url_safe(url: str, resolve_dns: bool = True) -> tuple[bool, str | None]:
+def is_url_safe(
+    url: str,
+    resolve_dns: bool = True,
+    allowed_internal_domains: list[str] | None = None,
+) -> tuple[bool, str | None]:
     """Check if a URL is safe for webhook delivery.
 
     Args:
         url: The URL to check
         resolve_dns: Whether to resolve DNS and check the resolved IP
+        allowed_internal_domains: Hostnames permitted to bypass the
+            private-IP block (see ``validate_webhook_url``).
 
     Returns:
         Tuple of (is_safe, error_message)
     """
     try:
-        validate_webhook_url(url, resolve_dns=resolve_dns)
+        validate_webhook_url(
+            url,
+            resolve_dns=resolve_dns,
+            allowed_internal_domains=allowed_internal_domains,
+        )
         return True, None
     except (SSRFError, ValueError) as e:
         return False, str(e)
@@ -160,17 +198,7 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        # Normalize allowed domains to lowercase for comparison
-        self._allowed_domains = {d.lower() for d in (allowed_internal_domains or [])}
-
-    def _is_domain_allowed(self, host: str) -> bool:
-        """Check if a domain is in the allowed internal domains list."""
-        host_lower = host.lower()
-        # Exact match or subdomain match
-        for allowed in self._allowed_domains:
-            if host_lower == allowed or host_lower.endswith("." + allowed):
-                return True
-        return False
+        self._allowed_domains = list(allowed_internal_domains or [])
 
     async def handle_async_request(self, request: httpcore.Request) -> httpcore.Response:
         """Handle request with IP validation at connection time."""
@@ -183,7 +211,7 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
             host = host.decode("ascii")
 
         # Check if domain is in allowlist (bypass SSRF protection)
-        if self._is_domain_allowed(host):
+        if is_host_in_allowlist(host, self._allowed_domains):
             return await super().handle_async_request(request)
 
         # Check blocked hostnames

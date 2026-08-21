@@ -1,8 +1,11 @@
 """Tests for webhook URL validation (SSRF protection)."""
 
+from unittest.mock import patch
+
 import pytest
 from fastsmtp.webhook.url_validator import (
     SSRFError,
+    is_host_in_allowlist,
     is_ip_blocked,
     is_url_safe,
     validate_webhook_url,
@@ -127,6 +130,88 @@ class TestValidateWebhookUrl:
         """Test that IPv6 localhost is blocked."""
         with pytest.raises(SSRFError, match="blocked range"):
             validate_webhook_url("http://[::1]/webhook", resolve_dns=False)
+
+
+class TestAllowedInternalDomains:
+    """Tests for the allowed_internal_domains bypass."""
+
+    def test_exact_match_bypasses_dns_block(self):
+        """An allowlisted hostname resolving to a private IP is permitted."""
+
+        def fake_getaddrinfo(host, port, **kwargs):
+            return [(2, 1, 6, "", ("10.6.8.8", port))]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            # Without allowlist: blocked
+            with pytest.raises(SSRFError, match="blocked IP"):
+                validate_webhook_url("https://n8n.metrooptic.com/hook")
+            # With allowlist: permitted
+            validate_webhook_url(
+                "https://n8n.metrooptic.com/hook",
+                allowed_internal_domains=["n8n.metrooptic.com"],
+            )
+
+    def test_subdomain_match_bypasses_dns_block(self):
+        """A host that is a subdomain of an allowed entry is permitted."""
+
+        def fake_getaddrinfo(host, port, **kwargs):
+            return [(2, 1, 6, "", ("10.0.0.5", port))]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            validate_webhook_url(
+                "https://api.internal.example/hook",
+                allowed_internal_domains=["internal.example"],
+            )
+
+    def test_match_is_case_insensitive(self):
+        """Allowlist matching ignores case on both sides."""
+
+        def fake_getaddrinfo(host, port, **kwargs):
+            return [(2, 1, 6, "", ("10.0.0.5", port))]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            validate_webhook_url(
+                "https://N8N.Metrooptic.COM/hook",
+                allowed_internal_domains=["n8n.metrooptic.com"],
+            )
+
+    def test_partial_suffix_does_not_match(self):
+        """A hostname that merely shares a suffix substring is not allowed."""
+        assert is_host_in_allowlist("evilexample.com", ["example.com"]) is False
+        assert is_host_in_allowlist("example.com.evil", ["example.com"]) is False
+
+    def test_blocked_hostname_still_blocked_when_not_allowlisted(self):
+        """Allowlist does not match, so a blocked literal hostname is still blocked."""
+        with pytest.raises(SSRFError, match="blocked"):
+            validate_webhook_url(
+                "http://localhost/hook",
+                resolve_dns=False,
+                allowed_internal_domains=["other.example"],
+            )
+
+    def test_allowlisted_localhost_is_permitted(self):
+        """An explicitly allowlisted hostname bypasses the BLOCKED_HOSTNAMES set."""
+        # Skip DNS resolution by using a hostname that will be allowlisted before
+        # the IP lookup runs.
+        validate_webhook_url(
+            "http://localhost/hook",
+            resolve_dns=False,
+            allowed_internal_domains=["localhost"],
+        )
+
+    def test_is_url_safe_threads_allowlist(self):
+        """is_url_safe forwards the allowlist to validate_webhook_url."""
+
+        def fake_getaddrinfo(host, port, **kwargs):
+            return [(2, 1, 6, "", ("10.6.8.8", port))]
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            ok, err = is_url_safe(
+                "https://n8n.metrooptic.com/hook",
+                allowed_internal_domains=["n8n.metrooptic.com"],
+            )
+            assert ok is True
+            assert err is None
 
 
 class TestIsUrlSafe:

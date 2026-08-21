@@ -35,6 +35,7 @@ async def send_webhook(
     request_timeout: float = 30.0,
     client: httpx.AsyncClient | None = None,
     validate_url: bool = True,
+    allowed_internal_domains: list[str] | None = None,
 ) -> tuple[bool, int | None, str | None]:
     """Send a webhook request.
 
@@ -45,6 +46,10 @@ async def send_webhook(
         request_timeout: Request timeout in seconds
         client: HTTP client to use (required for production use)
         validate_url: Whether to validate URL for SSRF protection (default True)
+        allowed_internal_domains: Hostnames permitted to resolve to private IPs.
+            Required when delivering to internal targets (e.g. cluster-local
+            services); the SSRF-safe client must also be created with the same
+            allowlist for the bypass to take effect at connect time.
 
     Returns:
         Tuple of (success, status_code, error_message)
@@ -52,7 +57,11 @@ async def send_webhook(
     # Validate URL for SSRF protection
     if validate_url:
         try:
-            validate_webhook_url(url, resolve_dns=True)
+            validate_webhook_url(
+                url,
+                resolve_dns=True,
+                allowed_internal_domains=allowed_internal_domains,
+            )
         except SSRFError as e:
             logger.warning(f"Blocked webhook to {url}: {e}")
             return False, None, f"URL blocked: {e}"
@@ -69,7 +78,10 @@ async def send_webhook(
     # Create a temporary client if none provided (for testing/one-off use)
     close_client = False
     if client is None:
-        client = create_ssrf_safe_client(timeout=request_timeout)
+        client = create_ssrf_safe_client(
+            timeout=request_timeout,
+            allowed_internal_domains=allowed_internal_domains,
+        )
         close_client = True
 
     try:
@@ -135,6 +147,7 @@ async def process_delivery(
         headers=headers,
         request_timeout=settings.webhook_timeout,
         client=client,
+        allowed_internal_domains=settings.webhook_allowed_internal_domains,
     )
 
     # Record delivery duration
