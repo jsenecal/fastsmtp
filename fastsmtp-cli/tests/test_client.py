@@ -73,106 +73,108 @@ class TestFastSMTPClient:
     @respx.mock
     def test_client_get_request(self, test_profile):
         """Test GET request."""
-        respx.get("https://api.example.com/api/health").mock(
+        respx.get("https://api.example.com/api/v1/health").mock(
             return_value=httpx.Response(200, json={"status": "ok"})
         )
 
         with FastSMTPClient(profile=test_profile) as client:
-            result = client.get("/api/health")
+            result = client.get("/api/v1/health")
             assert result == {"status": "ok"}
 
     @respx.mock
     def test_client_post_request(self, test_profile):
         """Test POST request."""
-        respx.post("https://api.example.com/api/test").mock(
+        respx.post("https://api.example.com/api/v1/test").mock(
             return_value=httpx.Response(201, json={"id": "123"})
         )
 
         with FastSMTPClient(profile=test_profile) as client:
-            result = client.post("/api/test", json={"name": "test"})
+            result = client.post("/api/v1/test", json={"name": "test"})
             assert result == {"id": "123"}
 
     @respx.mock
     def test_client_put_request(self, test_profile):
         """Test PUT request."""
-        respx.put("https://api.example.com/api/test/123").mock(
+        respx.put("https://api.example.com/api/v1/test/123").mock(
             return_value=httpx.Response(200, json={"updated": True})
         )
 
         with FastSMTPClient(profile=test_profile) as client:
-            result = client.put("/api/test/123", json={"name": "updated"})
+            result = client.put("/api/v1/test/123", json={"name": "updated"})
             assert result == {"updated": True}
 
     @respx.mock
     def test_client_patch_request(self, test_profile):
         """Test PATCH request."""
-        respx.patch("https://api.example.com/api/test/123").mock(
+        respx.patch("https://api.example.com/api/v1/test/123").mock(
             return_value=httpx.Response(200, json={"patched": True})
         )
 
         with FastSMTPClient(profile=test_profile) as client:
-            result = client.patch("/api/test/123", json={"field": "value"})
+            result = client.patch("/api/v1/test/123", json={"field": "value"})
             assert result == {"patched": True}
 
     @respx.mock
     def test_client_delete_request(self, test_profile):
         """Test DELETE request."""
-        respx.delete("https://api.example.com/api/test/123").mock(return_value=httpx.Response(204))
+        respx.delete("https://api.example.com/api/v1/test/123").mock(
+            return_value=httpx.Response(204)
+        )
 
         with FastSMTPClient(profile=test_profile) as client:
-            result = client.delete("/api/test/123")
+            result = client.delete("/api/v1/test/123")
             assert result is None
 
     @respx.mock
     def test_client_error_response(self, test_profile):
         """Test handling of error responses."""
-        respx.get("https://api.example.com/api/fail").mock(
+        respx.get("https://api.example.com/api/v1/fail").mock(
             return_value=httpx.Response(404, json={"detail": "Not found"})
         )
 
         with FastSMTPClient(profile=test_profile) as client:
             with pytest.raises(APIError) as exc_info:
-                client.get("/api/fail")
+                client.get("/api/v1/fail")
             assert exc_info.value.status_code == 404
             assert exc_info.value.detail == "Not found"
 
     @respx.mock
     def test_client_error_response_no_json(self, test_profile):
         """Test handling of error responses without JSON body."""
-        respx.get("https://api.example.com/api/fail").mock(
+        respx.get("https://api.example.com/api/v1/fail").mock(
             return_value=httpx.Response(500, text="Internal Server Error")
         )
 
         with FastSMTPClient(profile=test_profile) as client:
             with pytest.raises(APIError) as exc_info:
-                client.get("/api/fail")
+                client.get("/api/v1/fail")
             assert exc_info.value.status_code == 500
             assert "Internal Server Error" in exc_info.value.detail
 
     @respx.mock
-    def test_client_authorization_header(self, test_profile):
-        """Test that authorization header is set."""
-        route = respx.get("https://api.example.com/api/test").mock(
+    def test_client_api_key_header(self, test_profile):
+        """Test that the X-API-Key header is set."""
+        route = respx.get("https://api.example.com/api/v1/test").mock(
             return_value=httpx.Response(200, json={})
         )
 
         with FastSMTPClient(profile=test_profile) as client:
-            client.get("/api/test")
+            client.get("/api/v1/test")
 
-        assert route.calls[0].request.headers["Authorization"] == "Bearer test_api_key_12345"
+        assert route.calls[0].request.headers["X-API-Key"] == "test_api_key_12345"
 
     @respx.mock
     def test_client_no_auth_header_without_key(self, temp_config):
         """Test that no auth header is set when no API key."""
         profile = Profile(url="https://api.example.com")
-        route = respx.get("https://api.example.com/api/test").mock(
+        route = respx.get("https://api.example.com/api/v1/test").mock(
             return_value=httpx.Response(200, json={})
         )
 
         with FastSMTPClient(profile=profile) as client:
-            client.get("/api/test")
+            client.get("/api/v1/test")
 
-        assert "Authorization" not in route.calls[0].request.headers
+        assert "X-API-Key" not in route.calls[0].request.headers
 
 
 class TestClientEndpoints:
@@ -186,7 +188,7 @@ class TestClientEndpoints:
     @respx.mock
     def test_health_endpoint(self, mock_client):
         """Test health endpoint."""
-        respx.get("https://api.example.com/api/health").mock(
+        respx.get("https://api.example.com/api/v1/health").mock(
             return_value=httpx.Response(200, json={"status": "ok", "version": "1.0"})
         )
 
@@ -197,7 +199,7 @@ class TestClientEndpoints:
     @respx.mock
     def test_ready_endpoint(self, mock_client):
         """Test ready endpoint."""
-        respx.get("https://api.example.com/api/ready").mock(
+        respx.get("https://api.example.com/api/v1/ready").mock(
             return_value=httpx.Response(200, json={"status": "ok", "database": "ok"})
         )
 
@@ -208,7 +210,7 @@ class TestClientEndpoints:
     @respx.mock
     def test_whoami_endpoint(self, mock_client):
         """Test whoami endpoint."""
-        respx.get("https://api.example.com/api/auth/whoami").mock(
+        respx.get("https://api.example.com/api/v1/auth/me").mock(
             return_value=httpx.Response(200, json={"user": {"id": "123"}})
         )
 
@@ -219,7 +221,7 @@ class TestClientEndpoints:
     @respx.mock
     def test_list_api_keys_endpoint(self, mock_client):
         """Test list API keys endpoint."""
-        respx.get("https://api.example.com/api/auth/keys").mock(
+        respx.get("https://api.example.com/api/v1/auth/keys").mock(
             return_value=httpx.Response(200, json=[{"id": "123", "name": "key1"}])
         )
 
@@ -231,7 +233,7 @@ class TestClientEndpoints:
     @respx.mock
     def test_create_api_key_endpoint(self, mock_client):
         """Test create API key endpoint."""
-        respx.post("https://api.example.com/api/auth/keys").mock(
+        respx.post("https://api.example.com/api/v1/auth/keys").mock(
             return_value=httpx.Response(201, json={"id": "123", "name": "new-key", "key": "secret"})
         )
 
@@ -243,7 +245,7 @@ class TestClientEndpoints:
     def test_delete_api_key_endpoint(self, mock_client):
         """Test delete API key endpoint."""
         key_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/auth/keys/{key_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/auth/keys/{key_id}").mock(
             return_value=httpx.Response(204)
         )
 
@@ -253,7 +255,7 @@ class TestClientEndpoints:
     @respx.mock
     def test_list_domains_endpoint(self, mock_client):
         """Test list domains endpoint."""
-        respx.get("https://api.example.com/api/domains").mock(
+        respx.get("https://api.example.com/api/v1/domains").mock(
             return_value=httpx.Response(200, json=[{"id": "123", "domain_name": "example.com"}])
         )
 
@@ -265,7 +267,7 @@ class TestClientEndpoints:
     @respx.mock
     def test_create_domain_endpoint(self, mock_client):
         """Test create domain endpoint."""
-        respx.post("https://api.example.com/api/domains").mock(
+        respx.post("https://api.example.com/api/v1/domains").mock(
             return_value=httpx.Response(201, json={"id": "123", "domain_name": "new.example.com"})
         )
 
@@ -277,7 +279,7 @@ class TestClientEndpoints:
     def test_list_recipients_endpoint(self, mock_client):
         """Test list recipients endpoint."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/recipients").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/recipients").mock(
             return_value=httpx.Response(200, json=[{"id": "r1", "local_part": "info"}])
         )
 
@@ -290,7 +292,7 @@ class TestClientEndpoints:
     def test_create_recipient_endpoint(self, mock_client):
         """Test create recipient endpoint."""
         domain_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/domains/{domain_id}/recipients").mock(
+        respx.post(f"https://api.example.com/api/v1/domains/{domain_id}/recipients").mock(
             return_value=httpx.Response(
                 201, json={"id": "r1", "webhook_url": "https://hook.example.com"}
             )
@@ -309,7 +311,7 @@ class TestClientEndpoints:
     def test_list_rulesets_endpoint(self, mock_client):
         """Test list rulesets endpoint."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/rulesets").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets").mock(
             return_value=httpx.Response(200, json=[{"id": "rs1", "name": "Test Rules"}])
         )
 
@@ -321,7 +323,7 @@ class TestClientEndpoints:
     @respx.mock
     def test_test_webhook_endpoint(self, mock_client):
         """Test test webhook endpoint."""
-        respx.post("https://api.example.com/api/test-webhook").mock(
+        respx.post("https://api.example.com/api/v1/test-webhook").mock(
             return_value=httpx.Response(200, json={"success": True, "status_code": 200})
         )
 
@@ -339,7 +341,7 @@ class TestClientEndpoints:
     def test_list_delivery_logs_endpoint(self, mock_client):
         """Test list delivery logs endpoint."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/delivery-log").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/delivery-log").mock(
             return_value=httpx.Response(200, json=[{"id": "log1", "status": "delivered"}])
         )
 

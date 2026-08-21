@@ -112,7 +112,7 @@ class TestAuthCommands:
     @respx.mock
     def test_whoami(self, temp_config):
         """Test whoami command."""
-        respx.get("https://api.example.com/api/auth/whoami").mock(
+        respx.get("https://api.example.com/api/v1/auth/me").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -137,7 +137,7 @@ class TestAuthCommands:
     @respx.mock
     def test_whoami_error(self, temp_config):
         """Test whoami command with error."""
-        respx.get("https://api.example.com/api/auth/whoami").mock(
+        respx.get("https://api.example.com/api/v1/auth/me").mock(
             return_value=httpx.Response(401, json={"detail": "Unauthorized"})
         )
 
@@ -147,7 +147,7 @@ class TestAuthCommands:
     @respx.mock
     def test_keys_list(self, temp_config):
         """Test keys list command."""
-        respx.get("https://api.example.com/api/auth/keys").mock(
+        respx.get("https://api.example.com/api/v1/auth/keys").mock(
             return_value=httpx.Response(
                 200,
                 json=[
@@ -169,7 +169,7 @@ class TestAuthCommands:
     @respx.mock
     def test_keys_list_empty(self, temp_config):
         """Test keys list when empty."""
-        respx.get("https://api.example.com/api/auth/keys").mock(
+        respx.get("https://api.example.com/api/v1/auth/keys").mock(
             return_value=httpx.Response(200, json=[])
         )
 
@@ -181,7 +181,7 @@ class TestAuthCommands:
     @respx.mock
     def test_create_key(self, temp_config):
         """Test create-key command."""
-        respx.post("https://api.example.com/api/auth/keys").mock(
+        respx.post("https://api.example.com/api/v1/auth/keys").mock(
             return_value=httpx.Response(
                 201,
                 json={
@@ -202,7 +202,7 @@ class TestAuthCommands:
     def test_delete_key(self, temp_config):
         """Test delete-key command with force flag."""
         key_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/auth/keys/{key_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/auth/keys/{key_id}").mock(
             return_value=httpx.Response(204)
         )
 
@@ -219,7 +219,7 @@ class TestAuthCommands:
     def test_rotate_key(self, temp_config):
         """Test rotate-key command."""
         key_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/auth/keys/{key_id}/rotate").mock(
+        respx.post(f"https://api.example.com/api/v1/auth/keys/{key_id}/rotate").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -243,7 +243,7 @@ class TestOpsCommands:
     @respx.mock
     def test_health(self, temp_config):
         """Test health command."""
-        respx.get("https://api.example.com/api/health").mock(
+        respx.get("https://api.example.com/api/v1/health").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -260,7 +260,7 @@ class TestOpsCommands:
     @respx.mock
     def test_ready(self, temp_config):
         """Test ready command."""
-        respx.get("https://api.example.com/api/ready").mock(
+        respx.get("https://api.example.com/api/v1/ready").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -276,7 +276,7 @@ class TestOpsCommands:
     @respx.mock
     def test_test_webhook(self, temp_config):
         """Test test-webhook command."""
-        respx.post("https://api.example.com/api/test-webhook").mock(
+        respx.post("https://api.example.com/api/v1/test-webhook").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -297,7 +297,7 @@ class TestDomainCommands:
     @respx.mock
     def test_domain_list(self, temp_config):
         """Test domain list command."""
-        respx.get("https://api.example.com/api/domains").mock(
+        respx.get("https://api.example.com/api/v1/domains").mock(
             return_value=httpx.Response(
                 200,
                 json=[
@@ -319,7 +319,7 @@ class TestDomainCommands:
     @respx.mock
     def test_domain_create(self, temp_config):
         """Test domain create command."""
-        respx.post("https://api.example.com/api/domains").mock(
+        respx.post("https://api.example.com/api/v1/domains").mock(
             return_value=httpx.Response(
                 201,
                 json={
@@ -339,7 +339,7 @@ class TestDomainCommands:
     def test_domain_get(self, temp_config):
         """Test domain get command."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -361,7 +361,7 @@ class TestDomainCommands:
     def test_domain_delete(self, temp_config):
         """Test domain delete command."""
         domain_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/domains/{domain_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/domains/{domain_id}").mock(
             return_value=httpx.Response(204)
         )
 
@@ -376,7 +376,7 @@ class TestRecipientCommands:
     def test_recipient_list(self, temp_config):
         """Test recipient list command."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/recipients").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/recipients").mock(
             return_value=httpx.Response(
                 200,
                 json=[
@@ -398,7 +398,7 @@ class TestRecipientCommands:
     def test_recipient_create(self, temp_config):
         """Test recipient create command."""
         domain_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/domains/{domain_id}/recipients").mock(
+        respx.post(f"https://api.example.com/api/v1/domains/{domain_id}/recipients").mock(
             return_value=httpx.Response(
                 201,
                 json={
@@ -424,7 +424,7 @@ class TestRecipientCommands:
     def test_recipient_get(self, temp_config):
         """Test recipient get command."""
         recipient_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/recipients/{recipient_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/recipients/{recipient_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -446,7 +446,7 @@ class TestRecipientCommands:
     def test_recipient_delete(self, temp_config):
         """Test recipient delete command."""
         recipient_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/recipients/{recipient_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/recipients/{recipient_id}").mock(
             return_value=httpx.Response(204)
         )
 
@@ -460,7 +460,7 @@ class TestDomainErrorPaths:
     @respx.mock
     def test_domain_list_empty(self, temp_config):
         """Test domain list when empty."""
-        respx.get("https://api.example.com/api/domains").mock(
+        respx.get("https://api.example.com/api/v1/domains").mock(
             return_value=httpx.Response(200, json=[])
         )
 
@@ -471,7 +471,7 @@ class TestDomainErrorPaths:
     @respx.mock
     def test_domain_list_error(self, temp_config):
         """Test domain list with API error."""
-        respx.get("https://api.example.com/api/domains").mock(
+        respx.get("https://api.example.com/api/v1/domains").mock(
             return_value=httpx.Response(401, json={"detail": "Unauthorized"})
         )
 
@@ -481,7 +481,7 @@ class TestDomainErrorPaths:
     @respx.mock
     def test_domain_create_error(self, temp_config):
         """Test domain create with API error."""
-        respx.post("https://api.example.com/api/domains").mock(
+        respx.post("https://api.example.com/api/v1/domains").mock(
             return_value=httpx.Response(409, json={"detail": "Domain already exists"})
         )
 
@@ -492,7 +492,7 @@ class TestDomainErrorPaths:
     def test_domain_get_error(self, temp_config):
         """Test domain get with API error."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Domain not found"})
         )
 
@@ -509,7 +509,7 @@ class TestDomainErrorPaths:
     def test_domain_delete_error(self, temp_config):
         """Test domain delete with API error."""
         domain_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/domains/{domain_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/domains/{domain_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Domain not found"})
         )
 
@@ -524,7 +524,7 @@ class TestRecipientErrorPaths:
     def test_recipient_list_empty(self, temp_config):
         """Test recipient list when empty."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/recipients").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/recipients").mock(
             return_value=httpx.Response(200, json=[])
         )
 
@@ -536,7 +536,7 @@ class TestRecipientErrorPaths:
     def test_recipient_list_error(self, temp_config):
         """Test recipient list with API error."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/recipients").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/recipients").mock(
             return_value=httpx.Response(404, json={"detail": "Domain not found"})
         )
 
@@ -547,7 +547,7 @@ class TestRecipientErrorPaths:
     def test_recipient_create_error(self, temp_config):
         """Test recipient create with API error."""
         domain_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/domains/{domain_id}/recipients").mock(
+        respx.post(f"https://api.example.com/api/v1/domains/{domain_id}/recipients").mock(
             return_value=httpx.Response(400, json={"detail": "Invalid webhook URL"})
         )
 
@@ -561,7 +561,7 @@ class TestRecipientErrorPaths:
     def test_recipient_get_error(self, temp_config):
         """Test recipient get with API error."""
         recipient_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/recipients/{recipient_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/recipients/{recipient_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Recipient not found"})
         )
 
@@ -578,7 +578,7 @@ class TestRecipientErrorPaths:
     def test_recipient_delete_error(self, temp_config):
         """Test recipient delete with API error."""
         recipient_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/recipients/{recipient_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/recipients/{recipient_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Recipient not found"})
         )
 
@@ -593,7 +593,7 @@ class TestRulesCommands:
     def test_ruleset_list(self, temp_config):
         """Test ruleset list command (rules list)."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/rulesets").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets").mock(
             return_value=httpx.Response(
                 200,
                 json=[
@@ -616,7 +616,7 @@ class TestRulesCommands:
     def test_ruleset_create(self, temp_config):
         """Test ruleset create command."""
         domain_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/domains/{domain_id}/rulesets").mock(
+        respx.post(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets").mock(
             return_value=httpx.Response(
                 201,
                 json={
@@ -638,7 +638,7 @@ class TestRulesCommands:
     def test_ruleset_get(self, temp_config):
         """Test ruleset get command."""
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/rulesets/{ruleset_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -660,7 +660,7 @@ class TestRulesCommands:
     def test_ruleset_delete(self, temp_config):
         """Test ruleset delete command."""
         ruleset_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/rulesets/{ruleset_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(204)
         )
 
@@ -671,7 +671,7 @@ class TestRulesCommands:
     def test_rule_list(self, temp_config):
         """Test rule list command (rules rule list)."""
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/rulesets/{ruleset_id}/rules").mock(
+        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
             return_value=httpx.Response(
                 200,
                 json=[
@@ -696,7 +696,7 @@ class TestRulesCommands:
     def test_rule_create(self, temp_config):
         """Test rule create command."""
         ruleset_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/rulesets/{ruleset_id}/rules").mock(
+        respx.post(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
             return_value=httpx.Response(
                 201,
                 json={
@@ -735,7 +735,7 @@ class TestRulesCommands:
     def test_rule_get(self, temp_config):
         """Test rule get command."""
         rule_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/rules/{rule_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/rules/{rule_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -760,7 +760,7 @@ class TestRulesCommands:
     def test_rule_delete(self, temp_config):
         """Test rule delete command."""
         rule_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/rules/{rule_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/rules/{rule_id}").mock(
             return_value=httpx.Response(204)
         )
 
@@ -775,7 +775,7 @@ class TestRulesErrorPaths:
     def test_ruleset_list_empty(self, temp_config):
         """Test ruleset list when empty."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/rulesets").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets").mock(
             return_value=httpx.Response(200, json=[])
         )
 
@@ -787,7 +787,7 @@ class TestRulesErrorPaths:
     def test_ruleset_list_error(self, temp_config):
         """Test ruleset list with API error."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/rulesets").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets").mock(
             return_value=httpx.Response(404, json={"detail": "Domain not found"})
         )
 
@@ -798,7 +798,7 @@ class TestRulesErrorPaths:
     def test_ruleset_create_error(self, temp_config):
         """Test ruleset create with API error."""
         domain_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/domains/{domain_id}/rulesets").mock(
+        respx.post(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets").mock(
             return_value=httpx.Response(400, json={"detail": "Invalid ruleset"})
         )
 
@@ -809,7 +809,7 @@ class TestRulesErrorPaths:
     def test_ruleset_get_error(self, temp_config):
         """Test ruleset get with API error."""
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/rulesets/{ruleset_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Ruleset not found"})
         )
 
@@ -826,7 +826,7 @@ class TestRulesErrorPaths:
     def test_ruleset_delete_error(self, temp_config):
         """Test ruleset delete with API error."""
         ruleset_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/rulesets/{ruleset_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Ruleset not found"})
         )
 
@@ -837,7 +837,7 @@ class TestRulesErrorPaths:
     def test_rule_list_empty(self, temp_config):
         """Test rule list when empty."""
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/rulesets/{ruleset_id}/rules").mock(
+        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
             return_value=httpx.Response(200, json=[])
         )
 
@@ -849,7 +849,7 @@ class TestRulesErrorPaths:
     def test_rule_list_error(self, temp_config):
         """Test rule list with API error."""
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/rulesets/{ruleset_id}/rules").mock(
+        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
             return_value=httpx.Response(404, json={"detail": "Ruleset not found"})
         )
 
@@ -860,7 +860,7 @@ class TestRulesErrorPaths:
     def test_rule_create_error(self, temp_config):
         """Test rule create with API error."""
         ruleset_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/rulesets/{ruleset_id}/rules").mock(
+        respx.post(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
             return_value=httpx.Response(400, json={"detail": "Invalid rule"})
         )
 
@@ -886,7 +886,7 @@ class TestRulesErrorPaths:
     def test_rule_get_error(self, temp_config):
         """Test rule get with API error."""
         rule_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/rules/{rule_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/rules/{rule_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Rule not found"})
         )
 
@@ -903,7 +903,7 @@ class TestRulesErrorPaths:
     def test_rule_delete_error(self, temp_config):
         """Test rule delete with API error."""
         rule_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/rules/{rule_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/rules/{rule_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Rule not found"})
         )
 
@@ -918,7 +918,7 @@ class TestDeliveryLogCommands:
     def test_log_list(self, temp_config):
         """Test log list command."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/delivery-log").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/delivery-log").mock(
             return_value=httpx.Response(
                 200,
                 json=[
@@ -941,7 +941,7 @@ class TestDeliveryLogCommands:
     def test_log_list_empty(self, temp_config):
         """Test log list when empty."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/delivery-log").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/delivery-log").mock(
             return_value=httpx.Response(200, json=[])
         )
 
@@ -953,7 +953,7 @@ class TestDeliveryLogCommands:
     def test_log_list_error(self, temp_config):
         """Test log list with API error."""
         domain_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/domains/{domain_id}/delivery-log").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/delivery-log").mock(
             return_value=httpx.Response(404, json={"detail": "Domain not found"})
         )
 
@@ -964,7 +964,7 @@ class TestDeliveryLogCommands:
     def test_log_get(self, temp_config):
         """Test log get command."""
         log_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/delivery-log/{log_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/delivery-log/{log_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -989,7 +989,7 @@ class TestDeliveryLogCommands:
     def test_log_get_error(self, temp_config):
         """Test log get with API error."""
         log_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/delivery-log/{log_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/delivery-log/{log_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Log not found"})
         )
 
@@ -1000,7 +1000,7 @@ class TestDeliveryLogCommands:
     def test_log_retry(self, temp_config):
         """Test log retry command."""
         log_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/delivery-log/{log_id}/retry").mock(
+        respx.post(f"https://api.example.com/api/v1/delivery-log/{log_id}/retry").mock(
             return_value=httpx.Response(
                 200,
                 json={"message": "Delivery queued for retry"},
@@ -1014,7 +1014,7 @@ class TestDeliveryLogCommands:
     def test_log_retry_error(self, temp_config):
         """Test log retry with API error."""
         log_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/delivery-log/{log_id}/retry").mock(
+        respx.post(f"https://api.example.com/api/v1/delivery-log/{log_id}/retry").mock(
             return_value=httpx.Response(400, json={"detail": "Cannot retry"})
         )
 
@@ -1028,7 +1028,7 @@ class TestOpsErrorPaths:
     @respx.mock
     def test_health_error(self, temp_config):
         """Test health with API error."""
-        respx.get("https://api.example.com/api/health").mock(
+        respx.get("https://api.example.com/api/v1/health").mock(
             return_value=httpx.Response(500, json={"detail": "Server error"})
         )
 
@@ -1038,7 +1038,7 @@ class TestOpsErrorPaths:
     @respx.mock
     def test_ready_error(self, temp_config):
         """Test ready with API error."""
-        respx.get("https://api.example.com/api/ready").mock(
+        respx.get("https://api.example.com/api/v1/ready").mock(
             return_value=httpx.Response(503, json={"detail": "Database unavailable"})
         )
 
@@ -1048,7 +1048,7 @@ class TestOpsErrorPaths:
     @respx.mock
     def test_test_webhook_error(self, temp_config):
         """Test test-webhook with API error."""
-        respx.post("https://api.example.com/api/test-webhook").mock(
+        respx.post("https://api.example.com/api/v1/test-webhook").mock(
             return_value=httpx.Response(400, json={"detail": "Invalid webhook URL"})
         )
 
