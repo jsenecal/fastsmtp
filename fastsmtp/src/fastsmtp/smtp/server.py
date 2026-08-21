@@ -320,7 +320,12 @@ class FastSMTPHandler:
 
         # Extract base payload (same for all recipients)
         base_payload = await extract_email_payload(
-            message, envelope, self.settings, s3_storage=s3_storage, domain=recipient_domain
+            message,
+            envelope,
+            self.settings,
+            s3_storage=s3_storage,
+            domain=recipient_domain,
+            message_id=message_id,
         )
         base_payload["client_ip"] = client_ip
         base_payload["dkim_result"] = auth_result.dkim_result
@@ -386,6 +391,7 @@ async def extract_email_payload(
     settings: Settings | None = None,
     s3_storage: "S3Storage | None" = None,
     domain: str | None = None,
+    message_id: str | None = None,
 ) -> dict:
     """Extract email content into a webhook payload.
 
@@ -395,7 +401,11 @@ async def extract_email_payload(
         settings: Application settings (for attachment size limits)
         s3_storage: S3 storage client (if S3 enabled)
         domain: Email domain for S3 key path
+        message_id: Message ID for the S3 key path; falls back to the
+            Message-ID header, then a generated UUID, so messages without a
+            Message-ID never share (and overwrite) the same S3 key prefix
     """
+    s3_message_id = message_id or message.get("Message-ID") or f"<{uuid.uuid4()}@fastsmtp>"
     from typing import Any
 
     settings = settings or get_settings()
@@ -443,7 +453,7 @@ async def extract_email_payload(
                         s3_info = await s3_storage.upload_attachment(
                             content=part_payload,
                             domain=domain,
-                            message_id=message.get("Message-ID", "unknown"),
+                            message_id=s3_message_id,
                             filename=filename,
                             content_type=content_type,
                         )

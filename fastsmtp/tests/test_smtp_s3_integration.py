@@ -108,6 +108,77 @@ class TestExtractEmailPayloadWithS3:
         assert "X-Amz-Signature" in att["presigned_url"]
 
     @pytest.mark.asyncio
+    async def test_s3_upload_uses_provided_message_id(self, s3_settings):
+        """The caller-provided message_id is used for the S3 key path."""
+        msg = EmailMessage()
+        msg["From"] = "sender@example.com"
+        msg["To"] = "recipient@example.com"
+        msg["Subject"] = "Test"
+        msg["Message-ID"] = "<header-id@example.com>"
+        msg.set_content("Body")
+        msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
+
+        envelope = Envelope()
+        envelope.mail_from = "sender@example.com"
+        envelope.rcpt_tos = ["recipient@example.com"]
+
+        mock_s3 = AsyncMock(spec=S3Storage)
+        mock_s3.upload_attachment.return_value = S3AttachmentInfo(
+            bucket="test-bucket",
+            key="attachments/example.com/x/file.pdf",
+            url="https://s3.amazonaws.com/test-bucket/attachments/example.com/x/file.pdf",
+            presigned_url=None,
+        )
+
+        await extract_email_payload(
+            msg,
+            envelope,
+            s3_settings,
+            s3_storage=mock_s3,
+            domain="example.com",
+            message_id="<computed-id@fastsmtp>",
+        )
+
+        assert mock_s3.upload_attachment.call_args.kwargs["message_id"] == "<computed-id@fastsmtp>"
+
+    @pytest.mark.asyncio
+    async def test_s3_missing_message_id_generates_unique_ids(self, s3_settings):
+        """Regression test for #44: messages without a Message-ID must not share
+        the literal "unknown" S3 key path, or same-named attachments from
+        different messages overwrite each other."""
+        seen_message_ids = []
+
+        for _ in range(2):
+            msg = EmailMessage()
+            msg["From"] = "sender@example.com"
+            msg["To"] = "recipient@example.com"
+            msg["Subject"] = "No message id"
+            msg.set_content("Body")
+            msg.add_attachment(
+                b"content", maintype="application", subtype="pdf", filename="file.pdf"
+            )
+
+            envelope = Envelope()
+            envelope.mail_from = "sender@example.com"
+            envelope.rcpt_tos = ["recipient@example.com"]
+
+            mock_s3 = AsyncMock(spec=S3Storage)
+            mock_s3.upload_attachment.return_value = S3AttachmentInfo(
+                bucket="test-bucket",
+                key="attachments/example.com/x/file.pdf",
+                url="https://s3.amazonaws.com/test-bucket/attachments/example.com/x/file.pdf",
+                presigned_url=None,
+            )
+
+            await extract_email_payload(
+                msg, envelope, s3_settings, s3_storage=mock_s3, domain="example.com"
+            )
+            seen_message_ids.append(mock_s3.upload_attachment.call_args.kwargs["message_id"])
+
+        assert "unknown" not in seen_message_ids
+        assert seen_message_ids[0] != seen_message_ids[1]
+
+    @pytest.mark.asyncio
     async def test_s3_fallback_on_upload_failure(self, s3_settings):
         """Test email payload falls back to inline when S3 fails."""
         msg = EmailMessage()
