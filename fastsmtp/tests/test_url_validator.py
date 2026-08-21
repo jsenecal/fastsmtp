@@ -144,11 +144,11 @@ class TestAllowedInternalDomains:
         with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
             # Without allowlist: blocked
             with pytest.raises(SSRFError, match="blocked IP"):
-                validate_webhook_url("https://n8n.metrooptic.com/hook")
+                validate_webhook_url("https://n8n.internal.example.com/hook")
             # With allowlist: permitted
             validate_webhook_url(
-                "https://n8n.metrooptic.com/hook",
-                allowed_internal_domains=["n8n.metrooptic.com"],
+                "https://n8n.internal.example.com/hook",
+                allowed_internal_domains=["n8n.internal.example.com"],
             )
 
     def test_subdomain_match_bypasses_dns_block(self):
@@ -171,8 +171,8 @@ class TestAllowedInternalDomains:
 
         with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
             validate_webhook_url(
-                "https://N8N.Metrooptic.COM/hook",
-                allowed_internal_domains=["n8n.metrooptic.com"],
+                "https://N8N.Internal.Example.COM/hook",
+                allowed_internal_domains=["n8n.internal.example.com"],
             )
 
     def test_partial_suffix_does_not_match(self):
@@ -206,7 +206,7 @@ class TestAllowedInternalDomains:
         def fake_getaddrinfo(host, port, **kwargs):
             return [(2, 1, 6, "", ("10.43.0.15", port))]
 
-        url = "http://lightdesk-api.portal.svc.cluster.local:8000/x"
+        url = "http://myapp-api.myns.svc.cluster.local:8000/x"
 
         with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
             # Empty allowlist (default): refused
@@ -222,12 +222,10 @@ class TestAllowedInternalDomains:
             # Allowlisted via env var: permitted
             monkeypatch.setenv(
                 "FASTSMTP_WEBHOOK_ALLOWED_INTERNAL_DOMAINS",
-                '["lightdesk-api.portal.svc.cluster.local"]',
+                '["myapp-api.myns.svc.cluster.local"]',
             )
             settings = Settings(root_api_key="test_key_12345", secret_key="test-secret")
-            assert settings.webhook_allowed_internal_domains == [
-                "lightdesk-api.portal.svc.cluster.local"
-            ]
+            assert settings.webhook_allowed_internal_domains == ["myapp-api.myns.svc.cluster.local"]
             validate_webhook_url(
                 url,
                 allowed_internal_domains=settings.webhook_allowed_internal_domains,
@@ -241,8 +239,8 @@ class TestAllowedInternalDomains:
 
         with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
             ok, err = is_url_safe(
-                "https://n8n.metrooptic.com/hook",
-                allowed_internal_domains=["n8n.metrooptic.com"],
+                "https://n8n.internal.example.com/hook",
+                allowed_internal_domains=["n8n.internal.example.com"],
             )
             assert ok is True
             assert err is None
