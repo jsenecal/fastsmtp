@@ -114,6 +114,78 @@ class TestSMTPIntegration:
         await smtp.quit()
 
 
+class TestMailFromAuthParam:
+    """MAIL FROM must tolerate the RFC 4954 AUTH parameter.
+
+    Once AUTH is advertised in EHLO, clients (notably Exchange Online) may add
+    AUTH=<...> to MAIL FROM; the server may ignore it but must not reject it.
+    """
+
+    @pytest.fixture
+    def smtp_settings(self) -> Settings:
+        return Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            secret_key="test-secret-key",
+            smtp_host="127.0.0.1",
+            smtp_port=12526,  # Unique port to avoid conflicts
+            smtp_tls_port=14651,
+            smtp_verify_dkim=False,
+            smtp_verify_spf=False,
+        )
+
+    @pytest_asyncio.fixture
+    async def smtp_server(self, smtp_settings: Settings):
+        server = SMTPServer(settings=smtp_settings)
+        await server.start()
+        yield server
+        await server.stop()
+
+    @pytest_asyncio.fixture
+    async def smtp_client(self, smtp_server, smtp_settings: Settings):
+        _ = smtp_server
+        smtp = aiosmtplib.SMTP(
+            hostname=smtp_settings.smtp_host,
+            port=smtp_settings.smtp_port,
+        )
+        await smtp.connect()
+        await smtp.ehlo()
+        yield smtp
+        await smtp.quit()
+
+    @pytest.mark.asyncio
+    async def test_mail_from_with_empty_auth_param(self, smtp_client):
+        response = await smtp_client.execute_command(
+            b"MAIL", b"FROM:<sender@example.com>", b"AUTH=<>"
+        )
+        assert response.code == 250
+
+    @pytest.mark.asyncio
+    async def test_mail_from_with_auth_address_param(self, smtp_client):
+        response = await smtp_client.execute_command(
+            b"MAIL", b"FROM:<sender@example.com>", b"AUTH=<user@example.com>"
+        )
+        assert response.code == 250
+
+    @pytest.mark.asyncio
+    async def test_mail_from_auth_combined_with_other_params(self, smtp_client):
+        response = await smtp_client.execute_command(
+            b"MAIL",
+            b"FROM:<sender@example.com>",
+            b"SIZE=5000",
+            b"AUTH=<>",
+            b"BODY=8BITMIME",
+        )
+        assert response.code == 250
+
+    @pytest.mark.asyncio
+    async def test_mail_from_unknown_param_still_rejected(self, smtp_client):
+        response = await smtp_client.execute_command(
+            b"MAIL", b"FROM:<sender@example.com>", b"RET=HDRS"
+        )
+        assert response.code == 555
+
+
 class TestFastSMTPHandlerIntegration:
     """Test the handler directly for better control over database sessions."""
 

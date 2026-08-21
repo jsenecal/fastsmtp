@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import re
 import uuid
 from email import message_from_bytes
 from email.message import Message
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
     from fastsmtp.smtp.tls import TLSContextManager
     from fastsmtp.storage.s3 import S3Storage
 from aiosmtpd.controller import UnthreadedController
-from aiosmtpd.smtp import SMTP, Envelope, Session
+from aiosmtpd.smtp import SMTP, Envelope, Session, syntax
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -572,6 +573,38 @@ def _enforce_payload_size_limit(payload: dict, max_size: int) -> dict:
     return payload
 
 
+# RFC 4954 AUTH parameter on MAIL FROM: "AUTH=" followed by <>, <address>,
+# or an xtext token; never contains whitespace.
+_MAIL_AUTH_PARAM_RE = re.compile(r"\sAUTH=\S+", re.IGNORECASE)
+
+
+class AuthParamTolerantSMTP(SMTP):
+    """SMTP session that accepts and ignores the AUTH parameter on MAIL FROM.
+
+    Once AUTH is advertised in EHLO, RFC 4954 section 5 lets clients add
+    AUTH=<...> to MAIL FROM (Exchange Online always does) and lets the server
+    "treat the AUTH parameter as if it had not been supplied". aiosmtpd
+    replies 555 to any parameter it does not implement, so strip AUTH from
+    the argument before delegating.
+    """
+
+    @syntax("MAIL FROM: <address>", extended=" [SP <mail-parameters>]")
+    async def smtp_MAIL(self, arg: str | None) -> None:
+        if arg:
+            # Parameters follow the bracketed address; leave the address alone
+            addr_end = arg.find(">")
+            if addr_end != -1:
+                arg = arg[: addr_end + 1] + _MAIL_AUTH_PARAM_RE.sub("", arg[addr_end + 1 :])
+        await super().smtp_MAIL(arg)
+
+
+class FastSMTPController(UnthreadedController):
+    """UnthreadedController that serves AuthParamTolerantSMTP sessions."""
+
+    def factory(self) -> SMTP:
+        return AuthParamTolerantSMTP(self.handler, **self.SMTP_kwargs)
+
+
 class SMTPServer:
     """FastSMTP server wrapper with optional TLS support.
 
@@ -590,8 +623,8 @@ class SMTPServer:
     ):
         self.settings = settings or get_settings()
         self.handler = FastSMTPHandler(self.settings)
-        self.controller: UnthreadedController | None = None
-        self.tls_controller: UnthreadedController | None = None
+        self.controller: FastSMTPController | None = None
+        self.tls_controller: FastSMTPController | None = None
         self._server: asyncio.AbstractServer | None = None
         self._tls_server: asyncio.AbstractServer | None = None
         self._tls_manager: TLSContextManager | None = None
@@ -610,7 +643,7 @@ class SMTPServer:
 
         # Create new TLS controller with updated context
         loop = asyncio.get_running_loop()
-        self.tls_controller = UnthreadedController(
+        self.tls_controller = FastSMTPController(
             self.handler,
             hostname=self.settings.smtp_host,
             port=self.settings.smtp_tls_port,
@@ -676,7 +709,7 @@ class SMTPServer:
                 plain_smtp_kwargs["require_starttls"] = True
 
         # Start plain SMTP server using UnthreadedController
-        self.controller = UnthreadedController(
+        self.controller = FastSMTPController(
             self.handler,
             hostname=self.settings.smtp_host,
             port=self.settings.smtp_port,
@@ -701,7 +734,7 @@ class SMTPServer:
 
         # Start implicit TLS SMTP server if configured (port 465)
         if tls_context:
-            self.tls_controller = UnthreadedController(
+            self.tls_controller = FastSMTPController(
                 self.handler,
                 hostname=self.settings.smtp_host,
                 port=self.settings.smtp_tls_port,
