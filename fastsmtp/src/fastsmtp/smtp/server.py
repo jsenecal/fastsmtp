@@ -80,19 +80,25 @@ async def lookup_recipient(
     if not domain:
         return None, None, f"Domain {domain_name} not configured"
 
-    # Find matching recipient: specific match first, then catch-all
-    # Filter out disabled and soft-deleted recipients
-    specific_recipient = None
-    catchall_recipient = None
+    # Find matching recipient: exact match first, then subaddress (plus-tag)
+    # base match, then catch-all. Filter out disabled and soft-deleted recipients.
+    active_recipients = [r for r in domain.recipients if r.is_enabled and r.deleted_at is None]
 
-    for recipient in domain.recipients:
-        if not recipient.is_enabled or recipient.deleted_at is not None:
-            continue
-        if recipient.local_part is None:
-            catchall_recipient = recipient
-        elif recipient.local_part.lower() == local_part_lower:
-            specific_recipient = recipient
-            break
+    def find_specific(target_local_part: str) -> Recipient | None:
+        for recipient in active_recipients:
+            if recipient.local_part is None:
+                continue
+            if recipient.local_part.lower() == target_local_part:
+                return recipient
+        return None
+
+    specific_recipient = find_specific(local_part_lower)
+
+    # Subaddress fallback: support+TICKET-123@example.com routes to "support"
+    if specific_recipient is None and "+" in local_part_lower:
+        specific_recipient = find_specific(local_part_lower.split("+", 1)[0])
+
+    catchall_recipient = next((r for r in active_recipients if r.local_part is None), None)
 
     matched_recipient = specific_recipient or catchall_recipient
 

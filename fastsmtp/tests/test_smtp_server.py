@@ -213,6 +213,141 @@ class TestLookupRecipient:
         assert recipient.local_part == "info"
 
 
+class TestLookupRecipientSubaddress:
+    """Tests for subaddress (plus-tag) recipient matching."""
+
+    @pytest_asyncio.fixture
+    async def subaddr_domain(self, test_session: AsyncSession) -> Domain:
+        """Domain with a base recipient, an exact-plus recipient, and a catch-all."""
+        domain = Domain(domain_name="subaddr-test.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+
+        base = Recipient(
+            domain_id=domain.id,
+            local_part="support",
+            webhook_url="https://example.com/support",
+            is_enabled=True,
+        )
+        exact_plus = Recipient(
+            domain_id=domain.id,
+            local_part="support+x",
+            webhook_url="https://example.com/support-x",
+            is_enabled=True,
+        )
+        catchall = Recipient(
+            domain_id=domain.id,
+            local_part=None,
+            webhook_url="https://example.com/catchall",
+            is_enabled=True,
+        )
+        test_session.add_all([base, exact_plus, catchall])
+        await test_session.commit()
+        await test_session.refresh(domain)
+        return domain
+
+    @pytest_asyncio.fixture
+    async def subaddr_domain_no_catchall(self, test_session: AsyncSession) -> Domain:
+        """Domain with only a base recipient and no catch-all."""
+        domain = Domain(domain_name="subaddr-nocatch.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+
+        r = Recipient(
+            domain_id=domain.id,
+            local_part="support",
+            webhook_url="https://example.com/support",
+            is_enabled=True,
+        )
+        test_session.add(r)
+        await test_session.commit()
+        await test_session.refresh(domain)
+        return domain
+
+    @pytest.mark.asyncio
+    async def test_plain_match_still_works(
+        self, test_session: AsyncSession, subaddr_domain: Domain
+    ):
+        """A plain local part matches its recipient exactly."""
+        domain, recipient, error = await lookup_recipient("support@subaddr-test.com", test_session)
+        assert error is None
+        assert recipient is not None
+        assert recipient.local_part == "support"
+
+    @pytest.mark.asyncio
+    async def test_plus_tag_falls_back_to_base_recipient(
+        self, test_session: AsyncSession, subaddr_domain_no_catchall: Domain
+    ):
+        """support+TICKET-123.tok@ routes to the 'support' recipient."""
+        domain, recipient, error = await lookup_recipient(
+            "support+TICKET-123.tok@subaddr-nocatch.com", test_session
+        )
+        assert error is None
+        assert recipient is not None
+        assert recipient.local_part == "support"
+
+    @pytest.mark.asyncio
+    async def test_plus_tag_base_match_wins_over_catchall(
+        self, test_session: AsyncSession, subaddr_domain: Domain
+    ):
+        """The stripped base match is preferred over the catch-all."""
+        domain, recipient, error = await lookup_recipient(
+            "support+something@subaddr-test.com", test_session
+        )
+        assert error is None
+        assert recipient is not None
+        assert recipient.local_part == "support"
+
+    @pytest.mark.asyncio
+    async def test_exact_plus_recipient_wins_over_base(
+        self, test_session: AsyncSession, subaddr_domain: Domain
+    ):
+        """A recipient literally named 'support+x' beats the 'support' fallback."""
+        domain, recipient, error = await lookup_recipient(
+            "support+x@subaddr-test.com", test_session
+        )
+        assert error is None
+        assert recipient is not None
+        assert recipient.local_part == "support+x"
+
+    @pytest.mark.asyncio
+    async def test_plus_tag_no_base_match_returns_error(
+        self, test_session: AsyncSession, subaddr_domain_no_catchall: Domain
+    ):
+        """A plus-tagged address whose base has no recipient is rejected (550 path)."""
+        domain, recipient, error = await lookup_recipient(
+            "unknown+tag@subaddr-nocatch.com", test_session
+        )
+        assert domain is not None
+        assert recipient is None
+        assert error is not None
+        assert "not found" in error
+
+    @pytest.mark.asyncio
+    async def test_plus_tag_no_base_match_uses_catchall(
+        self, test_session: AsyncSession, subaddr_domain: Domain
+    ):
+        """Catch-all still applies when neither exact nor stripped base matches."""
+        domain, recipient, error = await lookup_recipient(
+            "unknown+tag@subaddr-test.com", test_session
+        )
+        assert error is None
+        assert recipient is not None
+        assert recipient.local_part is None  # catch-all
+
+    @pytest.mark.asyncio
+    async def test_plus_tag_case_insensitive(
+        self, test_session: AsyncSession, subaddr_domain_no_catchall: Domain
+    ):
+        """Subaddress fallback is case-insensitive on the base local part."""
+        domain, recipient, error = await lookup_recipient(
+            "SUPPORT+Tag@SUBADDR-NOCATCH.COM", test_session
+        )
+        assert error is None
+        assert recipient is not None
+        assert recipient.local_part == "support"
+
+
 class TestFindRecipientForAddress:
     """Tests for find_recipient_for_address wrapper."""
 

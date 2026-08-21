@@ -199,6 +199,40 @@ class TestAllowedInternalDomains:
             allowed_internal_domains=["localhost"],
         )
 
+    def test_cluster_local_hostname_via_settings_env(self, monkeypatch):
+        """A k8s service hostname is permitted only when allowlisted via env settings."""
+        from fastsmtp.config import Settings
+
+        def fake_getaddrinfo(host, port, **kwargs):
+            return [(2, 1, 6, "", ("10.43.0.15", port))]
+
+        url = "http://lightdesk-api.portal.svc.cluster.local:8000/x"
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            # Empty allowlist (default): refused
+            monkeypatch.delenv("FASTSMTP_WEBHOOK_ALLOWED_INTERNAL_DOMAINS", raising=False)
+            settings = Settings(root_api_key="test_key_12345", secret_key="test-secret")
+            assert settings.webhook_allowed_internal_domains == []
+            with pytest.raises(SSRFError, match="blocked IP"):
+                validate_webhook_url(
+                    url,
+                    allowed_internal_domains=settings.webhook_allowed_internal_domains,
+                )
+
+            # Allowlisted via env var: permitted
+            monkeypatch.setenv(
+                "FASTSMTP_WEBHOOK_ALLOWED_INTERNAL_DOMAINS",
+                '["lightdesk-api.portal.svc.cluster.local"]',
+            )
+            settings = Settings(root_api_key="test_key_12345", secret_key="test-secret")
+            assert settings.webhook_allowed_internal_domains == [
+                "lightdesk-api.portal.svc.cluster.local"
+            ]
+            validate_webhook_url(
+                url,
+                allowed_internal_domains=settings.webhook_allowed_internal_domains,
+            )
+
     def test_is_url_safe_threads_allowlist(self):
         """is_url_safe forwards the allowlist to validate_webhook_url."""
 
