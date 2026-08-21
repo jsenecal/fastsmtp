@@ -47,5 +47,5 @@ packages = ["src/fastsmtp"]
 dev = [
     "aiosmtplib>=5.0.0",
     "mypy>=1.19.1",
-    "testcontainers[postgres]>=4.13.3",
+    "testcontainers[postgres]>=4.15",
 ]

@@ -15,7 +15,7 @@ dev = [
     "pytest-cov>=4.0",
     "respx>=0.21",
     "ruff>=0.4",
-    "testcontainers[postgres]>=4.13",
+    "testcontainers[postgres]>=4.15",
 ]
 docs = [
     "zensical>=0.0.56",
@@ -42,7 +42,6 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["fastsmtp/tests", "fastsmtp-cli/tests"]
 filterwarnings = [
     "ignore::DeprecationWarning:aiosmtpd.*",
-    "ignore::DeprecationWarning:testcontainers.*",
     "ignore::DeprecationWarning:spf.*",
     "ignore::SyntaxWarning:spf.*",
 ]
