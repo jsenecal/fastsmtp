@@ -5,7 +5,7 @@ import os
 from collections.abc import AsyncGenerator, Generator
 
 import pytest
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 # Set required environment variables before any imports
 os.environ.setdefault("FASTSMTP_ROOT_API_KEY", "test_root_api_key_12345")
