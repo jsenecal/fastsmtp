@@ -42,8 +42,17 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["fastsmtp/tests", "fastsmtp-cli/tests"]
 filterwarnings = [
     "ignore::DeprecationWarning:aiosmtpd.*",
+    # pyspf 2.0.14 (latest release, 2020) emits a SyntaxWarning (unescaped `\d`
+    # in a docstring, spf.py:1724) and a DeprecationWarning (dns.resolver.query()
+    # at spf.py:131). Both are fixed on upstream master via
+    # https://github.com/sdgathman/pyspf/pull/43, but no release ships the fix yet
+    # (tracked in https://github.com/sdgathman/pyspf/issues/45). Drop these two
+    # filters once a pyspf release newer than 2.0.14 is available.
+    # The SyntaxWarning is raised at compile time, where the warning's "module"
+    # is the file path (not the import name), so the module pattern must match a
+    # path ending in "spf" rather than the module name.
     "ignore::DeprecationWarning:spf.*",
-    "ignore::SyntaxWarning:spf.*",
+    "ignore:invalid escape sequence:SyntaxWarning:.*spf",
 ]
 
 [tool.bumpversion]
