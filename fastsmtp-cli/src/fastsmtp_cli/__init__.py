@@ -1,3 +1,3 @@
 """FastSMTP CLI - Remote CLI client for FastSMTP server."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
