@@ -1,0 +1,34 @@
+coverage:
+  status:
+    project:
+      default:
+        # Routine churn should not red-flag a PR; a real drop should.
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        # New code carries its own weight even when the project total drifts.
+        target: 80%
+        threshold: 0%
+
+# Mirrors [tool.coverage.run] omit in pyproject.toml. Migrations are never
+# executed by the suite, so they are not meaningful coverage.
+ignore:
+  - "fastsmtp/alembic/**"
+  - "**/tests/**"
+
+# Per-package breakdown in the UI without splitting the upload into flags.
+component_management:
+  individual_components:
+    - component_id: server
+      name: server
+      paths:
+        - fastsmtp/src/**
+    - component_id: cli
+      name: cli
+      paths:
+        - fastsmtp-cli/src/**
+
+comment:
+  layout: "reach, diff, components"
+  require_changes: true

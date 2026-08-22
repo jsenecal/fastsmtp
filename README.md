@@ -1,5 +1,11 @@
 # FastSMTP
 
+[![CI](https://github.com/jsenecal/fastsmtp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jsenecal/fastsmtp/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jsenecal/fastsmtp/branch/main/graph/badge.svg)](https://codecov.io/gh/jsenecal/fastsmtp)
+[![Release](https://img.shields.io/github/v/release/jsenecal/fastsmtp)](https://github.com/jsenecal/fastsmtp/releases/latest)
+[![ghcr.io](https://img.shields.io/badge/ghcr.io-fastsmtp-2496ED?logo=docker&logoColor=white)](https://github.com/jsenecal/fastsmtp/pkgs/container/fastsmtp)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+
 A TLS-capable, async SMTP server that receives emails and forwards them to webhooks. Built with Python 3.12+ for integration with n8n and other webhook-based workflow platforms.
 
 ## Features
