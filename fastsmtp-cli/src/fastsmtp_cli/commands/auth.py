@@ -1,5 +1,6 @@
 """Authentication and API key management commands."""
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import typer
@@ -70,9 +71,12 @@ def create_key(
     ] = None,
 ) -> None:
     """Create a new API key."""
+    # The server takes an absolute expiry timestamp; --expires is in days.
+    expires_at = datetime.now(UTC) + timedelta(days=expires) if expires else None
+
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            result = client.create_api_key(name=name, scopes=scopes, expires_days=expires)
+            result = client.create_api_key(name=name, scopes=scopes, expires_at=expires_at)
             print_api_key(result, show_secret=True)
     except APIError as e:
         print_error(e.detail)

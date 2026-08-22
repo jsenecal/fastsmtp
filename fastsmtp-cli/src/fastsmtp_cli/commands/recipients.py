@@ -1,4 +1,8 @@
-"""Recipient management commands."""
+"""Recipient management commands.
+
+Recipients are nested under a domain on the server, so every command that
+addresses a single recipient takes the domain ID as well as the recipient ID.
+"""
 
 from typing import Annotated
 
@@ -14,12 +18,33 @@ from fastsmtp_cli.output import (
 
 app = typer.Typer(help="Recipient management")
 
+HeaderOption = Annotated[
+    list[str] | None,
+    typer.Option("--header", "-H", help="Webhook header as KEY=VALUE (can be repeated)"),
+]
+
+
+def parse_headers(headers: list[str] | None) -> dict[str, str] | None:
+    """Parse repeated ``KEY=VALUE`` options into a headers mapping.
+
+    Raises:
+        typer.Exit: with status 1 if an entry is not ``KEY=VALUE``
+    """
+    if not headers:
+        return None
+    parsed: dict[str, str] = {}
+    for entry in headers:
+        key, separator, value = entry.partition("=")
+        if not separator or not key.strip():
+            print_error(f"Invalid header '{entry}'. Use KEY=VALUE.")
+            raise typer.Exit(1)
+        parsed[key.strip()] = value.strip()
+    return parsed
+
 
 @app.command("list")
 def list_recipients(
     domain_id: Annotated[str, typer.Argument(help="Domain ID")],
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Max results")] = 50,
-    offset: Annotated[int, typer.Option("--offset", "-o", help="Offset")] = 0,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
@@ -28,7 +53,7 @@ def list_recipients(
     """List recipients for a domain."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            recipients = client.list_recipients(domain_id, limit=limit, offset=offset)
+            recipients = client.list_recipients(domain_id)
             if not recipients:
                 print_error("No recipients found")
                 return
@@ -40,6 +65,7 @@ def list_recipients(
 
 @app.command("get")
 def get_recipient(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     recipient_id: Annotated[str, typer.Argument(help="Recipient ID")],
     profile: Annotated[
         str | None,
@@ -49,7 +75,7 @@ def get_recipient(
     """Get recipient details."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            recipient = client.get_recipient(recipient_id)
+            recipient = client.get_recipient(domain_id, recipient_id)
             print_recipient(recipient)
     except APIError as e:
         print_error(e.detail)
@@ -64,28 +90,22 @@ def create_recipient(
         str | None,
         typer.Option("--local", "-l", help="Local part (omit for catch-all)"),
     ] = None,
-    description: Annotated[
-        str | None,
-        typer.Option("--description", "-d", help="Description"),
-    ] = None,
-    tags: Annotated[
-        list[str] | None,
-        typer.Option("--tag", "-t", help="Tags (can be repeated)"),
-    ] = None,
+    headers: HeaderOption = None,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
     """Create a new recipient."""
+    webhook_headers = parse_headers(headers)
+
     try:
         with FastSMTPClient(profile_name=profile) as client:
             recipient = client.create_recipient(
                 domain_id=domain_id,
                 webhook_url=webhook_url,
                 local_part=local_part,
-                description=description,
-                tags=tags,
+                webhook_headers=webhook_headers,
             )
             address = local_part if local_part else "* (catch-all)"
             print_success(f"Recipient '{address}' created")
@@ -97,6 +117,7 @@ def create_recipient(
 
 @app.command("update")
 def update_recipient(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     recipient_id: Annotated[str, typer.Argument(help="Recipient ID")],
     local_part: Annotated[
         str | None,
@@ -106,37 +127,32 @@ def update_recipient(
         str | None,
         typer.Option("--webhook", "-w", help="Webhook URL"),
     ] = None,
-    description: Annotated[
-        str | None,
-        typer.Option("--description", "-d", help="Description"),
-    ] = None,
     enabled: Annotated[
         bool | None,
         typer.Option("--enabled/--disabled", help="Enable or disable recipient"),
     ] = None,
-    tags: Annotated[
-        list[str] | None,
-        typer.Option("--tag", "-t", help="Tags (replaces existing)"),
-    ] = None,
+    headers: HeaderOption = None,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
     """Update a recipient."""
-    if all(v is None for v in [local_part, webhook_url, description, enabled, tags]):
+    if all(value is None for value in [local_part, webhook_url, enabled, headers]):
         print_error("At least one option must be provided")
         raise typer.Exit(1)
+
+    webhook_headers = parse_headers(headers)
 
     try:
         with FastSMTPClient(profile_name=profile) as client:
             recipient = client.update_recipient(
+                domain_id=domain_id,
                 recipient_id=recipient_id,
                 local_part=local_part,
                 webhook_url=webhook_url,
-                description=description,
                 is_enabled=enabled,
-                tags=tags,
+                webhook_headers=webhook_headers,
             )
             print_success("Recipient updated")
             print_recipient(recipient)
@@ -147,6 +163,7 @@ def update_recipient(
 
 @app.command("delete")
 def delete_recipient(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     recipient_id: Annotated[str, typer.Argument(help="Recipient ID")],
     force: Annotated[
         bool,
@@ -165,7 +182,7 @@ def delete_recipient(
 
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            client.delete_recipient(recipient_id)
+            client.delete_recipient(domain_id, recipient_id)
             print_success(f"Recipient {recipient_id} deleted")
     except APIError as e:
         print_error(e.detail)

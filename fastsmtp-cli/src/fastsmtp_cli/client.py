@@ -1,5 +1,11 @@
-"""HTTP API client for FastSMTP server."""
+"""HTTP API client for FastSMTP server.
 
+Every path and payload here mirrors a route the server actually serves. The
+contract is enforced by ``fastsmtp-cli/tests/test_api_contract.py``, which drives
+these methods against the server's own OpenAPI document - keep them in step.
+"""
+
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -8,13 +14,66 @@ import httpx
 from fastsmtp_cli.config import Profile, get_profile
 
 
+class _Unset:
+    """Sentinel type: a field the caller did not mention at all.
+
+    Needed by the update methods because the server distinguishes "leave this
+    column alone" (field absent from the JSON body) from "reset this column to
+    null, i.e. inherit the global default" (field present and null).
+    """
+
+    _instance: "_Unset | None" = None
+
+    def __new__(cls) -> "_Unset":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+#: Marker for "field not provided" in update calls.
+UNSET = _Unset()
+
+#: A nullable boolean setting on an update call: ``True``/``False`` set it,
+#: ``None`` resets it to inherit the server-wide default, ``UNSET`` leaves it be.
+NullableBool = bool | None | _Unset
+
+
+def _format_detail(detail: Any) -> str:
+    """Render an error ``detail`` payload as a single human-readable string.
+
+    FastAPI returns a string for ``HTTPException`` (for example the 422 raised
+    when raw-message preservation is requested without S3 configured) but a list
+    of error objects for request-validation failures. Commands print this
+    straight to the terminal, so it must always be text.
+    """
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, list):
+        messages = []
+        for item in detail:
+            if isinstance(item, dict):
+                location = ".".join(str(part) for part in item.get("loc", []) if part != "body")
+                message = item.get("msg", "invalid value")
+                messages.append(f"{location}: {message}" if location else str(message))
+            else:
+                messages.append(str(item))
+        return "; ".join(messages)
+    return str(detail)
+
+
 class APIError(Exception):
     """API request error."""
 
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: Any):
         self.status_code = status_code
-        self.detail = detail
-        super().__init__(f"API error {status_code}: {detail}")
+        self.detail = _format_detail(detail)
+        super().__init__(f"API error {status_code}: {self.detail}")
 
 
 class FastSMTPClient:
@@ -123,14 +182,14 @@ class FastSMTPClient:
         self,
         name: str,
         scopes: list[str] | None = None,
-        expires_days: int | None = None,
+        expires_at: datetime | None = None,
     ) -> dict:
         """Create a new API key."""
         data: dict[str, Any] = {"name": name}
         if scopes:
             data["scopes"] = scopes
-        if expires_days:
-            data["expires_days"] = expires_days
+        if expires_at is not None:
+            data["expires_at"] = expires_at.isoformat()
         return self.post("/api/v1/auth/keys", json=data)
 
     def delete_api_key(self, key_id: UUID | str) -> None:
@@ -143,27 +202,21 @@ class FastSMTPClient:
 
     # User endpoints (superuser only)
 
-    def list_users(self, limit: int = 50, offset: int = 0) -> list[dict]:
+    def list_users(self) -> list[dict]:
         """List all users."""
-        return self.get("/api/v1/users", params={"limit": limit, "offset": offset})
+        return self.get("/api/v1/users")
 
     def create_user(
         self,
         username: str,
-        email: str,
-        password: str,
+        email: str | None = None,
         is_superuser: bool = False,
     ) -> dict:
         """Create a new user."""
-        return self.post(
-            "/api/v1/users",
-            json={
-                "username": username,
-                "email": email,
-                "password": password,
-                "is_superuser": is_superuser,
-            },
-        )
+        data: dict[str, Any] = {"username": username, "is_superuser": is_superuser}
+        if email is not None:
+            data["email"] = email
+        return self.post("/api/v1/users", json=data)
 
     def get_user(self, user_id: UUID | str) -> dict:
         """Get a user by ID."""
@@ -174,7 +227,6 @@ class FastSMTPClient:
         user_id: UUID | str,
         username: str | None = None,
         email: str | None = None,
-        password: str | None = None,
         is_active: bool | None = None,
         is_superuser: bool | None = None,
     ) -> dict:
@@ -184,13 +236,11 @@ class FastSMTPClient:
             data["username"] = username
         if email is not None:
             data["email"] = email
-        if password is not None:
-            data["password"] = password
         if is_active is not None:
             data["is_active"] = is_active
         if is_superuser is not None:
             data["is_superuser"] = is_superuser
-        return self.patch(f"/api/v1/users/{user_id}", json=data)
+        return self.put(f"/api/v1/users/{user_id}", json=data)
 
     def delete_user(self, user_id: UUID | str) -> None:
         """Delete a user."""
@@ -198,19 +248,35 @@ class FastSMTPClient:
 
     # Domain endpoints
 
-    def list_domains(self, limit: int = 50, offset: int = 0) -> list[dict]:
+    def list_domains(self) -> list[dict]:
         """List domains the user has access to."""
-        return self.get("/api/v1/domains", params={"limit": limit, "offset": offset})
+        return self.get("/api/v1/domains")
 
     def create_domain(
         self,
         domain_name: str,
-        description: str | None = None,
+        verify_dkim: bool | None = None,
+        verify_spf: bool | None = None,
+        reject_dkim_fail: bool | None = None,
+        reject_spf_fail: bool | None = None,
+        preserve_raw_message: bool | None = None,
     ) -> dict:
-        """Create a new domain."""
+        """Create a new domain.
+
+        Any flag left as ``None`` is omitted, so the domain inherits the
+        server-wide default for that setting.
+        """
         data: dict[str, Any] = {"domain_name": domain_name}
-        if description:
-            data["description"] = description
+        if verify_dkim is not None:
+            data["verify_dkim"] = verify_dkim
+        if verify_spf is not None:
+            data["verify_spf"] = verify_spf
+        if reject_dkim_fail is not None:
+            data["reject_dkim_fail"] = reject_dkim_fail
+        if reject_spf_fail is not None:
+            data["reject_spf_fail"] = reject_spf_fail
+        if preserve_raw_message is not None:
+            data["preserve_raw_message"] = preserve_raw_message
         return self.post("/api/v1/domains", json=data)
 
     def get_domain(self, domain_id: UUID | str) -> dict:
@@ -220,16 +286,32 @@ class FastSMTPClient:
     def update_domain(
         self,
         domain_id: UUID | str,
-        description: str | None = None,
         is_enabled: bool | None = None,
+        verify_dkim: NullableBool = UNSET,
+        verify_spf: NullableBool = UNSET,
+        reject_dkim_fail: NullableBool = UNSET,
+        reject_spf_fail: NullableBool = UNSET,
+        preserve_raw_message: NullableBool = UNSET,
     ) -> dict:
-        """Update a domain."""
+        """Update a domain.
+
+        The nullable flags are three-valued: ``True``/``False`` pin the setting
+        for this domain, ``None`` clears it so the domain inherits the
+        server-wide default, and ``UNSET`` leaves it untouched.
+        """
         data: dict[str, Any] = {}
-        if description is not None:
-            data["description"] = description
         if is_enabled is not None:
             data["is_enabled"] = is_enabled
-        return self.patch(f"/api/v1/domains/{domain_id}", json=data)
+        for field, value in (
+            ("verify_dkim", verify_dkim),
+            ("verify_spf", verify_spf),
+            ("reject_dkim_fail", reject_dkim_fail),
+            ("reject_spf_fail", reject_spf_fail),
+            ("preserve_raw_message", preserve_raw_message),
+        ):
+            if not isinstance(value, _Unset):
+                data[field] = value
+        return self.put(f"/api/v1/domains/{domain_id}", json=data)
 
     def delete_domain(self, domain_id: UUID | str) -> None:
         """Delete a domain."""
@@ -237,17 +319,9 @@ class FastSMTPClient:
 
     # Domain members
 
-    def list_members(
-        self,
-        domain_id: UUID | str,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[dict]:
+    def list_members(self, domain_id: UUID | str) -> list[dict]:
         """List domain members."""
-        return self.get(
-            f"/api/v1/domains/{domain_id}/members",
-            params={"limit": limit, "offset": offset},
-        )
+        return self.get(f"/api/v1/domains/{domain_id}/members")
 
     def add_member(
         self,
@@ -268,7 +342,7 @@ class FastSMTPClient:
         role: str,
     ) -> dict:
         """Update a member's role."""
-        return self.patch(
+        return self.put(
             f"/api/v1/domains/{domain_id}/members/{user_id}",
             json={"role": role},
         )
@@ -279,48 +353,37 @@ class FastSMTPClient:
 
     # Recipient endpoints
 
-    def list_recipients(
-        self,
-        domain_id: UUID | str,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[dict]:
+    def list_recipients(self, domain_id: UUID | str) -> list[dict]:
         """List recipients for a domain."""
-        return self.get(
-            f"/api/v1/domains/{domain_id}/recipients",
-            params={"limit": limit, "offset": offset},
-        )
+        return self.get(f"/api/v1/domains/{domain_id}/recipients")
 
     def create_recipient(
         self,
         domain_id: UUID | str,
         webhook_url: str,
         local_part: str | None = None,
-        description: str | None = None,
-        tags: list[str] | None = None,
+        webhook_headers: dict | None = None,
     ) -> dict:
         """Create a new recipient."""
         data: dict[str, Any] = {"webhook_url": webhook_url}
         if local_part is not None:
             data["local_part"] = local_part
-        if description:
-            data["description"] = description
-        if tags:
-            data["tags"] = tags
+        if webhook_headers:
+            data["webhook_headers"] = webhook_headers
         return self.post(f"/api/v1/domains/{domain_id}/recipients", json=data)
 
-    def get_recipient(self, recipient_id: UUID | str) -> dict:
+    def get_recipient(self, domain_id: UUID | str, recipient_id: UUID | str) -> dict:
         """Get a recipient by ID."""
-        return self.get(f"/api/v1/recipients/{recipient_id}")
+        return self.get(f"/api/v1/domains/{domain_id}/recipients/{recipient_id}")
 
     def update_recipient(
         self,
+        domain_id: UUID | str,
         recipient_id: UUID | str,
         local_part: str | None = None,
         webhook_url: str | None = None,
-        description: str | None = None,
         is_enabled: bool | None = None,
-        tags: list[str] | None = None,
+        webhook_headers: dict | None = None,
     ) -> dict:
         """Update a recipient."""
         data: dict[str, Any] = {}
@@ -328,123 +391,143 @@ class FastSMTPClient:
             data["local_part"] = local_part
         if webhook_url is not None:
             data["webhook_url"] = webhook_url
-        if description is not None:
-            data["description"] = description
         if is_enabled is not None:
             data["is_enabled"] = is_enabled
-        if tags is not None:
-            data["tags"] = tags
-        return self.patch(f"/api/v1/recipients/{recipient_id}", json=data)
+        if webhook_headers is not None:
+            data["webhook_headers"] = webhook_headers
+        return self.put(f"/api/v1/domains/{domain_id}/recipients/{recipient_id}", json=data)
 
-    def delete_recipient(self, recipient_id: UUID | str) -> None:
+    def delete_recipient(self, domain_id: UUID | str, recipient_id: UUID | str) -> None:
         """Delete a recipient."""
-        self.delete(f"/api/v1/recipients/{recipient_id}")
+        self.delete(f"/api/v1/domains/{domain_id}/recipients/{recipient_id}")
 
     # RuleSet endpoints
 
-    def list_rulesets(
-        self,
-        domain_id: UUID | str,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[dict]:
+    def list_rulesets(self, domain_id: UUID | str) -> list[dict]:
         """List rulesets for a domain."""
-        return self.get(
-            f"/api/v1/domains/{domain_id}/rulesets",
-            params={"limit": limit, "offset": offset},
-        )
+        return self.get(f"/api/v1/domains/{domain_id}/rulesets")
 
     def create_ruleset(
         self,
         domain_id: UUID | str,
         name: str,
-        description: str | None = None,
         priority: int = 0,
+        stop_on_match: bool = True,
     ) -> dict:
         """Create a new ruleset."""
-        data: dict[str, Any] = {"name": name, "priority": priority}
-        if description:
-            data["description"] = description
+        data: dict[str, Any] = {
+            "name": name,
+            "priority": priority,
+            "stop_on_match": stop_on_match,
+        }
         return self.post(f"/api/v1/domains/{domain_id}/rulesets", json=data)
 
-    def get_ruleset(self, ruleset_id: UUID | str) -> dict:
-        """Get a ruleset by ID."""
-        return self.get(f"/api/v1/rulesets/{ruleset_id}")
+    def get_ruleset(self, domain_id: UUID | str, ruleset_id: UUID | str) -> dict:
+        """Get a ruleset by ID, including its rules."""
+        return self.get(f"/api/v1/domains/{domain_id}/rulesets/{ruleset_id}")
 
     def update_ruleset(
         self,
+        domain_id: UUID | str,
         ruleset_id: UUID | str,
         name: str | None = None,
-        description: str | None = None,
         priority: int | None = None,
+        stop_on_match: bool | None = None,
         is_enabled: bool | None = None,
     ) -> dict:
         """Update a ruleset."""
         data: dict[str, Any] = {}
         if name is not None:
             data["name"] = name
-        if description is not None:
-            data["description"] = description
         if priority is not None:
             data["priority"] = priority
+        if stop_on_match is not None:
+            data["stop_on_match"] = stop_on_match
         if is_enabled is not None:
             data["is_enabled"] = is_enabled
-        return self.patch(f"/api/v1/rulesets/{ruleset_id}", json=data)
+        return self.put(f"/api/v1/domains/{domain_id}/rulesets/{ruleset_id}", json=data)
 
-    def delete_ruleset(self, ruleset_id: UUID | str) -> None:
+    def delete_ruleset(self, domain_id: UUID | str, ruleset_id: UUID | str) -> None:
         """Delete a ruleset."""
-        self.delete(f"/api/v1/rulesets/{ruleset_id}")
+        self.delete(f"/api/v1/domains/{domain_id}/rulesets/{ruleset_id}")
 
     # Rule endpoints
 
-    def list_rules(self, ruleset_id: UUID | str) -> list[dict]:
-        """List rules in a ruleset."""
-        return self.get(f"/api/v1/rulesets/{ruleset_id}/rules")
+    def list_rules(self, domain_id: UUID | str, ruleset_id: UUID | str) -> list[dict]:
+        """List rules in a ruleset.
+
+        The server has no standalone rules collection: rules are returned inside
+        the ruleset detail response, in ``order`` order.
+        """
+        ruleset = self.get_ruleset(domain_id, ruleset_id)
+        return ruleset.get("rules", [])
 
     def create_rule(
         self,
+        domain_id: UUID | str,
         ruleset_id: UUID | str,
-        name: str,
         field: str,
         operator: str,
         value: str,
         action: str = "forward",
-        action_params: dict | None = None,
-        priority: int = 0,
+        case_sensitive: bool = False,
+        webhook_url_override: str | None = None,
+        add_tags: list[str] | None = None,
+        preserve_raw: bool = False,
     ) -> dict:
-        """Create a new rule."""
+        """Create a new rule.
+
+        The rule is appended to the end of the ruleset; use
+        :meth:`reorder_rules` to change evaluation order.
+        """
         data: dict[str, Any] = {
-            "name": name,
             "field": field,
             "operator": operator,
             "value": value,
             "action": action,
-            "priority": priority,
+            "case_sensitive": case_sensitive,
+            "preserve_raw": preserve_raw,
         }
-        if action_params:
-            data["action_params"] = action_params
-        return self.post(f"/api/v1/rulesets/{ruleset_id}/rules", json=data)
+        if webhook_url_override is not None:
+            data["webhook_url_override"] = webhook_url_override
+        if add_tags:
+            data["add_tags"] = add_tags
+        return self.post(f"/api/v1/domains/{domain_id}/rulesets/{ruleset_id}/rules", json=data)
 
-    def get_rule(self, rule_id: UUID | str) -> dict:
-        """Get a rule by ID."""
-        return self.get(f"/api/v1/rules/{rule_id}")
+    def get_rule(
+        self,
+        domain_id: UUID | str,
+        ruleset_id: UUID | str,
+        rule_id: UUID | str,
+    ) -> dict:
+        """Get a single rule out of its ruleset.
+
+        The server exposes no standalone rule read endpoint, so the rule is
+        picked out of the ruleset detail response.
+
+        Raises:
+            APIError: 404 if the ruleset holds no rule with that ID
+        """
+        for rule in self.list_rules(domain_id, ruleset_id):
+            if str(rule.get("id")) == str(rule_id):
+                return rule
+        raise APIError(404, f"Rule {rule_id} not found in ruleset {ruleset_id}")
 
     def update_rule(
         self,
+        domain_id: UUID | str,
         rule_id: UUID | str,
-        name: str | None = None,
         field: str | None = None,
         operator: str | None = None,
         value: str | None = None,
         action: str | None = None,
-        action_params: dict | None = None,
-        priority: int | None = None,
-        is_enabled: bool | None = None,
+        case_sensitive: bool | None = None,
+        webhook_url_override: str | None = None,
+        add_tags: list[str] | None = None,
+        preserve_raw: bool | None = None,
     ) -> dict:
         """Update a rule."""
         data: dict[str, Any] = {}
-        if name is not None:
-            data["name"] = name
         if field is not None:
             data["field"] = field
         if operator is not None:
@@ -453,17 +536,31 @@ class FastSMTPClient:
             data["value"] = value
         if action is not None:
             data["action"] = action
-        if action_params is not None:
-            data["action_params"] = action_params
-        if priority is not None:
-            data["priority"] = priority
-        if is_enabled is not None:
-            data["is_enabled"] = is_enabled
-        return self.patch(f"/api/v1/rules/{rule_id}", json=data)
+        if case_sensitive is not None:
+            data["case_sensitive"] = case_sensitive
+        if webhook_url_override is not None:
+            data["webhook_url_override"] = webhook_url_override
+        if add_tags is not None:
+            data["add_tags"] = add_tags
+        if preserve_raw is not None:
+            data["preserve_raw"] = preserve_raw
+        return self.put(f"/api/v1/domains/{domain_id}/rules/{rule_id}", json=data)
 
-    def delete_rule(self, rule_id: UUID | str) -> None:
+    def delete_rule(self, domain_id: UUID | str, rule_id: UUID | str) -> None:
         """Delete a rule."""
-        self.delete(f"/api/v1/rules/{rule_id}")
+        self.delete(f"/api/v1/domains/{domain_id}/rules/{rule_id}")
+
+    def reorder_rules(
+        self,
+        domain_id: UUID | str,
+        ruleset_id: UUID | str,
+        rule_ids: list[str],
+    ) -> dict:
+        """Set the evaluation order of a ruleset's rules."""
+        return self.post(
+            f"/api/v1/domains/{domain_id}/rulesets/{ruleset_id}/reorder",
+            json={"rule_ids": [str(rule_id) for rule_id in rule_ids]},
+        )
 
     # Delivery log endpoints
 

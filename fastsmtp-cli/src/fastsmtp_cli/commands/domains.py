@@ -1,10 +1,11 @@
 """Domain and member management commands."""
 
-from typing import Annotated
+from enum import Enum
+from typing import Annotated, Any
 
 import typer
 
-from fastsmtp_cli.client import APIError, FastSMTPClient
+from fastsmtp_cli.client import UNSET, APIError, FastSMTPClient
 from fastsmtp_cli.output import (
     print_domain,
     print_domains_table,
@@ -16,10 +17,68 @@ from fastsmtp_cli.output import (
 app = typer.Typer(help="Domain management")
 
 
+class TriState(str, Enum):
+    """A per-domain override of a server-wide boolean setting.
+
+    ``inherit`` clears the override so the domain follows the server default;
+    leaving the option off entirely means "don't touch this setting".
+    """
+
+    true = "true"
+    false = "false"
+    inherit = "inherit"
+
+
+def _tri_state_value(option: TriState | None) -> bool | None:
+    """Map a tri-state option to the boolean (or null) the API expects."""
+    if option is TriState.true:
+        return True
+    if option is TriState.false:
+        return False
+    return None
+
+
+def _create_flag(option: TriState | None) -> bool | None:
+    """Flag value for a create call: ``inherit`` and "unset" both mean omit."""
+    if option is None or option is TriState.inherit:
+        return None
+    return _tri_state_value(option)
+
+
+def _update_flag(option: TriState | None) -> Any:
+    """Flag value for an update call, keeping "unset" distinct from ``inherit``."""
+    if option is None:
+        return UNSET
+    return _tri_state_value(option)
+
+
+VerifyDkim = Annotated[
+    TriState | None,
+    typer.Option("--verify-dkim", help="Verify DKIM signatures (true/false/inherit)"),
+]
+VerifySpf = Annotated[
+    TriState | None,
+    typer.Option("--verify-spf", help="Verify SPF records (true/false/inherit)"),
+]
+RejectDkimFail = Annotated[
+    TriState | None,
+    typer.Option("--reject-dkim-fail", help="Reject on DKIM failure (true/false/inherit)"),
+]
+RejectSpfFail = Annotated[
+    TriState | None,
+    typer.Option("--reject-spf-fail", help="Reject on SPF failure (true/false/inherit)"),
+]
+PreserveRawMessage = Annotated[
+    TriState | None,
+    typer.Option(
+        "--preserve-raw-message",
+        help="Preserve the raw MIME message in S3 (true/false/inherit)",
+    ),
+]
+
+
 @app.command("list")
 def list_domains(
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Max results")] = 50,
-    offset: Annotated[int, typer.Option("--offset", "-o", help="Offset")] = 0,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
@@ -28,7 +87,7 @@ def list_domains(
     """List domains you have access to."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            domains = client.list_domains(limit=limit, offset=offset)
+            domains = client.list_domains()
             if not domains:
                 print_error("No domains found")
                 return
@@ -59,10 +118,11 @@ def get_domain(
 @app.command("create")
 def create_domain(
     domain_name: Annotated[str, typer.Argument(help="Domain name (e.g., example.com)")],
-    description: Annotated[
-        str | None,
-        typer.Option("--description", "-d", help="Description"),
-    ] = None,
+    verify_dkim: VerifyDkim = None,
+    verify_spf: VerifySpf = None,
+    reject_dkim_fail: RejectDkimFail = None,
+    reject_spf_fail: RejectSpfFail = None,
+    preserve_raw_message: PreserveRawMessage = None,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
@@ -71,7 +131,14 @@ def create_domain(
     """Create a new domain."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            domain = client.create_domain(domain_name=domain_name, description=description)
+            domain = client.create_domain(
+                domain_name=domain_name,
+                verify_dkim=_create_flag(verify_dkim),
+                verify_spf=_create_flag(verify_spf),
+                reject_dkim_fail=_create_flag(reject_dkim_fail),
+                reject_spf_fail=_create_flag(reject_spf_fail),
+                preserve_raw_message=_create_flag(preserve_raw_message),
+            )
             print_success(f"Domain '{domain_name}' created")
             print_domain(domain)
     except APIError as e:
@@ -82,21 +149,30 @@ def create_domain(
 @app.command("update")
 def update_domain(
     domain_id: Annotated[str, typer.Argument(help="Domain ID")],
-    description: Annotated[
-        str | None,
-        typer.Option("--description", "-d", help="Description"),
-    ] = None,
     enabled: Annotated[
         bool | None,
         typer.Option("--enabled/--disabled", help="Enable or disable domain"),
     ] = None,
+    verify_dkim: VerifyDkim = None,
+    verify_spf: VerifySpf = None,
+    reject_dkim_fail: RejectDkimFail = None,
+    reject_spf_fail: RejectSpfFail = None,
+    preserve_raw_message: PreserveRawMessage = None,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
     """Update a domain."""
-    if description is None and enabled is None:
+    options = [
+        enabled,
+        verify_dkim,
+        verify_spf,
+        reject_dkim_fail,
+        reject_spf_fail,
+        preserve_raw_message,
+    ]
+    if all(value is None for value in options):
         print_error("At least one option must be provided")
         raise typer.Exit(1)
 
@@ -104,8 +180,12 @@ def update_domain(
         with FastSMTPClient(profile_name=profile) as client:
             domain = client.update_domain(
                 domain_id=domain_id,
-                description=description,
                 is_enabled=enabled,
+                verify_dkim=_update_flag(verify_dkim),
+                verify_spf=_update_flag(verify_spf),
+                reject_dkim_fail=_update_flag(reject_dkim_fail),
+                reject_spf_fail=_update_flag(reject_spf_fail),
+                preserve_raw_message=_update_flag(preserve_raw_message),
             )
             print_success("Domain updated")
             print_domain(domain)
@@ -149,8 +229,6 @@ app.add_typer(member_app, name="member")
 @member_app.command("list")
 def list_members(
     domain_id: Annotated[str, typer.Argument(help="Domain ID")],
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Max results")] = 50,
-    offset: Annotated[int, typer.Option("--offset", "-o", help="Offset")] = 0,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
@@ -159,7 +237,7 @@ def list_members(
     """List domain members."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            members = client.list_members(domain_id, limit=limit, offset=offset)
+            members = client.list_members(domain_id)
             if not members:
                 print_error("No members found")
                 return

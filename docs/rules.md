@@ -26,8 +26,9 @@ The rule engine allows conditional processing of emails based on various attribu
 
 ## Raw Message Preservation
 
-Independent of the action, a rule may set `preserve_raw` to archive the complete raw MIME
-message in S3 when it matches. Because it is orthogonal to the action, a rule can archive
+Independent of the action, a rule may set `preserve_raw` (`--preserve-raw` on
+`fsmtp rules rule create|update`) to archive the complete raw MIME message in S3 when it
+matches. Because it is orthogonal to the action, a rule can archive
 a message and still drop it. See
 [Raw Message Preservation](configuration.md#raw-message-preservation-s3) for the storage
 layout and the domain-level and global settings it combines with.
@@ -38,15 +39,26 @@ Create a ruleset and a rule that tags spam using the [remote CLI](cli/fsmtp.md):
 
 ```bash
 # Create a ruleset
-fsmtp rules create example.com "Spam Filter" --priority 10
+fsmtp rules create <domain-id> "Spam Filter" --priority 10
 
 # Create a rule within the ruleset
-fsmtp rules rule create example.com <ruleset-id> \
+fsmtp rules rule create <domain-id> <ruleset-id> \
   --field subject \
   --operator contains \
   --value "[SPAM]" \
   --action tag \
-  --action-value spam
+  --tag spam
+
+# Archive the raw MIME message in S3 when the rule matches
+fsmtp rules rule create <domain-id> <ruleset-id> \
+  --field subject \
+  --operator contains \
+  --value "[SPAM]" \
+  --action drop \
+  --preserve-raw
 ```
+
+Rules are appended to the end of the ruleset and evaluated in that order; use
+`fsmtp rules rule reorder <domain-id> <ruleset-id> <rule-id>...` to change it.
 
 Rules can also be managed through the [REST API](api.md).

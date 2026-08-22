@@ -3,8 +3,8 @@
 FastSMTP is a uv workspace with two packages: `fastsmtp` (server) and `fastsmtp-cli` (remote client).
 
 ```bash
-# Install dev dependencies
-uv sync --dev
+# Install dev dependencies for both workspace packages
+uv sync --all-packages --dev
 
 # Run tests
 uv run pytest

@@ -1,6 +1,8 @@
 """Tests for FastSMTP API client."""
 
+import json
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -45,6 +47,23 @@ class TestAPIError:
         error = APIError(500, "Internal server error")
         assert "500" in str(error)
         assert "Internal server error" in str(error)
+
+    def test_api_error_flattens_validation_detail(self):
+        """FastAPI returns a list of error objects for 422 validation failures."""
+        error = APIError(
+            422,
+            [
+                {"loc": ["body", "webhook_url"], "msg": "not a valid URL", "type": "url"},
+                {"loc": ["body", "field"], "msg": "Invalid field", "type": "value_error"},
+            ],
+        )
+
+        assert error.detail == "webhook_url: not a valid URL; field: Invalid field"
+
+    def test_api_error_keeps_string_detail_verbatim(self):
+        """HTTPException details (like the S3 422) are already plain text."""
+        detail = "Raw message preservation requires S3 storage to be configured."
+        assert APIError(422, detail).detail == detail
 
 
 class TestFastSMTPClient:
@@ -177,6 +196,85 @@ class TestFastSMTPClient:
         assert "X-API-Key" not in route.calls[0].request.headers
 
 
+class TestRuleLookup:
+    """`list_rules`/`get_rule` are built on the ruleset detail response."""
+
+    @respx.mock
+    def test_list_rules_reads_the_ruleset(self, test_profile):
+        domain_id, ruleset_id = str(uuid4()), str(uuid4())
+        route = respx.get(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": ruleset_id, "rules": [{"id": "r1"}]}))
+
+        with FastSMTPClient(profile=test_profile) as client:
+            rules = client.list_rules(domain_id, ruleset_id)
+
+        assert route.called
+        assert rules == [{"id": "r1"}]
+
+    @respx.mock
+    def test_get_rule_picks_the_matching_rule(self, test_profile):
+        domain_id, ruleset_id = str(uuid4()), str(uuid4())
+        rule_id = str(uuid4())
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": ruleset_id,
+                    "rules": [{"id": str(uuid4())}, {"id": rule_id, "field": "subject"}],
+                },
+            )
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            rule = client.get_rule(domain_id, ruleset_id, rule_id)
+
+        assert rule["field"] == "subject"
+
+    @respx.mock
+    def test_get_rule_raises_404_when_absent(self, test_profile):
+        domain_id, ruleset_id = str(uuid4()), str(uuid4())
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
+            return_value=httpx.Response(200, json={"id": ruleset_id, "rules": []})
+        )
+
+        with (
+            FastSMTPClient(profile=test_profile) as client,
+            pytest.raises(APIError) as exc_info,
+        ):
+            client.get_rule(domain_id, ruleset_id, str(uuid4()))
+
+        assert exc_info.value.status_code == 404
+
+
+class TestUpdateSemantics:
+    """Update payloads must distinguish "unchanged" from "reset to default"."""
+
+    @respx.mock
+    def test_unset_flags_are_omitted(self, test_profile):
+        domain_id = str(uuid4())
+        route = respx.put(f"https://api.example.com/api/v1/domains/{domain_id}").mock(
+            return_value=httpx.Response(200, json={"id": domain_id})
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.update_domain(domain_id, is_enabled=False)
+
+        assert json.loads(route.calls[0].request.content) == {"is_enabled": False}
+
+    @respx.mock
+    def test_explicit_none_is_sent_as_null(self, test_profile):
+        domain_id = str(uuid4())
+        route = respx.put(f"https://api.example.com/api/v1/domains/{domain_id}").mock(
+            return_value=httpx.Response(200, json={"id": domain_id})
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.update_domain(domain_id, preserve_raw_message=None)
+
+        assert json.loads(route.calls[0].request.content) == {"preserve_raw_message": None}
+
+
 class TestClientEndpoints:
     """Tests for API client endpoint methods."""
 
@@ -238,7 +336,11 @@ class TestClientEndpoints:
         )
 
         with mock_client as client:
-            result = client.create_api_key("new-key", scopes=["read"], expires_days=30)
+            result = client.create_api_key(
+                "new-key",
+                scopes=["read"],
+                expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+            )
             assert result["name"] == "new-key"
 
     @respx.mock
@@ -272,7 +374,7 @@ class TestClientEndpoints:
         )
 
         with mock_client as client:
-            result = client.create_domain("new.example.com", description="Test domain")
+            result = client.create_domain("new.example.com", preserve_raw_message=True)
             assert result["domain_name"] == "new.example.com"
 
     @respx.mock
@@ -303,7 +405,7 @@ class TestClientEndpoints:
                 domain_id,
                 webhook_url="https://hook.example.com",
                 local_part="info",
-                tags=["important"],
+                webhook_headers={"X-Token": "abc"},
             )
             assert result["webhook_url"] == "https://hook.example.com"
 
