@@ -1,4 +1,10 @@
-"""RuleSet and rule management commands."""
+"""RuleSet and rule management commands.
+
+Rulesets and rules are nested under a domain on the server, so every command
+here takes the domain ID first. Rules have no name, no per-rule ``priority`` and
+no ``is_enabled``: their evaluation order is the ruleset's ``order``, changed
+with ``fsmtp rules rule reorder``.
+"""
 
 from typing import Annotated
 
@@ -16,13 +22,52 @@ from fastsmtp_cli.output import (
 
 app = typer.Typer(help="RuleSet and rule management")
 
+# Mirrors fastsmtp.schemas.rule - the server rejects anything else.
+VALID_FIELDS = (
+    "from",
+    "to",
+    "subject",
+    "body",
+    "has_attachment",
+    "dkim_result",
+    "spf_result",
+)
+FIELD_HEADER_PREFIX = "header:"
+VALID_OPERATORS = ("equals", "contains", "regex", "starts_with", "ends_with", "exists")
+VALID_ACTIONS = ("forward", "drop", "tag", "quarantine")
+
+
+def _validate_field(field: str | None) -> None:
+    """Reject fields the server would reject, before spending a round-trip."""
+    if field is None or field in VALID_FIELDS or field.startswith(FIELD_HEADER_PREFIX):
+        return
+    print_error(
+        f"Invalid field. Must be one of: {', '.join(VALID_FIELDS)}, "
+        f"or {FIELD_HEADER_PREFIX}X-Header-Name"
+    )
+    raise typer.Exit(1)
+
+
+def _validate_operator(operator: str | None) -> None:
+    """Reject operators the server would reject."""
+    if operator is None or operator in VALID_OPERATORS:
+        return
+    print_error(f"Invalid operator. Must be one of: {', '.join(VALID_OPERATORS)}")
+    raise typer.Exit(1)
+
+
+def _validate_action(action: str | None) -> None:
+    """Reject actions the server would reject."""
+    if action is None or action in VALID_ACTIONS:
+        return
+    print_error(f"Invalid action. Must be one of: {', '.join(VALID_ACTIONS)}")
+    raise typer.Exit(1)
+
 
 # RuleSet commands
 @app.command("list")
 def list_rulesets(
     domain_id: Annotated[str, typer.Argument(help="Domain ID")],
-    limit: Annotated[int, typer.Option("--limit", "-l", help="Max results")] = 50,
-    offset: Annotated[int, typer.Option("--offset", "-o", help="Offset")] = 0,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
@@ -31,7 +76,7 @@ def list_rulesets(
     """List rulesets for a domain."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            rulesets = client.list_rulesets(domain_id, limit=limit, offset=offset)
+            rulesets = client.list_rulesets(domain_id)
             if not rulesets:
                 print_error("No rulesets found")
                 return
@@ -43,6 +88,7 @@ def list_rulesets(
 
 @app.command("get")
 def get_ruleset(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     ruleset_id: Annotated[str, typer.Argument(help="RuleSet ID")],
     profile: Annotated[
         str | None,
@@ -52,7 +98,7 @@ def get_ruleset(
     """Get ruleset details with rules."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            ruleset = client.get_ruleset(ruleset_id)
+            ruleset = client.get_ruleset(domain_id, ruleset_id)
             print_ruleset(ruleset)
     except APIError as e:
         print_error(e.detail)
@@ -63,14 +109,17 @@ def get_ruleset(
 def create_ruleset(
     domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     name: Annotated[str, typer.Argument(help="RuleSet name")],
-    description: Annotated[
-        str | None,
-        typer.Option("--description", "-d", help="Description"),
-    ] = None,
     priority: Annotated[
         int,
         typer.Option("--priority", "-P", help="Priority (higher = first)"),
     ] = 0,
+    stop_on_match: Annotated[
+        bool,
+        typer.Option(
+            "--stop-on-match/--no-stop-on-match",
+            help="Stop evaluating later rulesets once a rule here matches",
+        ),
+    ] = True,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
@@ -82,8 +131,8 @@ def create_ruleset(
             ruleset = client.create_ruleset(
                 domain_id=domain_id,
                 name=name,
-                description=description,
                 priority=priority,
+                stop_on_match=stop_on_match,
             )
             print_success(f"RuleSet '{name}' created")
             print_ruleset(ruleset)
@@ -94,18 +143,19 @@ def create_ruleset(
 
 @app.command("update")
 def update_ruleset(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     ruleset_id: Annotated[str, typer.Argument(help="RuleSet ID")],
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="New name"),
     ] = None,
-    description: Annotated[
-        str | None,
-        typer.Option("--description", "-d", help="Description"),
-    ] = None,
     priority: Annotated[
         int | None,
         typer.Option("--priority", "-P", help="Priority"),
+    ] = None,
+    stop_on_match: Annotated[
+        bool | None,
+        typer.Option("--stop-on-match/--no-stop-on-match", help="Stop on match"),
     ] = None,
     enabled: Annotated[
         bool | None,
@@ -117,17 +167,18 @@ def update_ruleset(
     ] = None,
 ) -> None:
     """Update a ruleset."""
-    if all(v is None for v in [name, description, priority, enabled]):
+    if all(value is None for value in [name, priority, stop_on_match, enabled]):
         print_error("At least one option must be provided")
         raise typer.Exit(1)
 
     try:
         with FastSMTPClient(profile_name=profile) as client:
             ruleset = client.update_ruleset(
+                domain_id=domain_id,
                 ruleset_id=ruleset_id,
                 name=name,
-                description=description,
                 priority=priority,
+                stop_on_match=stop_on_match,
                 is_enabled=enabled,
             )
             print_success("RuleSet updated")
@@ -139,6 +190,7 @@ def update_ruleset(
 
 @app.command("delete")
 def delete_ruleset(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     ruleset_id: Annotated[str, typer.Argument(help="RuleSet ID")],
     force: Annotated[
         bool,
@@ -157,7 +209,7 @@ def delete_ruleset(
 
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            client.delete_ruleset(ruleset_id)
+            client.delete_ruleset(domain_id, ruleset_id)
             print_success(f"RuleSet {ruleset_id} deleted")
     except APIError as e:
         print_error(e.detail)
@@ -171,6 +223,7 @@ app.add_typer(rule_app, name="rule")
 
 @rule_app.command("list")
 def list_rules(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     ruleset_id: Annotated[str, typer.Argument(help="RuleSet ID")],
     profile: Annotated[
         str | None,
@@ -180,7 +233,7 @@ def list_rules(
     """List rules in a ruleset."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            rules = client.list_rules(ruleset_id)
+            rules = client.list_rules(domain_id, ruleset_id)
             if not rules:
                 print_error("No rules found")
                 return
@@ -192,6 +245,8 @@ def list_rules(
 
 @rule_app.command("get")
 def get_rule(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
+    ruleset_id: Annotated[str, typer.Argument(help="RuleSet ID")],
     rule_id: Annotated[str, typer.Argument(help="Rule ID")],
     profile: Annotated[
         str | None,
@@ -201,7 +256,7 @@ def get_rule(
     """Get rule details."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            rule = client.get_rule(rule_id)
+            rule = client.get_rule(domain_id, ruleset_id, rule_id)
             print_rule(rule)
     except APIError as e:
         print_error(e.detail)
@@ -210,8 +265,8 @@ def get_rule(
 
 @rule_app.command("create")
 def create_rule(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     ruleset_id: Annotated[str, typer.Argument(help="RuleSet ID")],
-    name: Annotated[str, typer.Argument(help="Rule name")],
     field: Annotated[
         str,
         typer.Option("--field", "-F", help="Field to match", prompt=True),
@@ -221,7 +276,7 @@ def create_rule(
         typer.Option(
             "--operator",
             "-O",
-            help="Operator (equals, contains, regex, etc.)",
+            help="Operator (equals, contains, regex, starts_with, ends_with, exists)",
             prompt=True,
         ),
     ],
@@ -233,48 +288,50 @@ def create_rule(
         str,
         typer.Option("--action", "-a", help="Action (forward, drop, tag, quarantine)"),
     ] = "forward",
-    priority: Annotated[
-        int,
-        typer.Option("--priority", "-P", help="Priority (higher = first)"),
-    ] = 0,
+    case_sensitive: Annotated[
+        bool,
+        typer.Option("--case-sensitive/--ignore-case", help="Match case sensitively"),
+    ] = False,
+    webhook_url: Annotated[
+        str | None,
+        typer.Option("--webhook-url", "-w", help="Override the webhook URL for this rule"),
+    ] = None,
+    tags: Annotated[
+        list[str] | None,
+        typer.Option("--tag", "-t", help="Tag to add when the rule matches (repeatable)"),
+    ] = None,
+    preserve_raw: Annotated[
+        bool,
+        typer.Option(
+            "--preserve-raw/--no-preserve-raw",
+            help="Preserve the raw MIME message in S3 when this rule matches",
+        ),
+    ] = False,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
-    """Create a new rule."""
-    valid_operators = [
-        "equals",
-        "not_equals",
-        "contains",
-        "not_contains",
-        "starts_with",
-        "ends_with",
-        "regex",
-        "exists",
-        "not_exists",
-    ]
-    if operator not in valid_operators:
-        print_error(f"Invalid operator. Must be one of: {', '.join(valid_operators)}")
-        raise typer.Exit(1)
-
-    valid_actions = ["forward", "drop", "tag", "quarantine"]
-    if action not in valid_actions:
-        print_error(f"Invalid action. Must be one of: {', '.join(valid_actions)}")
-        raise typer.Exit(1)
+    """Create a new rule, appended to the end of the ruleset."""
+    _validate_field(field)
+    _validate_operator(operator)
+    _validate_action(action)
 
     try:
         with FastSMTPClient(profile_name=profile) as client:
             rule = client.create_rule(
+                domain_id=domain_id,
                 ruleset_id=ruleset_id,
-                name=name,
                 field=field,
                 operator=operator,
                 value=value,
                 action=action,
-                priority=priority,
+                case_sensitive=case_sensitive,
+                webhook_url_override=webhook_url,
+                add_tags=tags,
+                preserve_raw=preserve_raw,
             )
-            print_success(f"Rule '{name}' created")
+            print_success("Rule created")
             print_rule(rule)
     except APIError as e:
         print_error(e.detail)
@@ -283,11 +340,8 @@ def create_rule(
 
 @rule_app.command("update")
 def update_rule(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     rule_id: Annotated[str, typer.Argument(help="Rule ID")],
-    name: Annotated[
-        str | None,
-        typer.Option("--name", "-n", help="New name"),
-    ] = None,
     field: Annotated[
         str | None,
         typer.Option("--field", "-F", help="Field to match"),
@@ -304,13 +358,24 @@ def update_rule(
         str | None,
         typer.Option("--action", "-a", help="Action"),
     ] = None,
-    priority: Annotated[
-        int | None,
-        typer.Option("--priority", "-P", help="Priority"),
-    ] = None,
-    enabled: Annotated[
+    case_sensitive: Annotated[
         bool | None,
-        typer.Option("--enabled/--disabled", help="Enable or disable rule"),
+        typer.Option("--case-sensitive/--ignore-case", help="Match case sensitively"),
+    ] = None,
+    webhook_url: Annotated[
+        str | None,
+        typer.Option("--webhook-url", "-w", help="Override the webhook URL for this rule"),
+    ] = None,
+    tags: Annotated[
+        list[str] | None,
+        typer.Option("--tag", "-t", help="Tags to add when the rule matches (replaces existing)"),
+    ] = None,
+    preserve_raw: Annotated[
+        bool | None,
+        typer.Option(
+            "--preserve-raw/--no-preserve-raw",
+            help="Preserve the raw MIME message in S3 when this rule matches",
+        ),
     ] = None,
     profile: Annotated[
         str | None,
@@ -318,21 +383,28 @@ def update_rule(
     ] = None,
 ) -> None:
     """Update a rule."""
-    if all(v is None for v in [name, field, operator, value, action, priority, enabled]):
+    options = [field, operator, value, action, case_sensitive, webhook_url, tags, preserve_raw]
+    if all(option is None for option in options):
         print_error("At least one option must be provided")
         raise typer.Exit(1)
+
+    _validate_field(field)
+    _validate_operator(operator)
+    _validate_action(action)
 
     try:
         with FastSMTPClient(profile_name=profile) as client:
             rule = client.update_rule(
+                domain_id=domain_id,
                 rule_id=rule_id,
-                name=name,
                 field=field,
                 operator=operator,
                 value=value,
                 action=action,
-                priority=priority,
-                is_enabled=enabled,
+                case_sensitive=case_sensitive,
+                webhook_url_override=webhook_url,
+                add_tags=tags,
+                preserve_raw=preserve_raw,
             )
             print_success("Rule updated")
             print_rule(rule)
@@ -343,6 +415,7 @@ def update_rule(
 
 @rule_app.command("delete")
 def delete_rule(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
     rule_id: Annotated[str, typer.Argument(help="Rule ID")],
     force: Annotated[
         bool,
@@ -361,8 +434,31 @@ def delete_rule(
 
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            client.delete_rule(rule_id)
+            client.delete_rule(domain_id, rule_id)
             print_success(f"Rule {rule_id} deleted")
+    except APIError as e:
+        print_error(e.detail)
+        raise typer.Exit(1) from e
+
+
+@rule_app.command("reorder")
+def reorder_rules(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
+    ruleset_id: Annotated[str, typer.Argument(help="RuleSet ID")],
+    rule_ids: Annotated[
+        list[str],
+        typer.Argument(help="Every rule ID in the ruleset, in the desired order"),
+    ],
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", "-p", help="Profile to use"),
+    ] = None,
+) -> None:
+    """Set the evaluation order of a ruleset's rules."""
+    try:
+        with FastSMTPClient(profile_name=profile) as client:
+            client.reorder_rules(domain_id, ruleset_id, rule_ids)
+            print_success("Rules reordered")
     except APIError as e:
         print_error(e.detail)
         raise typer.Exit(1) from e

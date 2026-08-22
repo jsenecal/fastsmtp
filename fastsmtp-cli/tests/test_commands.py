@@ -423,34 +423,39 @@ class TestRecipientCommands:
     @respx.mock
     def test_recipient_get(self, temp_config):
         """Test recipient get command."""
+        domain_id = str(uuid4())
         recipient_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/recipients/{recipient_id}").mock(
+        respx.get(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(
             return_value=httpx.Response(
                 200,
                 json={
                     "id": recipient_id,
+                    "domain_id": domain_id,
                     "local_part": "info",
                     "webhook_url": "https://hook.example.com",
-                    "description": None,
-                    "tags": [],
+                    "webhook_headers": {},
                     "is_enabled": True,
                     "created_at": "2024-01-15T10:00:00Z",
+                    "updated_at": "2024-01-15T10:00:00Z",
                 },
             )
         )
 
-        result = runner.invoke(app, ["recipient", "get", recipient_id])
+        result = runner.invoke(app, ["recipient", "get", domain_id, recipient_id])
         assert result.exit_code == 0
 
     @respx.mock
     def test_recipient_delete(self, temp_config):
         """Test recipient delete command."""
+        domain_id = str(uuid4())
         recipient_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/v1/recipients/{recipient_id}").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.delete(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(return_value=httpx.Response(204))
 
-        result = runner.invoke(app, ["recipient", "delete", recipient_id, "--force"])
+        result = runner.invoke(app, ["recipient", "delete", domain_id, recipient_id, "--force"])
         assert result.exit_code == 0
 
 
@@ -560,29 +565,33 @@ class TestRecipientErrorPaths:
     @respx.mock
     def test_recipient_get_error(self, temp_config):
         """Test recipient get with API error."""
+        domain_id = str(uuid4())
         recipient_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/recipients/{recipient_id}").mock(
-            return_value=httpx.Response(404, json={"detail": "Recipient not found"})
-        )
+        respx.get(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(return_value=httpx.Response(404, json={"detail": "Recipient not found"}))
 
-        result = runner.invoke(app, ["recipient", "get", recipient_id])
+        result = runner.invoke(app, ["recipient", "get", domain_id, recipient_id])
         assert result.exit_code == 1
 
     @respx.mock
     def test_recipient_delete_cancelled(self, temp_config):
         """Test recipient delete cancelled."""
-        result = runner.invoke(app, ["recipient", "delete", str(uuid4())], input="n\n")
+        result = runner.invoke(
+            app, ["recipient", "delete", str(uuid4()), str(uuid4())], input="n\n"
+        )
         assert result.exit_code == 0
 
     @respx.mock
     def test_recipient_delete_error(self, temp_config):
         """Test recipient delete with API error."""
+        domain_id = str(uuid4())
         recipient_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/v1/recipients/{recipient_id}").mock(
-            return_value=httpx.Response(404, json={"detail": "Recipient not found"})
-        )
+        respx.delete(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(return_value=httpx.Response(404, json={"detail": "Recipient not found"}))
 
-        result = runner.invoke(app, ["recipient", "delete", recipient_id, "--force"])
+        result = runner.invoke(app, ["recipient", "delete", domain_id, recipient_id, "--force"])
         assert result.exit_code == 1
 
 
@@ -600,8 +609,8 @@ class TestRulesCommands:
                     {
                         "id": str(uuid4()),
                         "name": "Test Rules",
-                        "description": None,
                         "priority": 0,
+                        "stop_on_match": True,
                         "rules": [],
                         "is_enabled": True,
                     }
@@ -622,8 +631,8 @@ class TestRulesCommands:
                 json={
                     "id": str(uuid4()),
                     "name": "New Rules",
-                    "description": None,
                     "priority": 10,
+                    "stop_on_match": True,
                     "is_enabled": True,
                     "created_at": "2024-01-15T10:00:00Z",
                     "rules": [],
@@ -637,15 +646,17 @@ class TestRulesCommands:
     @respx.mock
     def test_ruleset_get(self, temp_config):
         """Test ruleset get command."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
                     "id": ruleset_id,
+                    "domain_id": domain_id,
                     "name": "Test Rules",
-                    "description": None,
                     "priority": 0,
+                    "stop_on_match": True,
                     "is_enabled": True,
                     "created_at": "2024-01-15T10:00:00Z",
                     "rules": [],
@@ -653,61 +664,78 @@ class TestRulesCommands:
             )
         )
 
-        result = runner.invoke(app, ["rules", "get", ruleset_id])
+        result = runner.invoke(app, ["rules", "get", domain_id, ruleset_id])
         assert result.exit_code == 0
 
     @respx.mock
     def test_ruleset_delete(self, temp_config):
         """Test ruleset delete command."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/v1/rulesets/{ruleset_id}").mock(
-            return_value=httpx.Response(204)
-        )
+        respx.delete(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}"
+        ).mock(return_value=httpx.Response(204))
 
-        result = runner.invoke(app, ["rules", "delete", ruleset_id, "--force"])
+        result = runner.invoke(app, ["rules", "delete", domain_id, ruleset_id, "--force"])
         assert result.exit_code == 0
 
     @respx.mock
     def test_rule_list(self, temp_config):
         """Test rule list command (rules rule list)."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(
                 200,
-                json=[
-                    {
-                        "id": str(uuid4()),
-                        "name": "Block spam",
-                        "field": "from",
-                        "operator": "contains",
-                        "value": "@spam.com",
-                        "action": "drop",
-                        "priority": 0,
-                        "is_enabled": True,
-                    }
-                ],
+                json={
+                    "id": ruleset_id,
+                    "domain_id": domain_id,
+                    "name": "Test Rules",
+                    "priority": 0,
+                    "stop_on_match": True,
+                    "is_enabled": True,
+                    "rules": [
+                        {
+                            "id": str(uuid4()),
+                            "ruleset_id": ruleset_id,
+                            "order": 0,
+                            "field": "from",
+                            "operator": "contains",
+                            "value": "@spam.com",
+                            "case_sensitive": False,
+                            "action": "drop",
+                            "add_tags": [],
+                            "preserve_raw": False,
+                        }
+                    ],
+                },
             )
         )
 
-        result = runner.invoke(app, ["rules", "rule", "list", ruleset_id])
+        result = runner.invoke(app, ["rules", "rule", "list", domain_id, ruleset_id])
         assert result.exit_code == 0
 
     @respx.mock
     def test_rule_create(self, temp_config):
         """Test rule create command."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
+        respx.post(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}/rules"
+        ).mock(
             return_value=httpx.Response(
                 201,
                 json={
                     "id": str(uuid4()),
-                    "name": "Block spam",
+                    "ruleset_id": ruleset_id,
+                    "order": 0,
                     "field": "from",
                     "operator": "contains",
                     "value": "@spam.com",
+                    "case_sensitive": False,
                     "action": "drop",
-                    "priority": 0,
-                    "is_enabled": True,
+                    "add_tags": [],
+                    "preserve_raw": False,
                     "created_at": "2024-01-15T10:00:00Z",
                 },
             )
@@ -719,14 +747,16 @@ class TestRulesCommands:
                 "rules",
                 "rule",
                 "create",
+                domain_id,
                 ruleset_id,
-                "Block spam",
                 "--field",
                 "from",
                 "--operator",
                 "contains",
                 "--value",
                 "@spam.com",
+                "--action",
+                "drop",
             ],
         )
         assert result.exit_code == 0
@@ -734,37 +764,51 @@ class TestRulesCommands:
     @respx.mock
     def test_rule_get(self, temp_config):
         """Test rule get command."""
+        domain_id = str(uuid4())
+        ruleset_id = str(uuid4())
         rule_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/rules/{rule_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "id": rule_id,
-                    "name": "Block spam",
-                    "field": "from",
-                    "operator": "contains",
-                    "value": "@spam.com",
-                    "action": "drop",
-                    "action_params": None,
+                    "id": ruleset_id,
+                    "domain_id": domain_id,
+                    "name": "Test Rules",
                     "priority": 0,
+                    "stop_on_match": True,
                     "is_enabled": True,
-                    "created_at": "2024-01-15T10:00:00Z",
+                    "rules": [
+                        {
+                            "id": rule_id,
+                            "ruleset_id": ruleset_id,
+                            "order": 0,
+                            "field": "from",
+                            "operator": "contains",
+                            "value": "@spam.com",
+                            "case_sensitive": False,
+                            "action": "drop",
+                            "add_tags": [],
+                            "preserve_raw": False,
+                            "created_at": "2024-01-15T10:00:00Z",
+                        }
+                    ],
                 },
             )
         )
 
-        result = runner.invoke(app, ["rules", "rule", "get", rule_id])
+        result = runner.invoke(app, ["rules", "rule", "get", domain_id, ruleset_id, rule_id])
         assert result.exit_code == 0
 
     @respx.mock
     def test_rule_delete(self, temp_config):
         """Test rule delete command."""
+        domain_id = str(uuid4())
         rule_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/v1/rules/{rule_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/domains/{domain_id}/rules/{rule_id}").mock(
             return_value=httpx.Response(204)
         )
 
-        result = runner.invoke(app, ["rules", "rule", "delete", rule_id, "--force"])
+        result = runner.invoke(app, ["rules", "rule", "delete", domain_id, rule_id, "--force"])
         assert result.exit_code == 0
 
 
@@ -808,61 +852,77 @@ class TestRulesErrorPaths:
     @respx.mock
     def test_ruleset_get_error(self, temp_config):
         """Test ruleset get with API error."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Ruleset not found"})
         )
 
-        result = runner.invoke(app, ["rules", "get", ruleset_id])
+        result = runner.invoke(app, ["rules", "get", domain_id, ruleset_id])
         assert result.exit_code == 1
 
     @respx.mock
     def test_ruleset_delete_cancelled(self, temp_config):
         """Test ruleset delete cancelled."""
-        result = runner.invoke(app, ["rules", "delete", str(uuid4())], input="n\n")
+        result = runner.invoke(app, ["rules", "delete", str(uuid4()), str(uuid4())], input="n\n")
         assert result.exit_code == 0
 
     @respx.mock
     def test_ruleset_delete_error(self, temp_config):
         """Test ruleset delete with API error."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/v1/rulesets/{ruleset_id}").mock(
-            return_value=httpx.Response(404, json={"detail": "Ruleset not found"})
-        )
+        respx.delete(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}"
+        ).mock(return_value=httpx.Response(404, json={"detail": "Ruleset not found"}))
 
-        result = runner.invoke(app, ["rules", "delete", ruleset_id, "--force"])
+        result = runner.invoke(app, ["rules", "delete", domain_id, ruleset_id, "--force"])
         assert result.exit_code == 1
 
     @respx.mock
     def test_rule_list_empty(self, temp_config):
-        """Test rule list when empty."""
+        """Test rule list when the ruleset holds no rules."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
-            return_value=httpx.Response(200, json=[])
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": ruleset_id,
+                    "domain_id": domain_id,
+                    "name": "Empty",
+                    "priority": 0,
+                    "stop_on_match": True,
+                    "is_enabled": True,
+                    "rules": [],
+                },
+            )
         )
 
-        result = runner.invoke(app, ["rules", "rule", "list", ruleset_id])
+        result = runner.invoke(app, ["rules", "rule", "list", domain_id, ruleset_id])
         assert result.exit_code == 0
         assert "No rules found" in result.output
 
     @respx.mock
     def test_rule_list_error(self, temp_config):
         """Test rule list with API error."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Ruleset not found"})
         )
 
-        result = runner.invoke(app, ["rules", "rule", "list", ruleset_id])
+        result = runner.invoke(app, ["rules", "rule", "list", domain_id, ruleset_id])
         assert result.exit_code == 1
 
     @respx.mock
     def test_rule_create_error(self, temp_config):
         """Test rule create with API error."""
+        domain_id = str(uuid4())
         ruleset_id = str(uuid4())
-        respx.post(f"https://api.example.com/api/v1/rulesets/{ruleset_id}/rules").mock(
-            return_value=httpx.Response(400, json={"detail": "Invalid rule"})
-        )
+        respx.post(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}/rules"
+        ).mock(return_value=httpx.Response(400, json={"detail": "Invalid rule"}))
 
         result = runner.invoke(
             app,
@@ -870,8 +930,8 @@ class TestRulesErrorPaths:
                 "rules",
                 "rule",
                 "create",
+                domain_id,
                 ruleset_id,
-                "Bad Rule",
                 "--field",
                 "from",
                 "--operator",
@@ -885,29 +945,34 @@ class TestRulesErrorPaths:
     @respx.mock
     def test_rule_get_error(self, temp_config):
         """Test rule get with API error."""
+        domain_id = str(uuid4())
+        ruleset_id = str(uuid4())
         rule_id = str(uuid4())
-        respx.get(f"https://api.example.com/api/v1/rules/{rule_id}").mock(
-            return_value=httpx.Response(404, json={"detail": "Rule not found"})
+        respx.get(f"https://api.example.com/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
+            return_value=httpx.Response(404, json={"detail": "Ruleset not found"})
         )
 
-        result = runner.invoke(app, ["rules", "rule", "get", rule_id])
+        result = runner.invoke(app, ["rules", "rule", "get", domain_id, ruleset_id, rule_id])
         assert result.exit_code == 1
 
     @respx.mock
     def test_rule_delete_cancelled(self, temp_config):
         """Test rule delete cancelled."""
-        result = runner.invoke(app, ["rules", "rule", "delete", str(uuid4())], input="n\n")
+        result = runner.invoke(
+            app, ["rules", "rule", "delete", str(uuid4()), str(uuid4())], input="n\n"
+        )
         assert result.exit_code == 0
 
     @respx.mock
     def test_rule_delete_error(self, temp_config):
         """Test rule delete with API error."""
+        domain_id = str(uuid4())
         rule_id = str(uuid4())
-        respx.delete(f"https://api.example.com/api/v1/rules/{rule_id}").mock(
+        respx.delete(f"https://api.example.com/api/v1/domains/{domain_id}/rules/{rule_id}").mock(
             return_value=httpx.Response(404, json={"detail": "Rule not found"})
         )
 
-        result = runner.invoke(app, ["rules", "rule", "delete", rule_id, "--force"])
+        result = runner.invoke(app, ["rules", "rule", "delete", domain_id, rule_id, "--force"])
         assert result.exit_code == 1
 
 

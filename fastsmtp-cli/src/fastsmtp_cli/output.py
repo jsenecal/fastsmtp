@@ -6,6 +6,7 @@ from typing import Any
 
 from rich.console import Console
 from rich.json import JSON
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -47,14 +48,37 @@ def status_style(status: str) -> str:
     return "white"
 
 
+def yes_no(value: Any) -> str:
+    """Render a boolean as coloured Yes/No."""
+    return "[green]Yes[/green]" if value else "[red]No[/red]"
+
+
+def tri_state(value: bool | None) -> str:
+    """Render a nullable server setting, where null means "inherit the default"."""
+    if value is None:
+        return "[dim]inherit[/dim]"
+    return "[green]Yes[/green]" if value else "[red]No[/red]"
+
+
+def format_mapping(mapping: dict | None) -> str:
+    """Render a string mapping (webhook headers) on one line."""
+    if not mapping:
+        return "-"
+    return ", ".join(f"{key}={value}" for key, value in mapping.items())
+
+
 def print_json(data: Any) -> None:
     """Print data as formatted JSON."""
     console.print(JSON(json.dumps(data, indent=2, default=str)))
 
 
 def print_error(message: str) -> None:
-    """Print an error message."""
-    error_console.print(f"[red]Error:[/red] {message}")
+    """Print an error message.
+
+    Server details can contain square brackets (validation messages list valid
+    values that way), so the message is escaped rather than parsed as markup.
+    """
+    error_console.print(f"[red]Error:[/red] {escape(str(message))}")
 
 
 def print_success(message: str) -> None:
@@ -103,9 +127,8 @@ def print_ready(data: dict) -> None:
 
 
 def print_whoami(data: dict) -> None:
-    """Print current user info."""
+    """Print current user info (server schema: user, domains, is_root)."""
     user = data.get("user", {})
-    key = data.get("api_key", {})
 
     table = Table(show_header=False, box=None)
     table.add_column("Field", style="cyan")
@@ -113,15 +136,10 @@ def print_whoami(data: dict) -> None:
 
     table.add_row("User ID", str(user.get("id", "-")))
     table.add_row("Username", user.get("username", "-"))
-    table.add_row("Email", user.get("email", "-"))
-    table.add_row(
-        "Superuser",
-        "[green]Yes[/green]" if user.get("is_superuser") else "[red]No[/red]",
-    )
-    table.add_row("", "")
-    table.add_row("API Key", key.get("name", "-"))
-    table.add_row("Key ID", str(key.get("id", "-")))
-    table.add_row("Scopes", ", ".join(key.get("scopes", [])) or "all")
+    table.add_row("Email", user.get("email") or "-")
+    table.add_row("Superuser", yes_no(user.get("is_superuser")))
+    table.add_row("Root Key", yes_no(data.get("is_root")))
+    table.add_row("Domains", ", ".join(data.get("domains", [])) or "-")
 
     console.print(Panel(table, title="Current Session"))
 
@@ -142,8 +160,8 @@ def print_users_table(users: list[dict]) -> None:
             str(user.get("id", "-"))[:8] + "...",
             user.get("username", "-"),
             user.get("email", "-"),
-            "[green]Yes[/green]" if user.get("is_superuser") else "No",
-            "[green]Yes[/green]" if user.get("is_active") else "[red]No[/red]",
+            yes_no(user.get("is_superuser")),
+            yes_no(user.get("is_active")),
             format_datetime(user.get("created_at")),
         )
 
@@ -158,15 +176,9 @@ def print_user(user: dict) -> None:
 
     table.add_row("ID", str(user.get("id", "-")))
     table.add_row("Username", user.get("username", "-"))
-    table.add_row("Email", user.get("email", "-"))
-    table.add_row(
-        "Superuser",
-        "[green]Yes[/green]" if user.get("is_superuser") else "No",
-    )
-    table.add_row(
-        "Active",
-        "[green]Yes[/green]" if user.get("is_active") else "[red]No[/red]",
-    )
+    table.add_row("Email", user.get("email") or "-")
+    table.add_row("Superuser", yes_no(user.get("is_superuser")))
+    table.add_row("Active", yes_no(user.get("is_active")))
     table.add_row("Created", format_datetime(user.get("created_at")))
     table.add_row("Updated", format_datetime(user.get("updated_at")))
 
@@ -233,18 +245,20 @@ def print_domains_table(domains: list[dict]) -> None:
 
     table.add_column("ID", style="dim")
     table.add_column("Domain")
-    table.add_column("Description")
     table.add_column("Enabled")
-    table.add_column("Your Role")
+    table.add_column("DKIM")
+    table.add_column("SPF")
+    table.add_column("Preserve Raw")
     table.add_column("Created")
 
     for domain in domains:
         table.add_row(
             str(domain.get("id", "-"))[:8] + "...",
             domain.get("domain_name", "-"),
-            truncate(domain.get("description", "-")),
-            "[green]Yes[/green]" if domain.get("is_enabled") else "[red]No[/red]",
-            domain.get("role", "-"),
+            yes_no(domain.get("is_enabled")),
+            tri_state(domain.get("verify_dkim")),
+            tri_state(domain.get("verify_spf")),
+            tri_state(domain.get("preserve_raw_message")),
             format_datetime(domain.get("created_at")),
         )
 
@@ -259,12 +273,12 @@ def print_domain(domain: dict) -> None:
 
     table.add_row("ID", str(domain.get("id", "-")))
     table.add_row("Domain", domain.get("domain_name", "-"))
-    table.add_row("Description", domain.get("description") or "-")
-    table.add_row(
-        "Enabled",
-        "[green]Yes[/green]" if domain.get("is_enabled") else "[red]No[/red]",
-    )
-    table.add_row("Your Role", domain.get("role", "-"))
+    table.add_row("Enabled", yes_no(domain.get("is_enabled")))
+    table.add_row("Verify DKIM", tri_state(domain.get("verify_dkim")))
+    table.add_row("Verify SPF", tri_state(domain.get("verify_spf")))
+    table.add_row("Reject DKIM Fail", tri_state(domain.get("reject_dkim_fail")))
+    table.add_row("Reject SPF Fail", tri_state(domain.get("reject_spf_fail")))
+    table.add_row("Preserve Raw", tri_state(domain.get("preserve_raw_message")))
     table.add_row("Created", format_datetime(domain.get("created_at")))
     table.add_row("Updated", format_datetime(domain.get("updated_at")))
 
@@ -277,19 +291,16 @@ def print_members_table(members: list[dict]) -> None:
 
     table.add_column("User ID", style="dim")
     table.add_column("Username")
-    table.add_column("Email")
     table.add_column("Role")
     table.add_column("Joined")
 
     for member in members:
-        user = member.get("user", {})
         role = member.get("role", "-")
         role_style = "yellow" if role == "owner" else "cyan" if role == "admin" else "white"
 
         table.add_row(
-            str(user.get("id", "-"))[:8] + "...",
-            user.get("username", "-"),
-            user.get("email", "-"),
+            str(member.get("user_id", "-"))[:8] + "...",
+            member.get("username") or "-",
             f"[{role_style}]{role}[/{role_style}]",
             format_datetime(member.get("created_at")),
         )
@@ -304,7 +315,7 @@ def print_recipients_table(recipients: list[dict]) -> None:
     table.add_column("ID", style="dim")
     table.add_column("Address")
     table.add_column("Webhook URL")
-    table.add_column("Tags")
+    table.add_column("Headers")
     table.add_column("Enabled")
 
     for recipient in recipients:
@@ -315,8 +326,8 @@ def print_recipients_table(recipients: list[dict]) -> None:
             str(recipient.get("id", "-"))[:8] + "...",
             address,
             truncate(recipient.get("webhook_url", "-"), 40),
-            ", ".join(recipient.get("tags", [])) or "-",
-            "[green]Yes[/green]" if recipient.get("is_enabled") else "[red]No[/red]",
+            truncate(format_mapping(recipient.get("webhook_headers")), 20),
+            yes_no(recipient.get("is_enabled")),
         )
 
     console.print(table)
@@ -333,12 +344,8 @@ def print_recipient(recipient: dict) -> None:
     table.add_row("ID", str(recipient.get("id", "-")))
     table.add_row("Local Part", local_part if local_part else "[dim]* (catch-all)[/dim]")
     table.add_row("Webhook URL", recipient.get("webhook_url", "-"))
-    table.add_row("Description", recipient.get("description") or "-")
-    table.add_row("Tags", ", ".join(recipient.get("tags", [])) or "-")
-    table.add_row(
-        "Enabled",
-        "[green]Yes[/green]" if recipient.get("is_enabled") else "[red]No[/red]",
-    )
+    table.add_row("Webhook Headers", format_mapping(recipient.get("webhook_headers")))
+    table.add_row("Enabled", yes_no(recipient.get("is_enabled")))
     table.add_row("Created", format_datetime(recipient.get("created_at")))
 
     console.print(Panel(table, title="Recipient Details"))
@@ -350,8 +357,8 @@ def print_rulesets_table(rulesets: list[dict]) -> None:
 
     table.add_column("ID", style="dim")
     table.add_column("Name")
-    table.add_column("Description")
     table.add_column("Priority")
+    table.add_column("Stop on Match")
     table.add_column("Rules")
     table.add_column("Enabled")
 
@@ -359,10 +366,10 @@ def print_rulesets_table(rulesets: list[dict]) -> None:
         table.add_row(
             str(ruleset.get("id", "-"))[:8] + "...",
             ruleset.get("name", "-"),
-            truncate(ruleset.get("description", "-")),
             str(ruleset.get("priority", 0)),
+            yes_no(ruleset.get("stop_on_match")),
             str(len(ruleset.get("rules", []))),
-            "[green]Yes[/green]" if ruleset.get("is_enabled") else "[red]No[/red]",
+            yes_no(ruleset.get("is_enabled")),
         )
 
     console.print(table)
@@ -376,12 +383,9 @@ def print_ruleset(ruleset: dict) -> None:
 
     table.add_row("ID", str(ruleset.get("id", "-")))
     table.add_row("Name", ruleset.get("name", "-"))
-    table.add_row("Description", ruleset.get("description") or "-")
     table.add_row("Priority", str(ruleset.get("priority", 0)))
-    table.add_row(
-        "Enabled",
-        "[green]Yes[/green]" if ruleset.get("is_enabled") else "[red]No[/red]",
-    )
+    table.add_row("Stop on Match", yes_no(ruleset.get("stop_on_match")))
+    table.add_row("Enabled", yes_no(ruleset.get("is_enabled")))
     table.add_row("Created", format_datetime(ruleset.get("created_at")))
 
     console.print(Panel(table, title="RuleSet Details"))
@@ -397,11 +401,11 @@ def print_rules_table(rules: list[dict]) -> None:
     table = Table(title="Rules")
 
     table.add_column("ID", style="dim")
-    table.add_column("Name")
+    table.add_column("Order")
     table.add_column("Condition")
     table.add_column("Action")
-    table.add_column("Priority")
-    table.add_column("Enabled")
+    table.add_column("Tags")
+    table.add_column("Preserve Raw")
 
     for rule in rules:
         field = rule.get("field", "-")
@@ -411,11 +415,11 @@ def print_rules_table(rules: list[dict]) -> None:
 
         table.add_row(
             str(rule.get("id", "-"))[:8] + "...",
-            rule.get("name", "-"),
+            str(rule.get("order", 0)),
             truncate(condition, 35),
             rule.get("action", "-"),
-            str(rule.get("priority", 0)),
-            "[green]Yes[/green]" if rule.get("is_enabled") else "[red]No[/red]",
+            ", ".join(rule.get("add_tags") or []) or "-",
+            yes_no(rule.get("preserve_raw")),
         )
 
     console.print(table)
@@ -428,21 +432,16 @@ def print_rule(rule: dict) -> None:
     table.add_column("Value")
 
     table.add_row("ID", str(rule.get("id", "-")))
-    table.add_row("Name", rule.get("name", "-"))
+    table.add_row("RuleSet ID", str(rule.get("ruleset_id", "-")))
+    table.add_row("Order", str(rule.get("order", 0)))
     table.add_row("Field", rule.get("field", "-"))
     table.add_row("Operator", rule.get("operator", "-"))
     table.add_row("Value", rule.get("value", "-"))
+    table.add_row("Case Sensitive", yes_no(rule.get("case_sensitive")))
     table.add_row("Action", rule.get("action", "-"))
-
-    action_params = rule.get("action_params")
-    if action_params:
-        table.add_row("Action Params", json.dumps(action_params))
-
-    table.add_row("Priority", str(rule.get("priority", 0)))
-    table.add_row(
-        "Enabled",
-        "[green]Yes[/green]" if rule.get("is_enabled") else "[red]No[/red]",
-    )
+    table.add_row("Webhook Override", rule.get("webhook_url_override") or "-")
+    table.add_row("Add Tags", ", ".join(rule.get("add_tags") or []) or "-")
+    table.add_row("Preserve Raw", yes_no(rule.get("preserve_raw")))
     table.add_row("Created", format_datetime(rule.get("created_at")))
 
     console.print(Panel(table, title="Rule Details"))
@@ -465,9 +464,9 @@ def print_delivery_logs_table(logs: list[dict]) -> None:
         table.add_row(
             str(log.get("id", "-"))[:8] + "...",
             truncate(log.get("message_id", "-"), 25),
-            truncate(log.get("recipient_email", "-"), 25),
+            str(log.get("recipient_id") or "-")[:8] + "...",
             f"[{status_style(status)}]{status}[/{status_style(status)}]",
-            str(log.get("attempt_count", 0)),
+            str(log.get("attempts", 0)),
             format_datetime(log.get("created_at")),
         )
 
@@ -484,11 +483,13 @@ def print_delivery_log(log: dict) -> None:
 
     table.add_row("ID", str(log.get("id", "-")))
     table.add_row("Message ID", log.get("message_id", "-"))
-    table.add_row("Recipient", log.get("recipient_email", "-"))
+    table.add_row("Recipient ID", str(log.get("recipient_id") or "-"))
     table.add_row("Webhook URL", log.get("webhook_url", "-"))
     table.add_row("Status", f"[{status_style(status)}]{status}[/{status_style(status)}]")
-    table.add_row("Attempts", str(log.get("attempt_count", 0)))
-    table.add_row("HTTP Status", str(log.get("http_status_code") or "-"))
+    table.add_row("Attempts", str(log.get("attempts", 0)))
+    table.add_row("HTTP Status", str(log.get("last_status_code") or "-"))
+    table.add_row("DKIM", log.get("dkim_result") or "-")
+    table.add_row("SPF", log.get("spf_result") or "-")
     table.add_row("Error", log.get("last_error") or "-")
     table.add_row("Created", format_datetime(log.get("created_at")))
     table.add_row("Next Retry", format_datetime(log.get("next_retry_at")))
@@ -507,7 +508,7 @@ def print_test_webhook_result(result: dict) -> None:
     success = result.get("success", False)
     status_code = result.get("status_code")
     error = result.get("error")
-    response_time = result.get("response_time_ms", 0)
+    response_time = result.get("response_time_ms") or 0
 
     if success:
         text = Text()

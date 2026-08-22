@@ -1,21 +1,27 @@
 """Integration tests driving the fsmtp CLI client against the real FastAPI app.
 
 Regression tests for GitHub issues #39 (client used /api/... paths while the
-server mounts everything under /api/v1) and #40 (client sent an
-"Authorization: Bearer" header while the server authenticates via "X-API-Key").
+server mounts everything under /api/v1), #40 (client sent an
+"Authorization: Bearer" header while the server authenticates via "X-API-Key")
+and #46 (13 client calls targeted routes the server does not serve, and payloads
+carried fields its schemas do not define).
 
-The real application is served over TCP with uvicorn in a background thread so
-the synchronous httpx client used by fastsmtp-cli can talk to it end-to-end.
+The real application is served over TCP by uvicorn inside the test's own event
+loop, so request handlers share the loop the test-database engine was created
+on. The synchronous httpx client used by fastsmtp-cli would block that loop, so
+each test body runs on a worker thread via ``anyio.to_thread.run_sync``.
 """
 
-import threading
+import asyncio
+from collections.abc import Callable
+from typing import Any
 
 import anyio
 import pytest
 import uvicorn
 from fastapi import FastAPI
 from fastsmtp.config import Settings
-from fastsmtp_cli.client import FastSMTPClient
+from fastsmtp_cli.client import APIError, FastSMTPClient
 from fastsmtp_cli.config import Profile
 
 
@@ -24,11 +30,12 @@ async def server_url(app: FastAPI):
     """Serve the test app over TCP on an ephemeral port and yield its URL."""
     config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
     server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
+    server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+    serving = asyncio.create_task(server.serve())
 
     while not server.started:
-        if not thread.is_alive():  # pragma: no cover - startup failure
+        if serving.done():  # pragma: no cover - startup failure
+            serving.result()
             raise RuntimeError("uvicorn server failed to start")
         await anyio.sleep(0.02)
 
@@ -36,7 +43,7 @@ async def server_url(app: FastAPI):
     yield f"http://127.0.0.1:{port}"
 
     server.should_exit = True
-    thread.join(timeout=10)
+    await asyncio.wait_for(serving, timeout=10)
 
 
 @pytest.fixture
@@ -51,10 +58,19 @@ def cli_client(server_url: str, test_settings: Settings) -> FastSMTPClient:
     return FastSMTPClient(profile=profile)
 
 
+async def run_client(body: Callable[[], Any]) -> Any:
+    """Run a blocking CLI-client body off the event loop serving the app."""
+    return await anyio.to_thread.run_sync(body)
+
+
 async def test_cli_client_health_reaches_server(cli_client: FastSMTPClient) -> None:
     """The client's health() must hit the server's mounted /api/v1/health route."""
-    with cli_client as client:
-        result = client.health()
+
+    def body() -> dict:
+        with cli_client as client:
+            return client.health()
+
+    result = await run_client(body)
 
     assert result["status"] == "ok"
 
@@ -65,8 +81,144 @@ async def test_cli_client_authenticated_whoami(cli_client: FastSMTPClient) -> No
     Fails with a 404 if the client uses the wrong path prefix (issue #39) and
     with a 401 if it sends the wrong auth header (issue #40).
     """
-    with cli_client as client:
-        result = client.whoami()
+
+    def body() -> dict:
+        with cli_client as client:
+            return client.whoami()
+
+    result = await run_client(body)
 
     assert result["is_root"] is True
     assert result["user"]["username"] == "root"
+
+
+async def test_cli_client_full_domain_lifecycle(cli_client: FastSMTPClient) -> None:
+    """Drive the reconciled domain/recipient/ruleset/rule calls against the real app.
+
+    Every one of these calls 404'd or 405'd before issue #46: rulesets, rules and
+    recipients are nested under a domain, updates are PUT not PATCH, and the
+    payloads carried fields (`description`, rule `name`/`priority`) the server's
+    schemas never had.
+    """
+
+    def body() -> None:
+        with cli_client as client:
+            domain = client.create_domain("lifecycle.test", verify_dkim=True)
+            domain_id = domain["id"]
+            assert domain["verify_dkim"] is True
+
+            domain = client.update_domain(domain_id, verify_dkim=None, reject_spf_fail=True)
+            assert domain["verify_dkim"] is None, "explicit null must clear the override"
+            assert domain["reject_spf_fail"] is True
+            assert domain["is_enabled"] is True, "an omitted field must stay untouched"
+
+            recipient = client.create_recipient(
+                domain_id,
+                webhook_url="https://hook.example.test/inbox",
+                local_part="support",
+                webhook_headers={"X-Token": "abc"},
+            )
+            recipient_id = recipient["id"]
+            assert client.get_recipient(domain_id, recipient_id)["local_part"] == "support"
+            updated_recipient = client.update_recipient(domain_id, recipient_id, is_enabled=False)
+            assert updated_recipient["is_enabled"] is False
+
+            ruleset_id = client.create_ruleset(domain_id, "Spam Filter", priority=10)["id"]
+            assert client.update_ruleset(domain_id, ruleset_id, priority=20)["priority"] == 20
+
+            first = client.create_rule(
+                domain_id,
+                ruleset_id,
+                field="subject",
+                operator="contains",
+                value="[SPAM]",
+                action="tag",
+                add_tags=["spam"],
+            )
+            second = client.create_rule(
+                domain_id,
+                ruleset_id,
+                field="from",
+                operator="ends_with",
+                value="@spam.test",
+                action="drop",
+            )
+
+            rules = client.list_rules(domain_id, ruleset_id)
+            assert {rule["id"] for rule in rules} == {first["id"], second["id"]}
+            assert client.get_rule(domain_id, ruleset_id, second["id"])["action"] == "drop"
+
+            assert (
+                client.update_rule(domain_id, first["id"], action="quarantine")["action"]
+                == "quarantine"
+            )
+
+            client.reorder_rules(domain_id, ruleset_id, [second["id"], first["id"]])
+            reordered = sorted(
+                client.list_rules(domain_id, ruleset_id), key=lambda rule: rule["order"]
+            )
+            assert [rule["id"] for rule in reordered] == [second["id"], first["id"]]
+
+            client.delete_rule(domain_id, first["id"])
+            remaining = client.list_rules(domain_id, ruleset_id)
+            assert [rule["id"] for rule in remaining] == [second["id"]]
+
+            client.delete_ruleset(domain_id, ruleset_id)
+            client.delete_recipient(domain_id, recipient_id)
+            client.delete_domain(domain_id)
+
+    await run_client(body)
+
+
+async def test_cli_client_reports_missing_s3_for_raw_preservation(
+    cli_client: FastSMTPClient,
+) -> None:
+    """Raw preservation without S3 must surface the server's 422 detail as text."""
+
+    def body() -> None:
+        with cli_client as client:
+            with pytest.raises(APIError) as exc_info:
+                client.create_domain("preserve.test", preserve_raw_message=True)
+
+            assert exc_info.value.status_code == 422
+            assert isinstance(exc_info.value.detail, str)
+            assert "S3" in exc_info.value.detail
+
+            domain_id = client.create_domain("preserve-rules.test")["id"]
+            ruleset_id = client.create_ruleset(domain_id, "Archive")["id"]
+
+            with pytest.raises(APIError) as rule_exc_info:
+                client.create_rule(
+                    domain_id,
+                    ruleset_id,
+                    field="subject",
+                    operator="exists",
+                    value="",
+                    preserve_raw=True,
+                )
+
+            assert rule_exc_info.value.status_code == 422
+            assert "S3" in rule_exc_info.value.detail
+
+    await run_client(body)
+
+
+async def test_cli_client_member_role_update(cli_client: FastSMTPClient) -> None:
+    """Member role updates use PUT; the client sent PATCH, which 405'd."""
+
+    def body() -> None:
+        with cli_client as client:
+            domain_id = client.create_domain("members.test")["id"]
+            user = client.create_user("member-test-user", email="member@example.test")
+
+            client.add_member(domain_id, user["id"], role="member")
+            assert client.update_member(domain_id, user["id"], role="admin")["role"] == "admin"
+
+            members = client.list_members(domain_id)
+            assert any(member["user_id"] == user["id"] for member in members)
+
+            client.remove_member(domain_id, user["id"])
+            client.delete_user(user["id"])
+            client.delete_domain(domain_id)
+
+    await run_client(body)

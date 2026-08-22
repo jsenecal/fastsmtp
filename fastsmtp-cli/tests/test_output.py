@@ -177,11 +177,8 @@ class TestWhoamiOutput:
                 "email": "test@example.com",
                 "is_superuser": True,
             },
-            "api_key": {
-                "id": "key-123",
-                "name": "My Key",
-                "scopes": ["read", "write"],
-            },
+            "domains": ["example.com"],
+            "is_root": False,
         }
         print_whoami(data)
 
@@ -297,9 +294,10 @@ class TestDomainsOutput:
             {
                 "id": "123e4567-e89b-12d3-a456-426614174000",
                 "domain_name": "example.com",
-                "description": "Example domain",
                 "is_enabled": True,
-                "role": "owner",
+                "verify_dkim": True,
+                "verify_spf": None,
+                "preserve_raw_message": True,
                 "created_at": "2024-01-15T10:00:00Z",
             },
         ]
@@ -310,21 +308,28 @@ class TestDomainsOutput:
         domain = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "domain_name": "example.com",
-            "description": "Example domain",
             "is_enabled": True,
-            "role": "owner",
+            "verify_dkim": True,
+            "verify_spf": False,
+            "reject_dkim_fail": None,
+            "reject_spf_fail": None,
+            "preserve_raw_message": True,
             "created_at": "2024-01-15T10:00:00Z",
             "updated_at": "2024-01-16T10:00:00Z",
         }
         print_domain(domain)
 
-    def test_print_domain_no_description(self):
-        """Test domain output without description."""
+    def test_print_domain_inheriting_every_flag(self):
+        """A domain with every nullable flag unset inherits the server defaults."""
         domain = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "domain_name": "example.com",
-            "description": None,
             "is_enabled": False,
+            "verify_dkim": None,
+            "verify_spf": None,
+            "reject_dkim_fail": None,
+            "reject_spf_fail": None,
+            "preserve_raw_message": None,
             "created_at": "2024-01-15T10:00:00Z",
         }
         print_domain(domain)
@@ -337,29 +342,23 @@ class TestMembersOutput:
         """Test members table output."""
         members = [
             {
-                "user": {
-                    "id": "123e4567-e89b-12d3-a456-426614174000",
-                    "username": "owner_user",
-                    "email": "owner@example.com",
-                },
+                "id": "a23e4567-e89b-12d3-a456-426614174000",
+                "user_id": "123e4567-e89b-12d3-a456-426614174000",
+                "username": "owner_user",
                 "role": "owner",
                 "created_at": "2024-01-15T10:00:00Z",
             },
             {
-                "user": {
-                    "id": "223e4567-e89b-12d3-a456-426614174000",
-                    "username": "admin_user",
-                    "email": "admin@example.com",
-                },
+                "id": "b23e4567-e89b-12d3-a456-426614174000",
+                "user_id": "223e4567-e89b-12d3-a456-426614174000",
+                "username": "admin_user",
                 "role": "admin",
                 "created_at": "2024-01-16T10:00:00Z",
             },
             {
-                "user": {
-                    "id": "323e4567-e89b-12d3-a456-426614174000",
-                    "username": "member_user",
-                    "email": "member@example.com",
-                },
+                "id": "c23e4567-e89b-12d3-a456-426614174000",
+                "user_id": "323e4567-e89b-12d3-a456-426614174000",
+                "username": None,
                 "role": "member",
                 "created_at": "2024-01-17T10:00:00Z",
             },
@@ -377,14 +376,14 @@ class TestRecipientsOutput:
                 "id": "123e4567-e89b-12d3-a456-426614174000",
                 "local_part": "info",
                 "webhook_url": "https://hook.example.com/webhook",
-                "tags": ["important", "urgent"],
+                "webhook_headers": {"X-Token": "abc123"},
                 "is_enabled": True,
             },
             {
                 "id": "223e4567-e89b-12d3-a456-426614174000",
                 "local_part": None,  # Catch-all
                 "webhook_url": "https://hook.example.com/catchall",
-                "tags": [],
+                "webhook_headers": {},
                 "is_enabled": False,
             },
         ]
@@ -396,8 +395,7 @@ class TestRecipientsOutput:
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "local_part": "info",
             "webhook_url": "https://hook.example.com/webhook",
-            "description": "Info email recipient",
-            "tags": ["important"],
+            "webhook_headers": {"X-Token": "abc123"},
             "is_enabled": True,
             "created_at": "2024-01-15T10:00:00Z",
         }
@@ -409,8 +407,7 @@ class TestRecipientsOutput:
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "local_part": None,
             "webhook_url": "https://hook.example.com/catchall",
-            "description": None,
-            "tags": [],
+            "webhook_headers": {},
             "is_enabled": True,
             "created_at": "2024-01-15T10:00:00Z",
         }
@@ -426,8 +423,8 @@ class TestRulesetsOutput:
             {
                 "id": "123e4567-e89b-12d3-a456-426614174000",
                 "name": "Spam Filter",
-                "description": "Filter spam emails",
                 "priority": 10,
+                "stop_on_match": True,
                 "rules": [{}, {}, {}],
                 "is_enabled": True,
             },
@@ -439,20 +436,22 @@ class TestRulesetsOutput:
         ruleset = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "name": "Spam Filter",
-            "description": "Filter spam emails",
             "priority": 10,
+            "stop_on_match": True,
             "is_enabled": True,
             "created_at": "2024-01-15T10:00:00Z",
             "rules": [
                 {
                     "id": "r1",
-                    "name": "Block spam domain",
+                    "ruleset_id": "123e4567-e89b-12d3-a456-426614174000",
+                    "order": 0,
                     "field": "from",
                     "operator": "contains",
                     "value": "@spam.com",
+                    "case_sensitive": False,
                     "action": "drop",
-                    "priority": 0,
-                    "is_enabled": True,
+                    "add_tags": [],
+                    "preserve_raw": False,
                 }
             ],
         }
@@ -463,8 +462,8 @@ class TestRulesetsOutput:
         ruleset = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "name": "Empty Ruleset",
-            "description": None,
             "priority": 0,
+            "stop_on_match": False,
             "is_enabled": False,
             "created_at": "2024-01-15T10:00:00Z",
             "rules": [],
@@ -480,13 +479,15 @@ class TestRulesOutput:
         rules = [
             {
                 "id": "123e4567-e89b-12d3-a456-426614174000",
-                "name": "Block spam",
+                "ruleset_id": "223e4567-e89b-12d3-a456-426614174000",
+                "order": 10,
                 "field": "from",
                 "operator": "contains",
                 "value": "@spam.com",
+                "case_sensitive": False,
                 "action": "drop",
-                "priority": 10,
-                "is_enabled": True,
+                "add_tags": ["spam"],
+                "preserve_raw": True,
             },
         ]
         print_rules_table(rules)
@@ -495,30 +496,34 @@ class TestRulesOutput:
         """Test single rule output."""
         rule = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
-            "name": "Block spam",
+            "ruleset_id": "223e4567-e89b-12d3-a456-426614174000",
+            "order": 10,
             "field": "from",
             "operator": "contains",
             "value": "@spam.com",
+            "case_sensitive": True,
             "action": "forward",
-            "action_params": {"url": "https://backup.example.com"},
-            "priority": 10,
-            "is_enabled": True,
+            "webhook_url_override": "https://backup.example.com",
+            "add_tags": ["spam"],
+            "preserve_raw": True,
             "created_at": "2024-01-15T10:00:00Z",
         }
         print_rule(rule)
 
-    def test_print_rule_no_action_params(self):
-        """Test rule output without action params."""
+    def test_print_rule_with_defaults(self):
+        """Test rule output with every optional field left at its default."""
         rule = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
-            "name": "Tag email",
+            "ruleset_id": "223e4567-e89b-12d3-a456-426614174000",
+            "order": 0,
             "field": "subject",
             "operator": "starts_with",
             "value": "[URGENT]",
+            "case_sensitive": False,
             "action": "tag",
-            "action_params": None,
-            "priority": 0,
-            "is_enabled": True,
+            "webhook_url_override": None,
+            "add_tags": [],
+            "preserve_raw": False,
             "created_at": "2024-01-15T10:00:00Z",
         }
         print_rule(rule)
@@ -533,17 +538,17 @@ class TestDeliveryLogsOutput:
             {
                 "id": "123e4567-e89b-12d3-a456-426614174000",
                 "message_id": "<msg123@example.com>",
-                "recipient_email": "user@example.com",
+                "recipient_id": "323e4567-e89b-12d3-a456-426614174000",
                 "status": "delivered",
-                "attempt_count": 1,
+                "attempts": 1,
                 "created_at": "2024-01-15T10:00:00Z",
             },
             {
                 "id": "223e4567-e89b-12d3-a456-426614174000",
                 "message_id": "<msg456@example.com>",
-                "recipient_email": "user2@example.com",
+                "recipient_id": None,
                 "status": "failed",
-                "attempt_count": 3,
+                "attempts": 3,
                 "created_at": "2024-01-16T10:00:00Z",
             },
         ]
@@ -554,11 +559,13 @@ class TestDeliveryLogsOutput:
         log = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "message_id": "<msg123@example.com>",
-            "recipient_email": "user@example.com",
+            "recipient_id": "323e4567-e89b-12d3-a456-426614174000",
             "webhook_url": "https://hook.example.com/webhook",
             "status": "delivered",
-            "attempt_count": 1,
-            "http_status_code": 200,
+            "attempts": 1,
+            "last_status_code": 200,
+            "dkim_result": "pass",
+            "spf_result": "pass",
             "last_error": None,
             "created_at": "2024-01-15T10:00:00Z",
             "next_retry_at": None,
@@ -571,11 +578,13 @@ class TestDeliveryLogsOutput:
         log = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "message_id": "<msg123@example.com>",
-            "recipient_email": "user@example.com",
+            "recipient_id": "323e4567-e89b-12d3-a456-426614174000",
             "webhook_url": "https://hook.example.com/webhook",
             "status": "failed",
-            "attempt_count": 3,
-            "http_status_code": 500,
+            "attempts": 3,
+            "last_status_code": 500,
+            "dkim_result": "fail",
+            "spf_result": None,
             "last_error": "Server error",
             "created_at": "2024-01-15T10:00:00Z",
             "next_retry_at": "2024-01-15T11:00:00Z",
@@ -638,3 +647,185 @@ class TestProfilesOutput:
             "prod": Profile(url="https://prod.example.com", api_key="prod_key_12345"),
         }
         print_profiles_table(profiles, default_profile="prod", show_keys=True)
+
+
+class TestServerShapedOutput:
+    """The formatters must read the fields the server actually returns.
+
+    The smoke tests above only prove the formatters do not crash. These assert
+    on the rendered text, so a field renamed on either side shows up here.
+    """
+
+    def test_domain_renders_nullable_flags_as_inherit(self, capsys):
+        """A null flag means "inherit the server default", not "off"."""
+        print_domain(
+            {
+                "id": "d1",
+                "domain_name": "example.com",
+                "is_enabled": True,
+                "verify_dkim": True,
+                "verify_spf": False,
+                "reject_dkim_fail": None,
+                "reject_spf_fail": None,
+                "preserve_raw_message": None,
+                "created_at": "2024-01-15T10:00:00Z",
+                "updated_at": "2024-01-15T10:00:00Z",
+            }
+        )
+        output = capsys.readouterr().out
+
+        assert "Verify DKIM" in output
+        assert "Preserve Raw" in output
+        assert "inherit" in output
+
+    def test_domain_renders_preserve_raw_message_enabled(self, capsys):
+        print_domain(
+            {
+                "id": "d1",
+                "domain_name": "example.com",
+                "is_enabled": True,
+                "preserve_raw_message": True,
+                "created_at": "2024-01-15T10:00:00Z",
+                "updated_at": "2024-01-15T10:00:00Z",
+            }
+        )
+        output = capsys.readouterr().out
+
+        assert "Preserve Raw" in output
+        assert "inherit" not in output.split("Preserve Raw")[1].splitlines()[0]
+
+    def test_rule_renders_order_tags_and_preserve_raw(self, capsys):
+        print_rule(
+            {
+                "id": "r1",
+                "ruleset_id": "rs1",
+                "order": 3,
+                "field": "subject",
+                "operator": "contains",
+                "value": "[SPAM]",
+                "case_sensitive": True,
+                "action": "tag",
+                "webhook_url_override": None,
+                "add_tags": ["spam", "review"],
+                "preserve_raw": True,
+                "created_at": "2024-01-15T10:00:00Z",
+            }
+        )
+        output = capsys.readouterr().out
+
+        assert "Order" in output
+        assert "Preserve Raw" in output
+        assert "spam, review" in output
+        assert "Case Sensitive" in output
+
+    def test_rules_table_reads_order_not_priority(self, capsys):
+        print_rules_table(
+            [
+                {
+                    "id": "11111111-2222-3333-4444-555555555555",
+                    "order": 7,
+                    "field": "from",
+                    "operator": "equals",
+                    "value": "a@b.test",
+                    "action": "drop",
+                    "add_tags": [],
+                    "preserve_raw": False,
+                }
+            ]
+        )
+        output = capsys.readouterr().out
+
+        assert "Order" in output
+        assert "7" in output
+
+    def test_member_table_reads_flat_user_fields(self, capsys):
+        print_members_table(
+            [
+                {
+                    "id": "m1",
+                    "user_id": "abcdef12-3456-7890-abcd-ef1234567890",
+                    "username": "alice",
+                    "role": "admin",
+                    "created_at": "2024-01-15T10:00:00Z",
+                }
+            ]
+        )
+        output = capsys.readouterr().out
+
+        assert "alice" in output
+        assert "admin" in output
+        assert "abcdef12" in output
+
+    def test_whoami_reads_domains_and_root_flag(self, capsys):
+        print_whoami(
+            {
+                "user": {
+                    "id": "u1",
+                    "username": "alice",
+                    "email": None,
+                    "is_superuser": False,
+                },
+                "domains": ["example.com", "other.test"],
+                "is_root": True,
+            }
+        )
+        output = capsys.readouterr().out
+
+        assert "alice" in output
+        assert "example.com" in output
+        assert "Root Key" in output
+
+    def test_delivery_log_reads_attempts_and_status_code(self, capsys):
+        print_delivery_log(
+            {
+                "id": "l1",
+                "message_id": "<msg@example.com>",
+                "recipient_id": "abcdef12-3456-7890-abcd-ef1234567890",
+                "webhook_url": "https://hook.example.com",
+                "status": "failed",
+                "attempts": 4,
+                "last_status_code": 503,
+                "dkim_result": "pass",
+                "last_error": "boom",
+                "created_at": "2024-01-15T10:00:00Z",
+                "next_retry_at": None,
+            }
+        )
+        output = capsys.readouterr().out
+
+        assert "4" in output
+        assert "503" in output
+        assert "pass" in output
+
+    def test_recipient_renders_webhook_headers(self, capsys):
+        print_recipient(
+            {
+                "id": "r1",
+                "local_part": "support",
+                "webhook_url": "https://hook.example.com",
+                "webhook_headers": {"X-Token": "abc"},
+                "is_enabled": True,
+                "created_at": "2024-01-15T10:00:00Z",
+            }
+        )
+        output = capsys.readouterr().out
+
+        assert "Webhook Headers" in output
+        assert "X-Token=abc" in output
+
+    def test_error_detail_with_brackets_is_not_parsed_as_markup(self, capsys):
+        """Server details list valid values in brackets; rich must not eat them."""
+        print_error("Invalid field 'x'. Valid fields: [from, to, subject]")
+        output = capsys.readouterr().err
+
+        assert "[from, to, subject]" in output
+
+    def test_webhook_result_without_response_time(self, capsys):
+        """A failed webhook test reports a null response_time_ms."""
+        print_test_webhook_result(
+            {"success": False, "status_code": None, "error": "timeout", "response_time_ms": None}
+        )
+        output = capsys.readouterr().out
+
+        assert "FAILED" in output
+        assert "timeout" in output
