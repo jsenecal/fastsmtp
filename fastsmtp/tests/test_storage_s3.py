@@ -1,5 +1,6 @@
 """Tests for S3 storage module."""
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -240,3 +241,155 @@ class TestS3Storage:
 
             assert exc_info.value.filename == "file.pdf"
             assert exc_info.value.cause is not None
+
+
+class TestRawMessageUpload:
+    """Tests for raw MIME message preservation."""
+
+    @pytest.fixture
+    def raw_settings(self):
+        """Create settings with S3 configured for raw preservation."""
+        return Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            s3_bucket="test-bucket",
+            s3_access_key="test-access-key",
+            s3_secret_key="test-secret-key",
+            s3_region="us-west-2",
+            preserve_raw_message=True,
+        )
+
+    def test_build_raw_key_partitions_by_date(self, raw_settings):
+        """Test raw keys are partitioned by receive date."""
+        storage = S3Storage(raw_settings)
+        key = storage._build_raw_key(
+            domain="example.com",
+            message_id="<abc123@example.com>",
+            received_at=datetime(2026, 3, 7, 14, 30, tzinfo=UTC),
+        )
+        assert key == "raw/example.com/2026/03/07/abc123@example.com.eml"
+
+    def test_build_raw_key_sanitizes_message_id(self, raw_settings):
+        """Test raw key message IDs are sanitized."""
+        storage = S3Storage(raw_settings)
+        key = storage._build_raw_key(
+            domain="example.com",
+            message_id="<msg with|bad?chars>",
+            received_at=datetime(2026, 3, 7, tzinfo=UTC),
+        )
+        assert "|" not in key
+        assert "?" not in key
+        assert "<" not in key
+        assert key.endswith(".eml")
+
+    def test_build_raw_key_uses_configured_prefix(self):
+        """Test raw key honours s3_raw_prefix."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            s3_bucket="test-bucket",
+            s3_access_key="key",
+            s3_secret_key="secret",
+            s3_raw_prefix="archive/mime",
+        )
+        storage = S3Storage(settings)
+        key = storage._build_raw_key(
+            domain="example.com",
+            message_id="<abc@example.com>",
+            received_at=datetime(2026, 3, 7, tzinfo=UTC),
+        )
+        assert key.startswith("archive/mime/example.com/2026/03/07/")
+
+    @pytest.mark.asyncio
+    async def test_upload_raw_message_success(self, raw_settings):
+        """Test successful raw message upload."""
+        storage = S3Storage(raw_settings)
+        content = b"From: a@example.com\r\nSubject: hi\r\n\r\nbody"
+
+        mock_client = AsyncMock()
+        mock_client.put_object = AsyncMock()
+
+        with patch.object(storage._session, "create_client") as mock_create:
+            mock_create.return_value.__aenter__.return_value = mock_client
+
+            result = await storage.upload_raw_message(
+                content=content,
+                domain="example.com",
+                message_id="<abc123@example.com>",
+                received_at=datetime(2026, 3, 7, tzinfo=UTC),
+            )
+
+            assert result.bucket == "test-bucket"
+            assert result.key == "raw/example.com/2026/03/07/abc123@example.com.eml"
+            assert result.size == len(content)
+            assert result.presigned_url is None
+            assert result.url.endswith(result.key)
+
+    @pytest.mark.asyncio
+    async def test_upload_raw_message_uses_rfc822_content_type(self, raw_settings):
+        """Test raw messages are stored as message/rfc822."""
+        storage = S3Storage(raw_settings)
+
+        mock_client = AsyncMock()
+        mock_client.put_object = AsyncMock()
+
+        with patch.object(storage._session, "create_client") as mock_create:
+            mock_create.return_value.__aenter__.return_value = mock_client
+
+            await storage.upload_raw_message(
+                content=b"raw",
+                domain="example.com",
+                message_id="<abc@example.com>",
+            )
+
+            kwargs = mock_client.put_object.call_args.kwargs
+            assert kwargs["ContentType"] == "message/rfc822"
+            assert kwargs["Body"] == b"raw"
+
+    @pytest.mark.asyncio
+    async def test_upload_raw_message_with_presigned_url(self):
+        """Test raw upload includes a presigned URL when enabled."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            s3_bucket="test-bucket",
+            s3_access_key="key",
+            s3_secret_key="secret",
+            s3_presigned_urls=True,
+        )
+        storage = S3Storage(settings)
+
+        mock_client = AsyncMock()
+        mock_client.put_object = AsyncMock()
+        mock_client.generate_presigned_url = AsyncMock(return_value="https://presigned-raw")
+
+        with patch.object(storage._session, "create_client") as mock_create:
+            mock_create.return_value.__aenter__.return_value = mock_client
+
+            result = await storage.upload_raw_message(
+                content=b"raw",
+                domain="example.com",
+                message_id="<abc@example.com>",
+            )
+
+            assert result.presigned_url == "https://presigned-raw"
+
+    @pytest.mark.asyncio
+    async def test_upload_raw_message_raises_on_failure(self, raw_settings):
+        """Test raw upload failures raise S3UploadError."""
+        storage = S3Storage(raw_settings)
+
+        mock_client = AsyncMock()
+        mock_client.put_object = AsyncMock(side_effect=ConnectionError("boom"))
+
+        with patch.object(storage._session, "create_client") as mock_create:
+            mock_create.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(S3UploadError) as exc_info:
+                await storage.upload_raw_message(
+                    content=b"raw",
+                    domain="example.com",
+                    message_id="<abc@example.com>",
+                )
+
+            assert isinstance(exc_info.value.cause, ConnectionError)

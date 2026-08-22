@@ -108,6 +108,35 @@ With `FASTSMTP_S3_PRESIGNED_URLS=true`, the payload includes time-limited downlo
 }
 ```
 
+## Preserved Raw Message
+
+When raw message preservation is enabled for a recipient, the payload carries a
+`raw_message` block pointing at the complete MIME message archived in S3:
+
+```json
+{
+  "message_id": "<abc123@sender.com>",
+  "from": "billing@sender.com",
+  "to": "invoices@yourdomain.com",
+  "subject": "Invoice 2025-01",
+  "raw_message": {
+    "storage": "s3",
+    "bucket": "my-email-archive",
+    "key": "raw/yourdomain.com/2026/03/07/abc123@sender.com.eml",
+    "url": "https://s3.us-west-2.amazonaws.com/my-email-archive/raw/yourdomain.com/2026/03/07/abc123@sender.com.eml",
+    "size": 48213,
+    "presigned_url": "https://..."
+  }
+}
+```
+
+The archived object is the raw bytes exactly as received, stored as `message/rfc822`, so
+it can be fed straight back into any MIME parser. `presigned_url` is present only when
+`FASTSMTP_S3_PRESIGNED_URLS=true`. The block is absent when preservation is off for the
+recipient, or when an optional archive upload failed. See
+[Raw Message Preservation](configuration.md#raw-message-preservation-s3) for how
+preservation is enabled per domain and per rule.
+
 ## S3 Fallback to Inline
 
 If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attachment will have `storage_fallback: true` to indicate this:
@@ -182,4 +211,17 @@ For example:
 
 ```
 attachments/yourdomain.com/abc123@sender.com/invoice.pdf
+```
+
+Preserved raw messages use their own prefix and are partitioned by receive date so S3
+lifecycle rules can expire archives by age:
+
+```
+{raw_prefix}/{domain}/{YYYY}/{MM}/{DD}/{message_id}.eml
+```
+
+For example:
+
+```
+raw/yourdomain.com/2026/03/07/abc123@sender.com.eml
 ```

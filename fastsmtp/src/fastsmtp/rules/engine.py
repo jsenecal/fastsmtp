@@ -26,6 +26,7 @@ class RuleMatch:
     action: str
     tags: list[str] = field(default_factory=list)
     webhook_url_override: str | None = None
+    preserve_raw: bool = False
 
 
 @dataclass
@@ -36,6 +37,7 @@ class RuleEvaluationResult:
     tags: list[str] = field(default_factory=list)
     action: str = "forward"  # forward, drop, quarantine
     webhook_url_override: str | None = None
+    preserve_raw: bool = False
 
     @property
     def should_drop(self) -> bool:
@@ -208,6 +210,7 @@ async def evaluate_rules(
                     action=rule.action,
                     tags=rule.add_tags or [],
                     webhook_url_override=rule.webhook_url_override,
+                    preserve_raw=bool(rule.preserve_raw),
                 )
                 result.matches.append(match)
 
@@ -218,6 +221,10 @@ async def evaluate_rules(
                 action_priority = {"forward": 0, "tag": 0, "quarantine": 1, "drop": 2}
                 if action_priority.get(rule.action, 0) > action_priority.get(result.action, 0):
                     result.action = rule.action
+
+                # Preservation is orthogonal to the action: any match can request it
+                if match.preserve_raw:
+                    result.preserve_raw = True
 
                 # Store webhook override if specified
                 if rule.webhook_url_override:

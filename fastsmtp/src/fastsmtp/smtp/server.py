@@ -6,6 +6,7 @@ import contextlib
 import logging
 import re
 import uuid
+from datetime import UTC, datetime
 from email import message_from_bytes
 from email.message import Message
 from typing import TYPE_CHECKING
@@ -32,6 +33,7 @@ from fastsmtp.metrics.definitions import (
 )
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import EmailAuthResult, validate_email_auth
+from fastsmtp.storage.raw_message import RawMessagePreserver, should_preserve_raw
 
 logger = logging.getLogger(__name__)
 
@@ -119,14 +121,17 @@ class FastSMTPHandler:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-        # S3 storage client (initialized if attachment_storage == "s3")
+        # S3 storage client, shared by attachment offloading and raw message
+        # preservation. Raw preservation is enabled per domain and per rule, so
+        # the client is built whenever credentials exist, not only when
+        # attachment_storage == "s3".
         self._s3_storage = None
-        if self.settings.attachment_storage == "s3":
+        if self.settings.s3_configured:
             try:
                 from fastsmtp.storage.s3 import S3Storage
 
                 self._s3_storage = S3Storage(self.settings)
-                logger.info("S3 attachment storage initialized")
+                logger.info("S3 storage initialized")
             except Exception as e:
                 logger.error(f"Failed to initialize S3 storage: {e}")
 
@@ -266,6 +271,7 @@ class FastSMTPHandler:
                 message_id=message_id,
                 auth_result=auth_result,
                 client_ip=client_ip,
+                raw_content=content,
             )
         except Exception as e:
             logger.exception(f"Failed to persist message {message_id}: {e}")
@@ -289,6 +295,7 @@ class FastSMTPHandler:
         message_id: str,
         auth_result: EmailAuthResult,
         client_ip: str,
+        raw_content: bytes,
     ) -> int:
         """Process message for each recipient and persist deliveries to database.
 
@@ -298,6 +305,7 @@ class FastSMTPHandler:
             message_id: Message-ID header value
             auth_result: Email authentication result
             client_ip: Client IP address
+            raw_content: Complete raw MIME message as received
 
         Returns:
             Number of deliveries created
@@ -313,10 +321,20 @@ class FastSMTPHandler:
             if "@" in first_rcpt:
                 recipient_domain = first_rcpt.rsplit("@", 1)[1].lower()
 
-        # Get S3 storage if enabled
+        # Attachment offloading stays gated on attachment_storage
         s3_storage = None
-        if self.settings.attachment_storage == "s3" and hasattr(self, "_s3_storage"):
+        if self.settings.attachment_storage == "s3":
             s3_storage = self._s3_storage
+
+        # Raw preservation uploads the same bytes for every recipient, so it
+        # runs at most once and only if some recipient actually asks for it
+        raw_preserver = RawMessagePreserver(
+            content=raw_content,
+            message_id=message_id,
+            s3_storage=self._s3_storage,
+            settings=self.settings,
+            received_at=datetime.now(UTC),
+        )
 
         # Extract base payload (same for all recipients)
         base_payload = await extract_email_payload(
@@ -353,6 +371,11 @@ class FastSMTPHandler:
                     auth_result=auth_result,
                 )
 
+                # Archive before honouring a drop so a rule can preserve and discard
+                raw_info = None
+                if should_preserve_raw(domain, rule_result.preserve_raw, self.settings):
+                    raw_info = await raw_preserver.preserve(domain.domain_name)
+
                 # Check if message should be dropped
                 if rule_result.should_drop:
                     logger.info(f"Message {message_id}: dropped for {rcpt_to} by rules")
@@ -362,6 +385,8 @@ class FastSMTPHandler:
                 payload = base_payload.copy()
                 payload["tags"] = rule_result.tags
                 payload["recipient"] = rcpt_to
+                if raw_info is not None:
+                    payload["raw_message"] = RawMessagePreserver.payload_block(raw_info)
 
                 # Determine webhook URL (rule override takes precedence)
                 webhook_url = rule_result.webhook_url_override or recipient.webhook_url

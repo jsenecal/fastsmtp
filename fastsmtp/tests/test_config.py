@@ -107,3 +107,78 @@ class TestRenamedWebhookSettings:
         )
         assert hasattr(settings, "webhook_max_inline_payload_size")
         assert settings.webhook_max_inline_payload_size == 50 * 1024 * 1024  # 50MB
+
+
+class TestRawMessagePreservationConfig:
+    """Tests for raw message preservation settings."""
+
+    def test_defaults_are_off(self):
+        """Test raw preservation is disabled by default."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+        )
+        assert settings.preserve_raw_message is False
+        assert settings.preserve_raw_required is False
+        assert settings.s3_raw_prefix == "raw"
+
+    def test_s3_configured_false_without_credentials(self):
+        """Test s3_configured is False when credentials are absent."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+        )
+        assert settings.s3_configured is False
+
+    def test_s3_configured_false_with_partial_credentials(self):
+        """Test s3_configured is False when only some credentials are present."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            s3_bucket="bucket",
+            s3_access_key="key",
+        )
+        assert settings.s3_configured is False
+
+    def test_s3_configured_true_with_credentials(self):
+        """Test s3_configured is True when bucket and credentials are present."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            s3_bucket="bucket",
+            s3_access_key="key",
+            s3_secret_key="secret",
+        )
+        assert settings.s3_configured is True
+
+    def test_preserve_raw_message_requires_s3(self):
+        """Test enabling raw preservation without S3 credentials is rejected."""
+        with pytest.raises(ValueError, match="preserve_raw_message"):
+            Settings(
+                database_url="sqlite+aiosqlite:///:memory:",
+                root_api_key="test_key_12345",
+                preserve_raw_message=True,
+            )
+
+    def test_preserve_raw_required_requires_s3(self):
+        """Test enabling required raw preservation without S3 credentials is rejected."""
+        with pytest.raises(ValueError, match="preserve_raw_required"):
+            Settings(
+                database_url="sqlite+aiosqlite:///:memory:",
+                root_api_key="test_key_12345",
+                preserve_raw_required=True,
+            )
+
+    def test_preserve_raw_message_with_s3_is_valid(self):
+        """Test raw preservation is accepted when S3 is configured."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            s3_bucket="bucket",
+            s3_access_key="key",
+            s3_secret_key="secret",
+            preserve_raw_message=True,
+            preserve_raw_required=True,
+        )
+        assert settings.preserve_raw_message is True
+        assert settings.preserve_raw_required is True
