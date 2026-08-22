@@ -7,6 +7,10 @@ on:
         description: 'Git ref to checkout'
         required: false
         type: string
+    secrets:
+      CODECOV_TOKEN:
+        description: 'Codecov upload token'
+        required: false
 
 env:
   PYTHON_VERSION: "3.12"
