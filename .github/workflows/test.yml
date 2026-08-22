@@ -75,11 +75,17 @@ jobs:
         env:
           FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@localhost:5432/fastsmtp_test
           FASTSMTP_ROOT_API_KEY: test-api-key-for-ci
-        run: uv run pytest --cov=fastsmtp --cov-report=xml --cov-report=term-missing
+        run: >-
+          uv run pytest
+          --cov=fastsmtp --cov=fastsmtp_cli
+          --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage reports
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
-          file: ./coverage.xml
+          files: ./coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # A failed upload should be visible in the logs but must not fail the
+          # build. Do not add continue-on-error here: together the two hide
+          # genuine action failures, which is how a broken upload went unnoticed.
           fail_ci_if_error: false
-        continue-on-error: true

@@ -55,6 +55,23 @@ filterwarnings = [
     "ignore:invalid escape sequence:SyntaxWarning:.*spf",
 ]
 
+[tool.coverage.run]
+source = ["fastsmtp", "fastsmtp_cli"]
+branch = true
+omit = [
+    # Alembic migrations are not executed by the suite (conftest builds the
+    # schema with create_all), so measuring them only depresses the number.
+    "*/alembic/*",
+    "*/tests/*",
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+]
+
 [tool.bumpversion]
 current_version = "0.2.0"
 commit = true
