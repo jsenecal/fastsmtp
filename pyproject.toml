@@ -62,6 +62,11 @@ tag = true
 tag_name = "v{new_version}"
 tag_message = "v{new_version}"
 message = "chore: bump version {current_version} -> {new_version}"
+# uv.lock records the three workspace package versions. It is generated, and a
+# plain search/replace would corrupt any dependency pinned at the same version
+# as ours, so regenerate it with uv and stage the result instead.
+allow_shell_hooks = true
+pre_commit_hooks = ["uv lock", "git add uv.lock"]
 
 [[tool.bumpversion.files]]
 filename = "fastsmtp/pyproject.toml"
