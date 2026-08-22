@@ -7,7 +7,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from fastsmtp.api.validation import require_s3_for_preservation
 from fastsmtp.auth import Auth, get_domain_with_access
+from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Rule, RuleSet
 from fastsmtp.db.session import get_session
 from fastsmtp.schemas.common import MessageResponse
@@ -252,6 +254,7 @@ async def create_rule(
     data: RuleCreate,
     auth: Auth,
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> RuleResponse:
     """Add a rule to a ruleset."""
     await get_domain_with_access(domain_id, auth, session, required_role="admin")
@@ -261,6 +264,9 @@ async def create_rule(
     validate_rule_field(data.field)
     validate_rule_operator(data.operator)
     validate_rule_action(data.action)
+
+    if data.preserve_raw:
+        require_s3_for_preservation(settings)
 
     # Verify ruleset exists
     stmt = select(RuleSet).where(
@@ -291,6 +297,7 @@ async def create_rule(
         action=data.action,
         webhook_url_override=str(data.webhook_url_override) if data.webhook_url_override else None,
         add_tags=data.add_tags,
+        preserve_raw=data.preserve_raw,
     )
     session.add(rule)
     await session.flush()
@@ -306,6 +313,7 @@ async def update_rule(
     data: RuleUpdate,
     auth: Auth,
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> RuleResponse:
     """Update a rule."""
     await get_domain_with_access(domain_id, auth, session, required_role="admin")
@@ -338,6 +346,8 @@ async def update_rule(
         validate_rule_operator(update_data["operator"])
     if "action" in update_data:
         validate_rule_action(update_data["action"])
+    if update_data.get("preserve_raw"):
+        require_s3_for_preservation(settings)
 
     # Handle webhook_url conversion
     if "webhook_url_override" in update_data and update_data["webhook_url_override"]:

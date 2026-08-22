@@ -151,6 +151,8 @@ class Domain(Base, TimestampMixin, SoftDeleteMixin):
     verify_spf: Mapped[bool | None] = mapped_column(nullable=True)
     reject_dkim_fail: Mapped[bool | None] = mapped_column(nullable=True)
     reject_spf_fail: Mapped[bool | None] = mapped_column(nullable=True)
+    # NULL = inherit the global preserve_raw_message setting
+    preserve_raw_message: Mapped[bool | None] = mapped_column(nullable=True)
 
     # Relationships
     members: Mapped[list["DomainMember"]] = relationship(
@@ -310,6 +312,8 @@ class Rule(Base, TimestampMixin):
     )  # forward, drop, tag, quarantine
     webhook_url_override: Mapped[str | None] = mapped_column(Text, nullable=True)
     add_tags: Mapped[list[str]] = mapped_column(default=list)
+    # Orthogonal to action: a rule may preserve the raw message and still drop it
+    preserve_raw: Mapped[bool] = mapped_column(default=False, nullable=False)
 
     # Relationships
     ruleset: Mapped["RuleSet"] = relationship(back_populates="rules")

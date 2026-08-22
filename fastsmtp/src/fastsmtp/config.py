@@ -123,6 +123,23 @@ class Settings(BaseSettings):
         description="Presigned URL expiry in seconds",
     )
 
+    # Raw Message Preservation
+    preserve_raw_message: bool = Field(
+        default=False,
+        description="Preserve the complete raw MIME message in S3 for every domain that "
+        "does not override this. Domains and rules can enable it individually.",
+    )
+    preserve_raw_required: bool = Field(
+        default=False,
+        description="Treat raw message preservation as mandatory. When True, an S3 upload "
+        "failure rejects the message with a temporary SMTP error so the sender retries. "
+        "When False, the failure is logged and delivery continues.",
+    )
+    s3_raw_prefix: str = Field(
+        default="raw",
+        description="S3 key prefix for preserved raw messages",
+    )
+
     # Dead Letter Queue
     dlq_webhook_url: str | None = Field(
         default=None,
@@ -224,19 +241,35 @@ class Settings(BaseSettings):
         description="Maximum recipients per SMTP message",
     )
 
+    @property
+    def s3_configured(self) -> bool:
+        """Whether bucket and credentials are available to talk to S3."""
+        return bool(self.s3_bucket and self.s3_access_key and self.s3_secret_key)
+
+    def missing_s3_settings(self) -> list[str]:
+        """Names of the S3 settings still required to talk to S3."""
+        missing = []
+        if not self.s3_bucket:
+            missing.append("s3_bucket")
+        if not self.s3_access_key:
+            missing.append("s3_access_key")
+        if not self.s3_secret_key:
+            missing.append("s3_secret_key")
+        return missing
+
     @model_validator(mode="after")
     def validate_s3_config(self) -> "Settings":
-        """Validate S3 configuration when attachment_storage is 's3'."""
+        """Validate S3 configuration for every feature that depends on it."""
+        missing = self.missing_s3_settings()
+        if not missing:
+            return self
+
         if self.attachment_storage == "s3":
-            missing = []
-            if not self.s3_bucket:
-                missing.append("s3_bucket")
-            if not self.s3_access_key:
-                missing.append("s3_access_key")
-            if not self.s3_secret_key:
-                missing.append("s3_secret_key")
-            if missing:
-                raise ValueError(f"S3 storage requires: {', '.join(missing)}")
+            raise ValueError(f"S3 storage requires: {', '.join(missing)}")
+        if self.preserve_raw_message:
+            raise ValueError(f"preserve_raw_message requires: {', '.join(missing)}")
+        if self.preserve_raw_required:
+            raise ValueError(f"preserve_raw_required requires: {', '.join(missing)}")
         return self
 
 

@@ -19,6 +19,11 @@ class DomainCreate(DomainBase):
     verify_spf: bool | None = None
     reject_dkim_fail: bool | None = None
     reject_spf_fail: bool | None = None
+    preserve_raw_message: bool | None = Field(
+        default=None,
+        description="Preserve the complete raw MIME message in S3. "
+        "None inherits the global preserve_raw_message setting.",
+    )
 
 
 class DomainUpdate(BaseModel):
@@ -29,6 +34,11 @@ class DomainUpdate(BaseModel):
     verify_spf: bool | None = None
     reject_dkim_fail: bool | None = None
     reject_spf_fail: bool | None = None
+    preserve_raw_message: bool | None = Field(
+        default=None,
+        description="Preserve the complete raw MIME message in S3. "
+        "None inherits the global preserve_raw_message setting.",
+    )
 
 
 class DomainResponse(DomainBase):
@@ -42,6 +52,7 @@ class DomainResponse(DomainBase):
     verify_spf: bool | None
     reject_dkim_fail: bool | None
     reject_spf_fail: bool | None
+    preserve_raw_message: bool | None
     created_at: datetime
     updated_at: datetime
 

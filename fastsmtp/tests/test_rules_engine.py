@@ -618,3 +618,150 @@ class TestGetDomainAuthSettings:
         fake_id = uuid.uuid4()
         result = await get_domain_auth_settings(test_session, fake_id)
         assert result == (None, None, None, None)
+
+
+class TestPreserveRawRules:
+    """Tests for the per-rule raw message preservation flag."""
+
+    def test_rule_match_defaults_to_no_preservation(self):
+        """Test RuleMatch does not request preservation by default."""
+        match = RuleMatch(
+            rule_id=uuid.uuid4(),
+            ruleset_id=uuid.uuid4(),
+            action="forward",
+        )
+        assert match.preserve_raw is False
+
+    def test_evaluation_result_defaults_to_no_preservation(self):
+        """Test RuleEvaluationResult does not request preservation by default."""
+        assert RuleEvaluationResult().preserve_raw is False
+
+    @pytest_asyncio.fixture
+    async def domain_with_preserve_rule(self, test_session: AsyncSession) -> Domain:
+        """Create a domain whose rules request raw preservation."""
+        domain = Domain(domain_name="preserve-rules-test.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+
+        ruleset = RuleSet(
+            domain_id=domain.id,
+            name="Preserve Rules",
+            priority=10,
+            is_enabled=True,
+            stop_on_match=False,
+        )
+        test_session.add(ruleset)
+        await test_session.flush()
+
+        # Preserves the raw message but otherwise leaves delivery alone
+        preserve_rule = Rule(
+            ruleset_id=ruleset.id,
+            order=0,
+            field="subject",
+            operator="contains",
+            value="invoice",
+            action="tag",
+            add_tags=["billing"],
+            preserve_raw=True,
+        )
+        # Drops the message, and still archives it first
+        drop_rule = Rule(
+            ruleset_id=ruleset.id,
+            order=1,
+            field="from",
+            operator="contains",
+            value="@spam.example",
+            action="drop",
+            preserve_raw=True,
+        )
+        # Matches everything else without preserving
+        plain_rule = Rule(
+            ruleset_id=ruleset.id,
+            order=2,
+            field="subject",
+            operator="contains",
+            value="newsletter",
+            action="tag",
+            add_tags=["bulk"],
+        )
+        test_session.add_all([preserve_rule, drop_rule, plain_rule])
+        await test_session.commit()
+        await test_session.refresh(domain)
+
+        return domain
+
+    @pytest.mark.asyncio
+    async def test_matching_rule_requests_preservation(
+        self, test_session: AsyncSession, domain_with_preserve_rule: Domain
+    ):
+        """Test a matching preserve_raw rule sets preserve_raw on the result."""
+        msg = EmailMessage()
+        msg["From"] = "billing@example.com"
+        msg["Subject"] = "Your invoice"
+
+        result = await evaluate_rules(
+            session=test_session,
+            domain_id=domain_with_preserve_rule.id,
+            message=msg,
+            payload={},
+        )
+
+        assert result.preserve_raw is True
+        assert "billing" in result.tags
+
+    @pytest.mark.asyncio
+    async def test_non_preserving_match_leaves_preservation_off(
+        self, test_session: AsyncSession, domain_with_preserve_rule: Domain
+    ):
+        """Test a matching rule without preserve_raw does not request preservation."""
+        msg = EmailMessage()
+        msg["From"] = "news@example.com"
+        msg["Subject"] = "Weekly newsletter"
+
+        result = await evaluate_rules(
+            session=test_session,
+            domain_id=domain_with_preserve_rule.id,
+            message=msg,
+            payload={},
+        )
+
+        assert result.preserve_raw is False
+        assert "bulk" in result.tags
+
+    @pytest.mark.asyncio
+    async def test_preservation_survives_drop_action(
+        self, test_session: AsyncSession, domain_with_preserve_rule: Domain
+    ):
+        """Test a dropping rule can still request preservation (archive then discard)."""
+        msg = EmailMessage()
+        msg["From"] = "bot@spam.example"
+        msg["Subject"] = "Buy now"
+
+        result = await evaluate_rules(
+            session=test_session,
+            domain_id=domain_with_preserve_rule.id,
+            message=msg,
+            payload={},
+        )
+
+        assert result.should_drop is True
+        assert result.preserve_raw is True
+
+    @pytest.mark.asyncio
+    async def test_preservation_is_ored_across_matches(
+        self, test_session: AsyncSession, domain_with_preserve_rule: Domain
+    ):
+        """Test one preserving match is enough even when other rules also match."""
+        msg = EmailMessage()
+        msg["From"] = "billing@example.com"
+        msg["Subject"] = "invoice for your newsletter"
+
+        result = await evaluate_rules(
+            session=test_session,
+            domain_id=domain_with_preserve_rule.id,
+            message=msg,
+            payload={},
+        )
+
+        assert len(result.matches) == 2
+        assert result.preserve_raw is True

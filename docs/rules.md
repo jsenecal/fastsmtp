@@ -24,6 +24,14 @@ The rule engine allows conditional processing of emails based on various attribu
 - `drop` - Silently drop the email
 - `quarantine` - Mark as quarantined
 
+## Raw Message Preservation
+
+Independent of the action, a rule may set `preserve_raw` to archive the complete raw MIME
+message in S3 when it matches. Because it is orthogonal to the action, a rule can archive
+a message and still drop it. See
+[Raw Message Preservation](configuration.md#raw-message-preservation-s3) for the storage
+layout and the domain-level and global settings it combines with.
+
 ## Example
 
 Create a ruleset and a rule that tags spam using the [remote CLI](cli/fsmtp.md):

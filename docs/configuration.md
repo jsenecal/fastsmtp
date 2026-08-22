@@ -85,6 +85,63 @@ Store attachments in S3-compatible storage (AWS S3, MinIO, Ceph) instead of inli
     export FASTSMTP_S3_PRESIGNED_URLS=true
     ```
 
+## Raw Message Preservation (S3)
+
+Archive the complete raw MIME message (headers, bodies and attachments exactly as
+received) alongside webhook delivery. Preservation reuses the S3 credentials above and
+works whether attachments are stored inline or in S3.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_PRESERVE_RAW_MESSAGE` | `false` | Default for domains that do not override it |
+| `FASTSMTP_PRESERVE_RAW_REQUIRED` | `false` | Reject the message with `451` if archiving fails |
+| `FASTSMTP_S3_RAW_PREFIX` | `raw` | Key prefix for preserved messages |
+
+Objects are stored as `message/rfc822` under
+`{prefix}/{domain}/{YYYY}/{MM}/{DD}/{message-id}.eml`, so S3 lifecycle rules can expire
+archives by age.
+
+Preservation is decided per recipient, from three sources in order:
+
+1. A matching rule with `preserve_raw: true` — always enables it, independent of the
+   rule's action, so a rule can archive a message and still drop it.
+2. The domain's `preserve_raw_message` — `true` or `false` overrides the global default.
+3. The global `FASTSMTP_PRESERVE_RAW_MESSAGE` setting, used when the domain leaves it unset.
+
+A message is uploaded at most once no matter how many recipients ask for it. When it is
+preserved, the webhook payload gains a `raw_message` block:
+
+```json
+{
+  "raw_message": {
+    "storage": "s3",
+    "bucket": "my-email-archive",
+    "key": "raw/example.com/2026/03/07/abc123@example.com.eml",
+    "url": "https://s3.us-west-2.amazonaws.com/my-email-archive/raw/...",
+    "size": 48213,
+    "presigned_url": "https://..."
+  }
+}
+```
+
+By default an upload failure is logged and delivery continues. Set
+`FASTSMTP_PRESERVE_RAW_REQUIRED=true` to treat the archive as mandatory instead: the SMTP
+transaction is rolled back and answered with a temporary failure so the sender retries.
+
+```bash
+export FASTSMTP_S3_BUCKET=my-email-archive
+export FASTSMTP_S3_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE
+export FASTSMTP_S3_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+export FASTSMTP_S3_REGION=us-west-2
+export FASTSMTP_PRESERVE_RAW_MESSAGE=true
+```
+
+!!! note "Validation"
+
+    The API rejects enabling `preserve_raw_message` on a domain or `preserve_raw` on a
+    rule with `422` when S3 is not configured, so a flag can never be stored that would
+    silently do nothing.
+
 ## Security
 
 | Variable | Default | Description |

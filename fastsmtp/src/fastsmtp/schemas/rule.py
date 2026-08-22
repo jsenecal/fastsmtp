@@ -103,6 +103,11 @@ class RuleBase(BaseModel):
         default_factory=list,
         description="Tags to add when rule matches",
     )
+    preserve_raw: bool = Field(
+        default=False,
+        description="Preserve the complete raw MIME message in S3 when this rule matches. "
+        "Independent of the action, so a rule can archive a message and still drop it.",
+    )
 
     @field_validator("field")
     @classmethod
@@ -153,6 +158,7 @@ class RuleUpdate(BaseModel):
     action: str | None = None
     webhook_url_override: HttpUrl | None = None
     add_tags: list[str] | None = None
+    preserve_raw: bool | None = None
 
     @field_validator("field")
     @classmethod

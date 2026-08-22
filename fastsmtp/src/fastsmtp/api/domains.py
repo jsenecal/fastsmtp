@@ -7,7 +7,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from fastsmtp.api.validation import require_s3_for_preservation
 from fastsmtp.auth import Auth, get_domain_with_access
+from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, DomainMember, User
 from fastsmtp.db.session import get_session
 from fastsmtp.schemas import (
@@ -52,9 +54,13 @@ async def create_domain(
     data: DomainCreate,
     auth: Auth,
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> DomainResponse:
     """Create a new domain (superuser only)."""
     auth.require_superuser()
+
+    if data.preserve_raw_message:
+        require_s3_for_preservation(settings)
 
     # Check for duplicate domain
     stmt = select(Domain).where(Domain.domain_name == data.domain_name)
@@ -71,6 +77,7 @@ async def create_domain(
         verify_spf=data.verify_spf,
         reject_dkim_fail=data.reject_dkim_fail,
         reject_spf_fail=data.reject_spf_fail,
+        preserve_raw_message=data.preserve_raw_message,
     )
     session.add(domain)
     await session.flush()
@@ -96,11 +103,15 @@ async def update_domain(
     data: DomainUpdate,
     auth: Auth,
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> DomainResponse:
     """Update a domain (admin or higher)."""
     domain = await get_domain_with_access(domain_id, auth, session, required_role="admin")
 
     update_data = data.model_dump(exclude_unset=True)
+
+    if update_data.get("preserve_raw_message"):
+        require_s3_for_preservation(settings)
     for field, value in update_data.items():
         setattr(domain, field, value)
 

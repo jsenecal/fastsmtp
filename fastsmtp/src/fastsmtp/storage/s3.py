@@ -3,7 +3,8 @@
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from aiobotocore.session import get_session
 
@@ -20,6 +21,17 @@ class S3AttachmentInfo:
     bucket: str
     key: str
     url: str
+    presigned_url: str | None = None
+
+
+@dataclass
+class S3RawMessageInfo:
+    """Information about a raw MIME message preserved in S3."""
+
+    bucket: str
+    key: str
+    url: str
+    size: int
     presigned_url: str | None = None
 
 
@@ -62,6 +74,23 @@ class S3Storage:
         prefix = self.settings.s3_prefix.strip("/")
         return f"{prefix}/{domain}/{safe_message_id}/{safe_filename}"
 
+    def _build_raw_key(
+        self,
+        domain: str,
+        message_id: str,
+        received_at: datetime | None = None,
+    ) -> str:
+        """Build S3 key for a preserved raw message.
+
+        Keys are partitioned by receive date so archives stay listable and
+        S3 lifecycle rules can expire them by age.
+        """
+        received_at = received_at or datetime.now(UTC)
+        safe_message_id = sanitize_key_component(message_id)
+        prefix = self.settings.s3_raw_prefix.strip("/")
+        date_path = received_at.strftime("%Y/%m/%d")
+        return f"{prefix}/{domain}/{date_path}/{safe_message_id}.eml"
+
     def _build_url(self, key: str) -> str:
         """Build public URL for S3 object."""
         bucket = self.settings.s3_bucket
@@ -71,6 +100,17 @@ class S3Storage:
         else:
             region = self.settings.s3_region
             return f"https://s3.{region}.amazonaws.com/{bucket}/{key}"
+
+    def _client_kwargs(self) -> dict[str, Any]:
+        """Build keyword arguments for creating the S3 client."""
+        kwargs: dict[str, Any] = {
+            "aws_access_key_id": self.settings.s3_access_key.get_secret_value(),
+            "aws_secret_access_key": self.settings.s3_secret_key.get_secret_value(),
+            "region_name": self.settings.s3_region,
+        }
+        if self.settings.s3_endpoint_url:
+            kwargs["endpoint_url"] = self.settings.s3_endpoint_url
+        return kwargs
 
     async def upload_attachment(
         self,
@@ -98,19 +138,8 @@ class S3Storage:
         key = self._build_key(domain, message_id, filename)
         bucket = self.settings.s3_bucket
 
-        client_config = {
-            "region_name": self.settings.s3_region,
-        }
-        if self.settings.s3_endpoint_url:
-            client_config["endpoint_url"] = self.settings.s3_endpoint_url
-
         try:
-            async with self._session.create_client(
-                "s3",
-                aws_access_key_id=self.settings.s3_access_key.get_secret_value(),
-                aws_secret_access_key=self.settings.s3_secret_key.get_secret_value(),
-                **client_config,
-            ) as client:
+            async with self._session.create_client("s3", **self._client_kwargs()) as client:
                 await client.put_object(
                     Bucket=bucket,
                     Key=key,
@@ -138,3 +167,60 @@ class S3Storage:
         except Exception as e:
             logger.warning(f"S3 upload failed for {filename}: {e}")
             raise S3UploadError(f"Failed to upload {filename}: {e}", filename, cause=e) from e
+
+    async def upload_raw_message(
+        self,
+        content: bytes,
+        domain: str,
+        message_id: str,
+        received_at: datetime | None = None,
+    ) -> S3RawMessageInfo:
+        """Upload the complete raw MIME message to S3.
+
+        Args:
+            content: Raw RFC 5322 message bytes exactly as received
+            domain: Email domain for key path
+            message_id: Email Message-ID for key path
+            received_at: Receive time used for date partitioning (default: now)
+
+        Returns:
+            S3RawMessageInfo with bucket, key, url, size, and optional presigned_url
+
+        Raises:
+            S3UploadError: If upload fails
+        """
+        key = self._build_raw_key(domain, message_id, received_at)
+        bucket = self.settings.s3_bucket
+
+        try:
+            async with self._session.create_client("s3", **self._client_kwargs()) as client:
+                await client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=content,
+                    ContentType="message/rfc822",
+                )
+
+                presigned_url = None
+                if self.settings.s3_presigned_urls:
+                    presigned_url = await client.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": bucket, "Key": key},
+                        ExpiresIn=self.settings.s3_presigned_url_expiry,
+                    )
+
+                logger.info(f"Preserved raw message {message_id} at s3://{bucket}/{key}")
+
+                return S3RawMessageInfo(
+                    bucket=bucket,
+                    key=key,
+                    url=self._build_url(key),
+                    size=len(content),
+                    presigned_url=presigned_url,
+                )
+
+        except Exception as e:
+            logger.warning(f"S3 raw message upload failed for {message_id}: {e}")
+            raise S3UploadError(
+                f"Failed to preserve raw message {message_id}: {e}", key, cause=e
+            ) from e
