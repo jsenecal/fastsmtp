@@ -2,7 +2,7 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Response
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
@@ -11,6 +11,7 @@ from fastsmtp.api.router import api_router
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.session import close_engine
 from fastsmtp.metrics import MetricsMiddleware
+from fastsmtp.metrics.access import require_metrics_access
 from fastsmtp.middleware import RateLimitMiddleware, RequestLoggingMiddleware
 
 
@@ -69,7 +70,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(api_router)
 
     # Add Prometheus metrics endpoint at root level
-    @app.get("/metrics", include_in_schema=False)
+    @app.get(
+        "/metrics",
+        include_in_schema=False,
+        dependencies=[Depends(require_metrics_access)],
+    )
     async def metrics() -> Response:
         """Expose Prometheus metrics."""
         return Response(

@@ -19,6 +19,7 @@ A TLS-capable, async SMTP server that receives emails and forwards them to webho
 - **REST API**: Full management API with OpenAPI documentation
 - **Multi-tenant**: Domain-based isolation with role-based access control
 - **Rate Limiting**: Configurable limits for both API and SMTP (per-IP connection/message limits)
+- **Prometheus Metrics**: `/metrics` endpoint with SMTP, webhook, queue and auth metrics, with optional IP allowlisting
 - **Security**: Webhook header encryption at rest, SSRF protection for webhook URLs
 - **Queue Backpressure**: Configurable limits to prevent unbounded queue growth
 - **Automatic Cleanup**: Background worker for delivery log retention management

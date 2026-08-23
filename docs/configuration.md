@@ -142,6 +142,24 @@ export FASTSMTP_PRESERVE_RAW_MESSAGE=true
     rule with `422` when S3 is not configured, so a flag can never be stored that would
     silently do nothing.
 
+## Metrics Endpoint Access
+
+`GET /metrics` is unauthenticated and excluded from rate limiting. These settings
+restrict who may scrape it. Both accept bare addresses and CIDR prefixes, in
+either address family, and malformed entries are rejected at startup.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_METRICS_ALLOWED_IPS` | *(empty)* | Addresses allowed to scrape `/metrics`. Empty leaves it unrestricted |
+| `FASTSMTP_METRICS_TRUSTED_PROXIES` | *(empty)* | Proxies whose `X-Forwarded-For` may be trusted. Empty means the header is never trusted |
+
+```bash
+export FASTSMTP_METRICS_ALLOWED_IPS='["10.0.0.0/8","192.0.2.5"]'
+```
+
+See [Monitoring](monitoring.md) for the metric reference, scrape configuration,
+and the reverse-proxy caveats.
+
 ## Security
 
 | Variable | Default | Description |

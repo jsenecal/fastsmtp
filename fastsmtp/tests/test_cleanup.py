@@ -60,23 +60,25 @@ class TestCleanupSettings:
     def test_retention_days_from_env(self, monkeypatch):
         """Test retention days can be set via environment."""
         monkeypatch.setenv("FASTSMTP_DELIVERY_LOG_RETENTION_DAYS", "30")
-        from importlib import reload
 
-        import fastsmtp.config
-
-        reload(fastsmtp.config)
-        settings = fastsmtp.config.Settings(root_api_key="test123")
+        # No reload: pydantic-settings reads the environment when a Settings
+        # instance is constructed. Reloading fastsmtp.config would rebind
+        # get_settings to a new function object, so every module that imported
+        # it keeps the old one and FastAPI dependency_overrides stop matching -
+        # silently, in whichever test module happens to run next.
+        settings = Settings(root_api_key="test123")
         assert settings.delivery_log_retention_days == 30
 
     def test_cleanup_can_be_disabled(self, monkeypatch):
         """Test cleanup can be disabled via environment."""
         monkeypatch.setenv("FASTSMTP_DELIVERY_LOG_CLEANUP_ENABLED", "false")
-        from importlib import reload
 
-        import fastsmtp.config
-
-        reload(fastsmtp.config)
-        settings = fastsmtp.config.Settings(root_api_key="test123")
+        # No reload: pydantic-settings reads the environment when a Settings
+        # instance is constructed. Reloading fastsmtp.config would rebind
+        # get_settings to a new function object, so every module that imported
+        # it keeps the old one and FastAPI dependency_overrides stop matching -
+        # silently, in whichever test module happens to run next.
+        settings = Settings(root_api_key="test123")
         assert settings.delivery_log_cleanup_enabled is False
 
 

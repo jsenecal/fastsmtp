@@ -135,6 +135,12 @@ def serve(
                 host=settings.api_host,
                 port=settings.api_port,
                 log_level="info",
+                # uvicorn's proxy_headers default rewrites the peer address from
+                # the leftmost X-Forwarded-For entry, which the client controls.
+                # FastSMTP resolves that header itself, gated on
+                # metrics_trusted_proxies, so the raw peer must reach the app
+                # intact - otherwise the metrics allowlist checks a forged value.
+                proxy_headers=False,
             )
             uvicorn_server = uvicorn.Server(config)
             tasks.append(asyncio.create_task(uvicorn_server.serve()))
