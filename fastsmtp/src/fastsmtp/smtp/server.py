@@ -34,8 +34,32 @@ from fastsmtp.metrics.definitions import (
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import EmailAuthResult, validate_email_auth
 from fastsmtp.storage.raw_message import RawMessagePreserver, should_preserve_raw
+from fastsmtp.storage.s3 import sanitize_key_component
 
 logger = logging.getLogger(__name__)
+
+
+def key_safe_message_id(raw_message_id: str | None) -> str:
+    """Return a Message-ID usable as an S3 key component, generating one if not.
+
+    Both S3 key paths -- the raw archive (``_build_raw_key``) and the attachment
+    prefix (``_build_key``) -- run the Message-ID through
+    ``sanitize_key_component``, whose fallback is a single shared literal. So a
+    header that is present but degenerate (``<>``, ``<  >``, ``""``) is truthy,
+    survives a "did we get one?" check, and *then* collapses to that literal --
+    putting every such message at the same key, where S3's last-write-wins
+    silently destroys the previous one.
+
+    That is invisible under ``preserve_raw_required``, whose promise is "the
+    archive exists or the transaction rolls back": an overwrite is a *successful*
+    PUT, so the promise is kept while the data is gone.
+
+    Testing truthiness is therefore not enough -- the question is whether
+    anything survives sanitisation.
+    """
+    if raw_message_id and sanitize_key_component(raw_message_id, fallback=""):
+        return raw_message_id
+    return f"<{uuid.uuid4()}@fastsmtp>"
 
 
 async def lookup_recipient(
@@ -230,8 +254,8 @@ class FastSMTPHandler:
             SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
             return "550 Failed to parse message"
 
-        # Get Message-ID (use UUID if not present for reliable deduplication)
-        message_id = message.get("Message-ID") or f"<{uuid.uuid4()}@fastsmtp>"
+        # Get Message-ID (use UUID if unusable, for reliable deduplication)
+        message_id = key_safe_message_id(message.get("Message-ID"))
 
         # Run email authentication
         auth_result = await validate_email_auth(
@@ -428,9 +452,9 @@ async def extract_email_payload(
         domain: Email domain for S3 key path
         message_id: Message ID for the S3 key path; falls back to the
             Message-ID header, then a generated UUID, so messages without a
-            Message-ID never share (and overwrite) the same S3 key prefix
+            usable Message-ID never share (and overwrite) the same S3 key prefix
     """
-    s3_message_id = message_id or message.get("Message-ID") or f"<{uuid.uuid4()}@fastsmtp>"
+    s3_message_id = key_safe_message_id(message_id or message.get("Message-ID"))
     from typing import Any
 
     settings = settings or get_settings()
