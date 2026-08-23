@@ -37,19 +37,50 @@ def short_id(value: Any) -> str:
     return field(str(value)[:8] + "...")
 
 
+def _parse_datetime(value: str) -> datetime | None:
+    """Parse a server timestamp string, or ``None`` when it is not ISO 8601."""
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def format_datetime(dt: str | datetime | None) -> str:
     """Format a datetime for display."""
     if dt is None:
         return "-"
     if isinstance(dt, str):
-        try:
-            parsed = datetime.fromisoformat(dt.replace("Z", "+00:00"))
-        except ValueError:
+        parsed = _parse_datetime(dt)
+        if parsed is None:
             # Not a timestamp we understand -- show the server's text literally.
             return escape(dt)
     else:
         parsed = dt
     return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_expiry(expires: str | datetime | None) -> str:
+    """Render an API key's expiry as a fully-styled cell.
+
+    Shared by ``print_api_keys_table`` and ``print_api_key`` so the two views
+    cannot drift. ``None`` means the key never expires. The timestamp is parsed
+    once and reused for both the expired-vs-not comparison and the display; a
+    value the server sends that is not a timestamp is shown literally (escaped,
+    like ``format_datetime``'s fallback) with no expiry styling, instead of
+    crashing the command.
+    """
+    if not expires:
+        return "[dim]Never[/dim]"
+    if isinstance(expires, str):
+        parsed = _parse_datetime(expires)
+        if parsed is None:
+            return field(expires)
+    else:
+        parsed = expires
+    formatted = format_datetime(parsed)
+    if parsed < datetime.now(parsed.tzinfo):
+        return f"[red]{formatted}[/red]"
+    return formatted
 
 
 def truncate(text: str | None, max_length: int = 50) -> str:
@@ -222,21 +253,11 @@ def print_api_keys_table(keys: list[dict]) -> None:
     table.add_column("Created")
 
     for key in keys:
-        expires = key.get("expires_at")
-        if expires:
-            expires_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-            if expires_dt < datetime.now(expires_dt.tzinfo):
-                expires_str = f"[red]{format_datetime(expires)}[/red]"
-            else:
-                expires_str = format_datetime(expires)
-        else:
-            expires_str = "[dim]Never[/dim]"
-
         table.add_row(
             short_id(key.get("id")),
             field(key.get("name")),
             field(truncate(", ".join(key.get("scopes", [])), 30), placeholder="all"),
-            expires_str,
+            _format_expiry(key.get("expires_at")),
             format_datetime(key.get("last_used_at")) if key.get("last_used_at") else "-",
             format_datetime(key.get("created_at")),
         )
@@ -253,7 +274,7 @@ def print_api_key(key: dict, show_secret: bool = False) -> None:
     table.add_row("ID", field(key.get("id")))
     table.add_row("Name", field(key.get("name")))
     table.add_row("Scopes", field(", ".join(key.get("scopes", [])), placeholder="all"))
-    table.add_row("Expires", format_datetime(key.get("expires_at")) or "Never")
+    table.add_row("Expires", _format_expiry(key.get("expires_at")))
     table.add_row("Created", format_datetime(key.get("created_at")))
 
     if show_secret and key.get("key"):
