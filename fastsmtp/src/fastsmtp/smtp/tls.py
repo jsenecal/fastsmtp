@@ -133,11 +133,10 @@ def create_tls_context(
         keyfile=str(key_path),
     )
 
-    # Set secure options
-    context.options |= ssl.OP_NO_SSLv2
-    context.options |= ssl.OP_NO_SSLv3
-    context.options |= ssl.OP_NO_TLSv1
-    context.options |= ssl.OP_NO_TLSv1_1
+    # Refuse everything below TLS 1.2. This states the floor once instead of
+    # subtracting SSLv2/SSLv3/TLSv1/TLSv1.1 one option at a time, and the
+    # ssl.OP_NO_SSL*/ssl.OP_NO_TLS* constants that did that are deprecated.
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
 
     # Set cipher suites (prefer modern ciphers)
     context.set_ciphers("ECDHE+AESGCM:DHE+AESGCM:ECDHE+CHACHA20:DHE+CHACHA20:!aNULL:!MD5:!DSS")

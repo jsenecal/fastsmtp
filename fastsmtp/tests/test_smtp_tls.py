@@ -2,9 +2,12 @@
 
 import asyncio
 import os
+import socket
 import ssl
 import tempfile
+import threading
 import time
+import warnings
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,72 @@ from fastsmtp.smtp.tls import (
     get_tls_context_from_settings,
     validate_tls_config,
 )
+
+HandshakeOutcome = str | BaseException | None
+
+
+def run_handshake(
+    server_context: ssl.SSLContext, client_version: ssl.TLSVersion
+) -> tuple[HandshakeOutcome, HandshakeOutcome]:
+    """Drive one real TLS handshake against ``server_context`` over a loopback socket.
+
+    The client is pinned to ``client_version`` exactly, so the server either
+    accepts that version or refuses the connection.
+
+    Returns the outcome of each side as ``(client, server)``: the negotiated
+    protocol name on success, or the exception that side raised on failure.
+    """
+    client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_context.check_hostname = False
+    client_context.verify_mode = ssl.CERT_NONE
+    # OpenSSL's default security level refuses the cipher suites TLS 1.0/1.1
+    # need, so without this the client would give up before the server ever
+    # saw the offer and the test would prove nothing about the server.
+    client_context.set_ciphers("ALL:@SECLEVEL=0")
+    with warnings.catch_warnings():
+        # ssl.TLSVersion.TLSv1/TLSv1_1 are deprecated in their own right;
+        # asking for one is the whole point here.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        client_context.minimum_version = client_version
+        client_context.maximum_version = client_version
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(10)
+
+    server_outcome: HandshakeOutcome = None
+
+    def serve() -> None:
+        nonlocal server_outcome
+        try:
+            conn, _ = listener.accept()
+            conn.settimeout(10)
+            with server_context.wrap_socket(conn, server_side=True) as tls_conn:
+                server_outcome = tls_conn.version()
+        except Exception as exc:
+            server_outcome = exc
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+
+    client_outcome: HandshakeOutcome = None
+    # Both sides return their failure rather than raising, so a test can assert
+    # on which side refused.
+    try:
+        with (
+            socket.create_connection(listener.getsockname(), timeout=10) as sock,
+            client_context.wrap_socket(sock, server_hostname="localhost") as tls_sock,
+        ):
+            client_outcome = tls_sock.version()
+    except Exception as exc:
+        client_outcome = exc
+    finally:
+        thread.join(timeout=10)
+        listener.close()
+
+    return client_outcome, server_outcome
 
 
 class TestCreateTLSContext:
@@ -85,6 +154,55 @@ class TestCreateTLSContext:
 
             with pytest.raises(ssl.SSLError):
                 create_tls_context(cert_path, key_path)
+
+    def test_create_tls_context_minimum_version_is_tls_1_2(self, temp_cert_files):
+        """Test the context is pinned to TLS 1.2 as its floor, with no ceiling."""
+        cert_path, key_path = temp_cert_files
+
+        context = create_tls_context(cert_path, key_path)
+
+        assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert context.maximum_version == ssl.TLSVersion.MAXIMUM_SUPPORTED
+
+    @pytest.mark.parametrize(
+        "client_version",
+        [ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1],
+        ids=["tlsv1_0", "tlsv1_1"],
+    )
+    def test_create_tls_context_refuses_legacy_tls(self, temp_cert_files, client_version):
+        """Test a client offering only TLS 1.0 or 1.1 is refused by the server."""
+        cert_path, key_path = temp_cert_files
+        context = create_tls_context(cert_path, key_path)
+
+        client_outcome, server_outcome = run_handshake(context, client_version)
+
+        # A client-side failure alone would prove nothing -- it could mean the
+        # client never managed to make the offer. Pinning the server's reason to
+        # UNSUPPORTED_PROTOCOL is what says the offer arrived and was refused
+        # for its version; anything else (NO_PROTOCOLS_AVAILABLE on the client,
+        # UNEXPECTED_MESSAGE on the server) means this test stopped testing the
+        # server and needs fixing rather than relaxing.
+        assert isinstance(server_outcome, ssl.SSLError)
+        assert server_outcome.reason == "UNSUPPORTED_PROTOCOL"
+        assert isinstance(client_outcome, ssl.SSLError)
+
+    @pytest.mark.parametrize(
+        ("client_version", "expected"),
+        [
+            (ssl.TLSVersion.TLSv1_2, "TLSv1.2"),
+            (ssl.TLSVersion.TLSv1_3, "TLSv1.3"),
+        ],
+        ids=["tlsv1_2", "tlsv1_3"],
+    )
+    def test_create_tls_context_accepts_modern_tls(self, temp_cert_files, client_version, expected):
+        """Test TLS 1.2 and 1.3 clients still complete a handshake."""
+        cert_path, key_path = temp_cert_files
+        context = create_tls_context(cert_path, key_path)
+
+        client_outcome, server_outcome = run_handshake(context, client_version)
+
+        assert client_outcome == expected
+        assert server_outcome == expected
 
 
 class TestGetTLSContextFromSettings:
