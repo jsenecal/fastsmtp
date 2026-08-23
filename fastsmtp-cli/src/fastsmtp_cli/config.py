@@ -2,16 +2,13 @@
 
 import contextlib
 import os
+
+# tomllib is stdlib from 3.11 and this package requires >=3.12, so no fallback.
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import tomli_w
-
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib
-
 from pydantic import BaseModel, Field
 
 DEFAULT_CONFIG_DIR = Path.home() / ".fastsmtp"
@@ -125,10 +122,9 @@ def set_profile(
     config = load_config()
 
     # Get existing profile or create new one
-    if name in config.profiles:
-        profile_data = config.profiles[name].model_dump()
-    else:
-        profile_data: dict[str, Any] = {}
+    profile_data: dict[str, Any] = (
+        config.profiles[name].model_dump() if name in config.profiles else {}
+    )
 
     # Update with provided values
     if url is not None:

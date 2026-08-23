@@ -1,5 +1,7 @@
 """Tests for SMTP email authentication validation to improve coverage."""
 
+import asyncio
+
 import pytest
 from fastsmtp.smtp.validation import (
     RESULT_FAIL,
@@ -257,6 +259,86 @@ Test body.
         assert isinstance(result, EmailAuthResult)
         assert result.dkim_result == RESULT_NONE
         assert result.spf_result == RESULT_NONE
+
+    @pytest.mark.asyncio
+    async def test_validate_email_auth_dkim_exception_is_temperror(self, monkeypatch):
+        """A DKIM failure in the parallel path degrades to temperror, SPF unaffected."""
+
+        async def boom(_message):
+            raise RuntimeError("dkim exploded")
+
+        async def ok_spf(_client_ip, _mail_from, _helo):
+            return RESULT_PASS, "example.com"
+
+        monkeypatch.setattr("fastsmtp.smtp.validation.verify_dkim", boom)
+        monkeypatch.setattr("fastsmtp.smtp.validation.verify_spf", ok_spf)
+
+        result = await validate_email_auth(
+            message=b"From: sender@example.com\r\n\r\nbody",
+            client_ip="127.0.0.1",
+            mail_from="sender@example.com",
+            helo="localhost",
+        )
+
+        assert result.dkim_result == RESULT_TEMPERROR
+        assert result.dkim_domain is None
+        assert result.dkim_selector is None
+        assert result.spf_result == RESULT_PASS
+        assert result.spf_domain == "example.com"
+
+    @pytest.mark.asyncio
+    async def test_validate_email_auth_spf_exception_is_temperror(self, monkeypatch):
+        """An SPF failure in the parallel path degrades to temperror, DKIM unaffected."""
+
+        async def ok_dkim(_message):
+            return RESULT_PASS, "example.com", "selector1"
+
+        async def boom(_client_ip, _mail_from, _helo):
+            raise RuntimeError("spf exploded")
+
+        monkeypatch.setattr("fastsmtp.smtp.validation.verify_dkim", ok_dkim)
+        monkeypatch.setattr("fastsmtp.smtp.validation.verify_spf", boom)
+
+        result = await validate_email_auth(
+            message=b"From: sender@example.com\r\n\r\nbody",
+            client_ip="127.0.0.1",
+            mail_from="sender@example.com",
+            helo="localhost",
+        )
+
+        assert result.dkim_result == RESULT_PASS
+        assert result.dkim_domain == "example.com"
+        assert result.dkim_selector == "selector1"
+        assert result.spf_result == RESULT_TEMPERROR
+        assert result.spf_domain is None
+
+    @pytest.mark.asyncio
+    async def test_validate_email_auth_propagates_cancellation(self, monkeypatch):
+        """Cancellation must propagate, not be unpacked as if it were a result.
+
+        ``asyncio.gather(..., return_exceptions=True)`` hands back a
+        ``CancelledError`` *instance* for a cancelled child instead of raising,
+        so the parallel path has to recognise ``BaseException`` and not just
+        ``Exception``. The single-validator paths already let it through via
+        ``except Exception``.
+        """
+
+        async def cancelled(_message):
+            raise asyncio.CancelledError
+
+        async def ok_spf(_client_ip, _mail_from, _helo):
+            return RESULT_PASS, "example.com"
+
+        monkeypatch.setattr("fastsmtp.smtp.validation.verify_dkim", cancelled)
+        monkeypatch.setattr("fastsmtp.smtp.validation.verify_spf", ok_spf)
+
+        with pytest.raises(asyncio.CancelledError):
+            await validate_email_auth(
+                message=b"From: sender@example.com\r\n\r\nbody",
+                client_ip="127.0.0.1",
+                mail_from="sender@example.com",
+                helo="localhost",
+            )
 
 
 class TestDKIMEdgeCases:

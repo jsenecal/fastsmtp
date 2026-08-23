@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from functools import partial
+from typing import TypeVar
 
 import dkim
 import spf
@@ -159,6 +160,26 @@ async def verify_spf(client_ip: str, mail_from: str, helo: str) -> tuple[str, st
     return await loop.run_in_executor(None, partial(_verify_spf_sync, client_ip, mail_from, helo))
 
 
+_T = TypeVar("_T")
+
+
+def _result_or_temperror(raw: _T | BaseException, label: str, temperror: _T) -> _T:
+    """Unwrap one ``asyncio.gather(..., return_exceptions=True)`` slot.
+
+    gather hands back the *instance* for a failed child rather than raising, and
+    for a cancelled child that instance is a ``CancelledError`` -- a
+    ``BaseException``, not an ``Exception``. Cancellation is re-raised so it
+    keeps propagating, matching the ``except Exception`` of the single-validator
+    paths below; ordinary failures degrade to a temperror.
+    """
+    if isinstance(raw, BaseException):
+        if not isinstance(raw, Exception):
+            raise raw
+        logger.error(f"{label} validation exception: {raw}")
+        return temperror
+    return raw
+
+
 async def validate_email_auth(
     message: bytes,
     client_ip: str,
@@ -193,23 +214,12 @@ async def validate_email_auth(
 
     if dkim_coro and spf_coro:
         # Run both in parallel using gather (safer than create_task in mixed event loop contexts)
-        results = await asyncio.gather(dkim_coro, spf_coro, return_exceptions=True)
+        dkim_raw, spf_raw = await asyncio.gather(dkim_coro, spf_coro, return_exceptions=True)
 
-        # Process DKIM result
-        dkim_raw = results[0]
-        if isinstance(dkim_raw, Exception):
-            logger.error(f"DKIM validation exception: {dkim_raw}")
-            dkim_result, dkim_domain, dkim_selector = RESULT_TEMPERROR, None, None
-        else:
-            dkim_result, dkim_domain, dkim_selector = dkim_raw
-
-        # Process SPF result
-        spf_raw = results[1]
-        if isinstance(spf_raw, Exception):
-            logger.error(f"SPF validation exception: {spf_raw}")
-            spf_result, spf_domain = RESULT_TEMPERROR, None
-        else:
-            spf_result, spf_domain = spf_raw
+        dkim_result, dkim_domain, dkim_selector = _result_or_temperror(
+            dkim_raw, "DKIM", (RESULT_TEMPERROR, None, None)
+        )
+        spf_result, spf_domain = _result_or_temperror(spf_raw, "SPF", (RESULT_TEMPERROR, None))
     elif dkim_coro:
         try:
             dkim_result, dkim_domain, dkim_selector = await dkim_coro

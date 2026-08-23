@@ -7,6 +7,7 @@ import pytest
 from fastsmtp.config import Settings
 from fastsmtp.storage.s3 import (
     S3AttachmentInfo,
+    S3ConfigurationError,
     S3Storage,
     S3UploadError,
     sanitize_key_component,
@@ -393,3 +394,44 @@ class TestRawMessageUpload:
                 )
 
             assert isinstance(exc_info.value.cause, ConnectionError)
+
+
+class TestS3StorageConfiguration:
+    """Tests for the configuration invariant S3Storage relies on."""
+
+    def test_unconfigured_settings_rejected_with_missing_names(self):
+        """Constructing without credentials fails fast and names what is missing.
+
+        ``validate_s3_config`` only rejects at startup when a feature that needs
+        S3 is switched on globally. Raw preservation is also enabled per domain
+        and per rule in the database, so a row can ask for S3 on a process that
+        has none -- the runtime path has to refuse rather than build a client
+        with a ``None`` bucket.
+        """
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+        )
+        with pytest.raises(S3ConfigurationError) as exc_info:
+            S3Storage(settings)
+
+        message = str(exc_info.value)
+        assert "s3_bucket" in message
+        assert "s3_access_key" in message
+        assert "s3_secret_key" in message
+
+    def test_partial_configuration_names_only_the_gap(self):
+        """Only the settings actually absent are reported."""
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="test_key_12345",
+            s3_bucket="test-bucket",
+            s3_access_key="test-access-key",
+        )
+        with pytest.raises(S3ConfigurationError) as exc_info:
+            S3Storage(settings)
+
+        message = str(exc_info.value)
+        assert "s3_secret_key" in message
+        assert "s3_bucket" not in message
+        assert "s3_access_key" not in message

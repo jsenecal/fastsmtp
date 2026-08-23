@@ -1,10 +1,14 @@
 """Tests for webhook URL validation (SSRF protection)."""
 
-from unittest.mock import patch
+import asyncio
+import socket
+from unittest.mock import AsyncMock, patch
 
+import httpcore
 import pytest
 from fastsmtp.webhook.url_validator import (
     SSRFError,
+    SSRFSafeAsyncConnectionPool,
     is_host_in_allowlist,
     is_ip_blocked,
     is_url_safe,
@@ -267,3 +271,70 @@ class TestIsUrlSafe:
         is_safe, error = is_url_safe("not-a-url", resolve_dns=False)
         assert is_safe is False
         assert error is not None
+
+
+class TestSSRFSafeAsyncConnectionPool:
+    """Tests for the connect-time (DNS-rebinding) half of SSRF protection."""
+
+    @staticmethod
+    def _request(url: str) -> httpcore.Request:
+        return httpcore.Request("POST", url)
+
+    @pytest.mark.asyncio
+    async def test_blocked_hostname_rejected(self):
+        """A blocked hostname is refused before the connection is made."""
+        pool = SSRFSafeAsyncConnectionPool()
+        with pytest.raises(SSRFError) as exc_info:
+            await pool.handle_async_request(self._request("http://localhost/hook"))
+        # httpcore stores the host as bytes; the message must not read b'localhost'.
+        assert str(exc_info.value) == "Hostname 'localhost' is blocked"
+
+    @pytest.mark.asyncio
+    async def test_blocked_ip_literal_rejected(self):
+        """An IP literal in a blocked range is refused, rendered as text."""
+        pool = SSRFSafeAsyncConnectionPool()
+        with pytest.raises(SSRFError) as exc_info:
+            await pool.handle_async_request(self._request("http://169.254.169.254/latest"))
+        assert str(exc_info.value) == "IP address '169.254.169.254' is in a blocked range"
+
+    @pytest.mark.asyncio
+    async def test_resolved_blocked_ip_rejected(self):
+        """A hostname resolving to a blocked IP is refused, rendered as text."""
+        pool = SSRFSafeAsyncConnectionPool()
+
+        async def fake_getaddrinfo(*args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+
+        with (
+            patch.object(asyncio.get_running_loop(), "getaddrinfo", fake_getaddrinfo),
+            pytest.raises(SSRFError) as exc_info,
+        ):
+            await pool.handle_async_request(self._request("http://rebind.example.com/hook"))
+        assert str(exc_info.value) == (
+            "Hostname 'rebind.example.com' resolves to blocked IP '127.0.0.1'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_host_rejected(self):
+        """A request with no host is refused rather than reaching the socket."""
+        pool = SSRFSafeAsyncConnectionPool()
+        request = httpcore.Request("POST", httpcore.URL(scheme=b"http", host=b"", target=b"/hook"))
+        with pytest.raises(SSRFError, match="Request has no host"):
+            await pool.handle_async_request(request)
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_host_bypasses_checks(self):
+        """An allowlisted internal domain skips the blocklist and reaches the pool."""
+        pool = SSRFSafeAsyncConnectionPool(allowed_internal_domains=["internal.test"])
+        sentinel = object()
+
+        with patch.object(
+            httpcore.AsyncConnectionPool,
+            "handle_async_request",
+            new=AsyncMock(return_value=sentinel),
+        ) as mock_super:
+            result = await pool.handle_async_request(self._request("http://internal.test/hook"))
+
+        assert result is sentinel
+        # The allowlist check must run on decoded text, not on b'internal.test'.
+        assert mock_super.await_count == 1
