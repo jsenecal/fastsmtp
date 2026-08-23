@@ -17,6 +17,21 @@ uv run ruff check .
 uv run ruff format .
 ```
 
+## Migration tests
+
+Most tests build their schema straight from the models with
+`Base.metadata.create_all`, so the Alembic chain never runs. `fastsmtp/tests/test_migrations.py`
+covers it separately: it applies the chain to a throwaway database, rolls it back to base and
+re-applies it, then diffs the result against `Base.metadata` and fails on any difference. A model
+change merged without its migration fails there instead of on deploy.
+
+Those tests are marked `migrations` and always run in CI. Each one needs its own database and
+shells out to `alembic`, so deselect them when that overhead is not worth it locally:
+
+```bash
+uv run pytest -m "not migrations"
+```
+
 ## Documentation
 
 This site is built with [Zensical](https://zensical.org/). To work on it locally:
