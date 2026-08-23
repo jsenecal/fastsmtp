@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 from fastsmtp.db.models import APIKey, Domain, Recipient, User
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -253,3 +254,73 @@ class TestSoftDeleteMixinIntegrity:
         # Soft delete fields should be present
         assert domain.deleted_at is None
         assert domain.recipients[0].deleted_at is None
+
+
+class TestCatchallIndexWithSoftDelete:
+    """The catch-all unique index must not count soft-deleted rows.
+
+    ``ix_recipients_domain_catchall`` exists to allow at most one *live*
+    catch-all per domain. A tombstoned catch-all (deleted_at set) must not
+    block creating its replacement - deleting a catch-all and creating a new
+    one is a routine admin operation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_catchall_does_not_block_replacement(
+        self, test_session: AsyncSession
+    ):
+        """A replacement catch-all can be created after soft-deleting the old one."""
+        domain = Domain(domain_name="catchall-replace.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+
+        old = Recipient(
+            domain_id=domain.id,
+            local_part=None,
+            webhook_url="https://example.com/old-catchall",
+            is_enabled=True,
+        )
+        test_session.add(old)
+        await test_session.commit()
+
+        old.deleted_at = datetime.now(UTC)
+        await test_session.commit()
+
+        replacement = Recipient(
+            domain_id=domain.id,
+            local_part=None,
+            webhook_url="https://example.com/new-catchall",
+            is_enabled=True,
+        )
+        test_session.add(replacement)
+        await test_session.commit()
+
+        await test_session.refresh(replacement)
+        assert replacement.deleted_at is None
+
+    @pytest.mark.asyncio
+    async def test_second_live_catchall_still_rejected(self, test_session: AsyncSession):
+        """Two live catch-alls for one domain must still violate the index."""
+        domain = Domain(domain_name="catchall-still-unique.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+
+        first = Recipient(
+            domain_id=domain.id,
+            local_part=None,
+            webhook_url="https://example.com/first-catchall",
+            is_enabled=True,
+        )
+        test_session.add(first)
+        await test_session.commit()
+
+        second = Recipient(
+            domain_id=domain.id,
+            local_part=None,
+            webhook_url="https://example.com/second-catchall",
+            is_enabled=True,
+        )
+        test_session.add(second)
+        with pytest.raises(IntegrityError):
+            await test_session.commit()
+        await test_session.rollback()

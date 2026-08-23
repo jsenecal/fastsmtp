@@ -13,6 +13,7 @@ from typing import Annotated
 import typer
 
 from fastsmtp_cli.client import APIError, FastSMTPClient
+from fastsmtp_cli.commands.options import clearable_str
 from fastsmtp_cli.output import (
     print_error,
     print_success,
@@ -91,7 +92,7 @@ def update_user(
     ] = None,
     email: Annotated[
         str | None,
-        typer.Option("--email", "-e", help="New email address"),
+        typer.Option("--email", "-e", help="New email address; pass '' to clear it"),
     ] = None,
     active: Annotated[
         bool | None,
@@ -113,7 +114,7 @@ def update_user(
             user = client.update_user(
                 user_id=user_id,
                 username=username,
-                email=email,
+                email=clearable_str(email),
                 is_active=active,
                 is_superuser=superuser,
             )

@@ -271,14 +271,13 @@ class TestSMTPServer:
 
     @pytest.fixture
     def test_settings(self):
-        """Create test settings."""
+        """Create test settings. Nothing here binds the SMTP ports, so the
+        Settings defaults are fine -- see test_smtp_server_init."""
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_key_12345",
             secret_key="test-secret",
             smtp_host="127.0.0.1",
-            smtp_port=10025,
-            smtp_tls_port=10465,
         )
 
     def test_smtp_server_init(self, test_settings):

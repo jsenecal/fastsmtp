@@ -234,12 +234,14 @@ class Recipient(Base, TimestampMixin, SoftDeleteMixin):
         # Partial unique index to prevent multiple catch-all recipients per domain
         # PostgreSQL allows multiple NULLs in unique constraints, so we need this
         # Use text() and dialect-specific where clauses for cross-database support
+        # Soft-deleted rows are excluded: a tombstoned catch-all must not block
+        # creating its replacement.
         Index(
             "ix_recipients_domain_catchall",
             "domain_id",
             unique=True,
-            postgresql_where=text("local_part IS NULL"),
-            sqlite_where=text("local_part IS NULL"),
+            postgresql_where=text("local_part IS NULL AND deleted_at IS NULL"),
+            sqlite_where=text("local_part IS NULL AND deleted_at IS NULL"),
         ),
     )
 

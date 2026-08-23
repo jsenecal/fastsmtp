@@ -23,6 +23,7 @@ nav = [
     { "Remote CLI (fsmtp)" = "cli/fsmtp.md" },
   ] },
   { "Development" = "development.md" },
+  { "Releasing" = "releasing.md" },
 ]
 
 [project.theme]

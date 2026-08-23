@@ -43,6 +43,10 @@ UNSET = _Unset()
 #: ``None`` resets it to inherit the server-wide default, ``UNSET`` leaves it be.
 NullableBool = bool | None | _Unset
 
+#: A nullable string column on an update call: a string sets it, ``None``
+#: clears it (sent as JSON null), ``UNSET`` leaves it untouched.
+NullableStr = str | None | _Unset
+
 
 def _format_detail(detail: Any) -> str:
     """Render an error ``detail`` payload as a single human-readable string.
@@ -226,15 +230,20 @@ class FastSMTPClient:
         self,
         user_id: UUID | str,
         username: str | None = None,
-        email: str | None = None,
+        email: NullableStr = UNSET,
         is_active: bool | None = None,
         is_superuser: bool | None = None,
     ) -> dict:
-        """Update a user."""
+        """Update a user.
+
+        ``email`` is three-valued: a string sets it, ``None`` clears the
+        column (sent as JSON null), ``UNSET`` leaves it untouched. ``username``
+        is NOT NULL server-side, so it cannot be cleared, only replaced.
+        """
         data: dict[str, Any] = {}
         if username is not None:
             data["username"] = username
-        if email is not None:
+        if not isinstance(email, _Unset):
             data["email"] = email
         if is_active is not None:
             data["is_active"] = is_active
@@ -380,14 +389,19 @@ class FastSMTPClient:
         self,
         domain_id: UUID | str,
         recipient_id: UUID | str,
-        local_part: str | None = None,
+        local_part: NullableStr = UNSET,
         webhook_url: str | None = None,
         is_enabled: bool | None = None,
         webhook_headers: dict | None = None,
     ) -> dict:
-        """Update a recipient."""
+        """Update a recipient.
+
+        ``local_part`` is three-valued: a string sets it, ``None`` clears the
+        column (sent as JSON null) which turns the recipient into the domain's
+        catch-all, ``UNSET`` leaves it untouched.
+        """
         data: dict[str, Any] = {}
-        if local_part is not None:
+        if not isinstance(local_part, _Unset):
             data["local_part"] = local_part
         if webhook_url is not None:
             data["webhook_url"] = webhook_url
@@ -522,11 +536,16 @@ class FastSMTPClient:
         value: str | None = None,
         action: str | None = None,
         case_sensitive: bool | None = None,
-        webhook_url_override: str | None = None,
+        webhook_url_override: NullableStr = UNSET,
         add_tags: list[str] | None = None,
         preserve_raw: bool | None = None,
     ) -> dict:
-        """Update a rule."""
+        """Update a rule.
+
+        ``webhook_url_override`` is three-valued: a string sets it, ``None``
+        clears the override (sent as JSON null) so the rule falls back to the
+        recipient's webhook URL, ``UNSET`` leaves it untouched.
+        """
         data: dict[str, Any] = {}
         if field is not None:
             data["field"] = field
@@ -538,7 +557,7 @@ class FastSMTPClient:
             data["action"] = action
         if case_sensitive is not None:
             data["case_sensitive"] = case_sensitive
-        if webhook_url_override is not None:
+        if not isinstance(webhook_url_override, _Unset):
             data["webhook_url_override"] = webhook_url_override
         if add_tags is not None:
             data["add_tags"] = add_tags

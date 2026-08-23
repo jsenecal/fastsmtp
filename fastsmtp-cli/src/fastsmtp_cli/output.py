@@ -15,6 +15,28 @@ console = Console()
 error_console = Console(stderr=True)
 
 
+def field(value: Any, placeholder: str = "-") -> str:
+    """Render a server-supplied value as literal text.
+
+    Rich parses plain strings as markup, so a value containing square brackets
+    would restyle the output — or crash the command with ``MarkupError`` on an
+    unmatched closing tag. Escaping here keeps server text literal while the
+    markup the formatters build deliberately (``yes_no``, ``tri_state``, the
+    ``status_style`` wrappers) still parses. ``None`` and empty values render
+    as the placeholder.
+    """
+    if value is None or value == "":
+        return placeholder
+    return escape(str(value))
+
+
+def short_id(value: Any) -> str:
+    """Render the first 8 characters of a server identifier."""
+    if value is None or value == "":
+        return "-"
+    return field(str(value)[:8] + "...")
+
+
 def format_datetime(dt: str | datetime | None) -> str:
     """Format a datetime for display."""
     if dt is None:
@@ -23,8 +45,8 @@ def format_datetime(dt: str | datetime | None) -> str:
         try:
             parsed = datetime.fromisoformat(dt.replace("Z", "+00:00"))
         except ValueError:
-            # Not a timestamp we understand -- show it as the server sent it.
-            return dt
+            # Not a timestamp we understand -- show the server's text literally.
+            return escape(dt)
     else:
         parsed = dt
     return parsed.strftime("%Y-%m-%d %H:%M:%S")
@@ -86,17 +108,17 @@ def print_error(message: str) -> None:
 
 def print_success(message: str) -> None:
     """Print a success message."""
-    console.print(f"[green]{message}[/green]")
+    console.print(f"[green]{escape(str(message))}[/green]")
 
 
 def print_warning(message: str) -> None:
     """Print a warning message."""
-    console.print(f"[yellow]{message}[/yellow]")
+    console.print(f"[yellow]{escape(str(message))}[/yellow]")
 
 
 def print_info(message: str) -> None:
     """Print an info message."""
-    console.print(f"[blue]{message}[/blue]")
+    console.print(f"[blue]{escape(str(message))}[/blue]")
 
 
 # Table formatters for different resource types
@@ -108,9 +130,9 @@ def print_health(data: dict) -> None:
     style = status_style(status)
 
     panel = Panel(
-        f"[{style}]Status: {status}[/{style}]\n"
-        f"Version: {data.get('version', 'unknown')}\n"
-        f"Instance: {data.get('instance_id', 'unknown')}",
+        f"[{style}]Status: {field(status)}[/{style}]\n"
+        f"Version: {field(data.get('version', 'unknown'))}\n"
+        f"Instance: {field(data.get('instance_id', 'unknown'))}",
         title="Health Check",
     )
     console.print(panel)
@@ -122,8 +144,8 @@ def print_ready(data: dict) -> None:
     db_status = data.get("database", "unknown")
 
     panel = Panel(
-        f"[{status_style(status)}]Status: {status}[/{status_style(status)}]\n"
-        f"[{status_style(db_status)}]Database: {db_status}[/{status_style(db_status)}]",
+        f"[{status_style(status)}]Status: {field(status)}[/{status_style(status)}]\n"
+        f"[{status_style(db_status)}]Database: {field(db_status)}[/{status_style(db_status)}]",
         title="Readiness Check",
     )
     console.print(panel)
@@ -137,12 +159,12 @@ def print_whoami(data: dict) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value")
 
-    table.add_row("User ID", str(user.get("id", "-")))
-    table.add_row("Username", user.get("username", "-"))
-    table.add_row("Email", user.get("email") or "-")
+    table.add_row("User ID", field(user.get("id")))
+    table.add_row("Username", field(user.get("username")))
+    table.add_row("Email", field(user.get("email")))
     table.add_row("Superuser", yes_no(user.get("is_superuser")))
     table.add_row("Root Key", yes_no(data.get("is_root")))
-    table.add_row("Domains", ", ".join(data.get("domains", [])) or "-")
+    table.add_row("Domains", field(", ".join(data.get("domains", []))))
 
     console.print(Panel(table, title="Current Session"))
 
@@ -160,9 +182,9 @@ def print_users_table(users: list[dict]) -> None:
 
     for user in users:
         table.add_row(
-            str(user.get("id", "-"))[:8] + "...",
-            user.get("username", "-"),
-            user.get("email") or "-",
+            short_id(user.get("id")),
+            field(user.get("username")),
+            field(user.get("email")),
             yes_no(user.get("is_superuser")),
             yes_no(user.get("is_active")),
             format_datetime(user.get("created_at")),
@@ -177,9 +199,9 @@ def print_user(user: dict) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value")
 
-    table.add_row("ID", str(user.get("id", "-")))
-    table.add_row("Username", user.get("username", "-"))
-    table.add_row("Email", user.get("email") or "-")
+    table.add_row("ID", field(user.get("id")))
+    table.add_row("Username", field(user.get("username")))
+    table.add_row("Email", field(user.get("email")))
     table.add_row("Superuser", yes_no(user.get("is_superuser")))
     table.add_row("Active", yes_no(user.get("is_active")))
     table.add_row("Created", format_datetime(user.get("created_at")))
@@ -211,9 +233,9 @@ def print_api_keys_table(keys: list[dict]) -> None:
             expires_str = "[dim]Never[/dim]"
 
         table.add_row(
-            str(key.get("id", "-"))[:8] + "...",
-            key.get("name", "-"),
-            truncate(", ".join(key.get("scopes", [])) or "all", 30),
+            short_id(key.get("id")),
+            field(key.get("name")),
+            field(truncate(", ".join(key.get("scopes", [])), 30), placeholder="all"),
             expires_str,
             format_datetime(key.get("last_used_at")) if key.get("last_used_at") else "-",
             format_datetime(key.get("created_at")),
@@ -228,15 +250,15 @@ def print_api_key(key: dict, show_secret: bool = False) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value")
 
-    table.add_row("ID", str(key.get("id", "-")))
-    table.add_row("Name", key.get("name", "-"))
-    table.add_row("Scopes", ", ".join(key.get("scopes", [])) or "all")
+    table.add_row("ID", field(key.get("id")))
+    table.add_row("Name", field(key.get("name")))
+    table.add_row("Scopes", field(", ".join(key.get("scopes", [])), placeholder="all"))
     table.add_row("Expires", format_datetime(key.get("expires_at")) or "Never")
     table.add_row("Created", format_datetime(key.get("created_at")))
 
     if show_secret and key.get("key"):
         table.add_row("", "")
-        table.add_row("[bold yellow]API Key[/bold yellow]", f"[bold]{key['key']}[/bold]")
+        table.add_row("[bold yellow]API Key[/bold yellow]", f"[bold]{escape(key['key'])}[/bold]")
         table.add_row("", "[dim]Save this key - it won't be shown again![/dim]")
 
     console.print(Panel(table, title="API Key"))
@@ -256,8 +278,8 @@ def print_domains_table(domains: list[dict]) -> None:
 
     for domain in domains:
         table.add_row(
-            str(domain.get("id", "-"))[:8] + "...",
-            domain.get("domain_name", "-"),
+            short_id(domain.get("id")),
+            field(domain.get("domain_name")),
             yes_no(domain.get("is_enabled")),
             tri_state(domain.get("verify_dkim")),
             tri_state(domain.get("verify_spf")),
@@ -274,8 +296,8 @@ def print_domain(domain: dict) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value")
 
-    table.add_row("ID", str(domain.get("id", "-")))
-    table.add_row("Domain", domain.get("domain_name", "-"))
+    table.add_row("ID", field(domain.get("id")))
+    table.add_row("Domain", field(domain.get("domain_name")))
     table.add_row("Enabled", yes_no(domain.get("is_enabled")))
     table.add_row("Verify DKIM", tri_state(domain.get("verify_dkim")))
     table.add_row("Verify SPF", tri_state(domain.get("verify_spf")))
@@ -302,9 +324,9 @@ def print_members_table(members: list[dict]) -> None:
         role_style = "yellow" if role == "owner" else "cyan" if role == "admin" else "white"
 
         table.add_row(
-            str(member.get("user_id", "-"))[:8] + "...",
-            member.get("username") or "-",
-            f"[{role_style}]{role}[/{role_style}]",
+            short_id(member.get("user_id")),
+            field(member.get("username")),
+            f"[{role_style}]{field(role)}[/{role_style}]",
             format_datetime(member.get("created_at")),
         )
 
@@ -323,13 +345,13 @@ def print_recipients_table(recipients: list[dict]) -> None:
 
     for recipient in recipients:
         local_part = recipient.get("local_part")
-        address = local_part if local_part else "[dim]*[/dim] (catch-all)"
+        address = field(local_part) if local_part else "[dim]*[/dim] (catch-all)"
 
         table.add_row(
-            str(recipient.get("id", "-"))[:8] + "...",
+            short_id(recipient.get("id")),
             address,
-            truncate(recipient.get("webhook_url", "-"), 40),
-            truncate(format_mapping(recipient.get("webhook_headers")), 20),
+            field(truncate(recipient.get("webhook_url"), 40)),
+            field(truncate(format_mapping(recipient.get("webhook_headers")), 20)),
             yes_no(recipient.get("is_enabled")),
         )
 
@@ -344,10 +366,10 @@ def print_recipient(recipient: dict) -> None:
 
     local_part = recipient.get("local_part")
 
-    table.add_row("ID", str(recipient.get("id", "-")))
-    table.add_row("Local Part", local_part if local_part else "[dim]* (catch-all)[/dim]")
-    table.add_row("Webhook URL", recipient.get("webhook_url", "-"))
-    table.add_row("Webhook Headers", format_mapping(recipient.get("webhook_headers")))
+    table.add_row("ID", field(recipient.get("id")))
+    table.add_row("Local Part", field(local_part) if local_part else "[dim]* (catch-all)[/dim]")
+    table.add_row("Webhook URL", field(recipient.get("webhook_url")))
+    table.add_row("Webhook Headers", field(format_mapping(recipient.get("webhook_headers"))))
     table.add_row("Enabled", yes_no(recipient.get("is_enabled")))
     table.add_row("Created", format_datetime(recipient.get("created_at")))
 
@@ -367,8 +389,8 @@ def print_rulesets_table(rulesets: list[dict]) -> None:
 
     for ruleset in rulesets:
         table.add_row(
-            str(ruleset.get("id", "-"))[:8] + "...",
-            ruleset.get("name", "-"),
+            short_id(ruleset.get("id")),
+            field(ruleset.get("name")),
             str(ruleset.get("priority", 0)),
             yes_no(ruleset.get("stop_on_match")),
             str(len(ruleset.get("rules", []))),
@@ -384,8 +406,8 @@ def print_ruleset(ruleset: dict) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value")
 
-    table.add_row("ID", str(ruleset.get("id", "-")))
-    table.add_row("Name", ruleset.get("name", "-"))
+    table.add_row("ID", field(ruleset.get("id")))
+    table.add_row("Name", field(ruleset.get("name")))
     table.add_row("Priority", str(ruleset.get("priority", 0)))
     table.add_row("Stop on Match", yes_no(ruleset.get("stop_on_match")))
     table.add_row("Enabled", yes_no(ruleset.get("is_enabled")))
@@ -411,17 +433,17 @@ def print_rules_table(rules: list[dict]) -> None:
     table.add_column("Preserve Raw")
 
     for rule in rules:
-        field = rule.get("field", "-")
+        field_name = rule.get("field", "-")
         op = rule.get("operator", "-")
         val = rule.get("value", "-")
-        condition = f"{field} {op} '{val}'"
+        condition = f"{field_name} {op} '{val}'"
 
         table.add_row(
-            str(rule.get("id", "-"))[:8] + "...",
+            short_id(rule.get("id")),
             str(rule.get("order", 0)),
-            truncate(condition, 35),
-            rule.get("action", "-"),
-            ", ".join(rule.get("add_tags") or []) or "-",
+            field(truncate(condition, 35)),
+            field(rule.get("action")),
+            field(", ".join(rule.get("add_tags") or [])),
             yes_no(rule.get("preserve_raw")),
         )
 
@@ -434,16 +456,16 @@ def print_rule(rule: dict) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value")
 
-    table.add_row("ID", str(rule.get("id", "-")))
-    table.add_row("RuleSet ID", str(rule.get("ruleset_id", "-")))
+    table.add_row("ID", field(rule.get("id")))
+    table.add_row("RuleSet ID", field(rule.get("ruleset_id")))
     table.add_row("Order", str(rule.get("order", 0)))
-    table.add_row("Field", rule.get("field", "-"))
-    table.add_row("Operator", rule.get("operator", "-"))
-    table.add_row("Value", rule.get("value", "-"))
+    table.add_row("Field", field(rule.get("field")))
+    table.add_row("Operator", field(rule.get("operator")))
+    table.add_row("Value", field(rule.get("value")))
     table.add_row("Case Sensitive", yes_no(rule.get("case_sensitive")))
-    table.add_row("Action", rule.get("action", "-"))
-    table.add_row("Webhook Override", rule.get("webhook_url_override") or "-")
-    table.add_row("Add Tags", ", ".join(rule.get("add_tags") or []) or "-")
+    table.add_row("Action", field(rule.get("action")))
+    table.add_row("Webhook Override", field(rule.get("webhook_url_override")))
+    table.add_row("Add Tags", field(", ".join(rule.get("add_tags") or [])))
     table.add_row("Preserve Raw", yes_no(rule.get("preserve_raw")))
     table.add_row("Created", format_datetime(rule.get("created_at")))
 
@@ -465,10 +487,10 @@ def print_delivery_logs_table(logs: list[dict]) -> None:
         status = log.get("status", "-")
 
         table.add_row(
-            str(log.get("id", "-"))[:8] + "...",
-            truncate(log.get("message_id", "-"), 25),
-            str(log.get("recipient_id") or "-")[:8] + "...",
-            f"[{status_style(status)}]{status}[/{status_style(status)}]",
+            short_id(log.get("id")),
+            field(truncate(log.get("message_id"), 25)),
+            short_id(log.get("recipient_id")),
+            f"[{status_style(status)}]{field(status)}[/{status_style(status)}]",
             str(log.get("attempts", 0)),
             format_datetime(log.get("created_at")),
         )
@@ -484,16 +506,16 @@ def print_delivery_log(log: dict) -> None:
 
     status = log.get("status", "-")
 
-    table.add_row("ID", str(log.get("id", "-")))
-    table.add_row("Message ID", log.get("message_id", "-"))
-    table.add_row("Recipient ID", str(log.get("recipient_id") or "-"))
-    table.add_row("Webhook URL", log.get("webhook_url", "-"))
-    table.add_row("Status", f"[{status_style(status)}]{status}[/{status_style(status)}]")
+    table.add_row("ID", field(log.get("id")))
+    table.add_row("Message ID", field(log.get("message_id")))
+    table.add_row("Recipient ID", field(log.get("recipient_id")))
+    table.add_row("Webhook URL", field(log.get("webhook_url")))
+    table.add_row("Status", f"[{status_style(status)}]{field(status)}[/{status_style(status)}]")
     table.add_row("Attempts", str(log.get("attempts", 0)))
     table.add_row("HTTP Status", str(log.get("last_status_code") or "-"))
-    table.add_row("DKIM", log.get("dkim_result") or "-")
-    table.add_row("SPF", log.get("spf_result") or "-")
-    table.add_row("Error", log.get("last_error") or "-")
+    table.add_row("DKIM", field(log.get("dkim_result")))
+    table.add_row("SPF", field(log.get("spf_result")))
+    table.add_row("Error", field(log.get("last_error")))
     table.add_row("Created", format_datetime(log.get("created_at")))
     table.add_row("Next Retry", format_datetime(log.get("next_retry_at")))
 
@@ -547,11 +569,11 @@ def print_profiles_table(
 
     for name, profile in profiles.items():
         is_default = name == default_profile
-        name_display = f"[bold]{name}[/bold] (default)" if is_default else name
+        name_display = f"[bold]{field(name)}[/bold] (default)" if is_default else field(name)
 
         row = [
             name_display,
-            profile.url,
+            field(profile.url),
             f"{profile.timeout}s",
             "[green]Yes[/green]" if profile.verify_ssl else "[red]No[/red]",
         ]
@@ -559,7 +581,7 @@ def print_profiles_table(
         if show_keys:
             key = profile.api_key
             if key:
-                row.append(truncate(key, 20))
+                row.append(field(truncate(key, 20)))
             else:
                 row.append("[dim]Not set[/dim]")
 

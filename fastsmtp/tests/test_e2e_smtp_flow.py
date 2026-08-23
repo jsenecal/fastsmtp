@@ -10,6 +10,7 @@ mocking. These tests focus on SMTP protocol behavior.
 """
 
 import asyncio
+from collections.abc import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosmtplib
@@ -26,15 +27,14 @@ class TestSMTPProtocolE2E:
     """End-to-end tests for SMTP protocol behavior."""
 
     @pytest.fixture
-    def smtp_settings(self) -> Settings:
+    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
         """Create settings for SMTP testing."""
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_e2e_key_12345",
             secret_key="test-e2e-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12570,  # Unique port
-            smtp_tls_port=14680,
+            smtp_port=unused_tcp_port_factory(),
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
             smtp_max_message_size=1024 * 1024,
@@ -198,15 +198,14 @@ class TestSMTPServerWithMockedDatabase:
     """Tests that verify SMTP handling with mocked database lookups."""
 
     @pytest.fixture
-    def smtp_settings(self) -> Settings:
+    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
         """Create settings for SMTP testing."""
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_mock_key_12345",
             secret_key="test-mock-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12571,  # Unique port
-            smtp_tls_port=14681,
+            smtp_port=unused_tcp_port_factory(),
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
             smtp_max_message_size=1024 * 1024,
@@ -437,15 +436,16 @@ class TestSMTPServerWithRealDatabase:
     """
 
     @pytest.fixture
-    def smtp_settings(self, postgres_url: str) -> Settings:
+    def smtp_settings(
+        self, postgres_url: str, unused_tcp_port_factory: Callable[[], int]
+    ) -> Settings:
         """Create settings for SMTP testing with real PostgreSQL."""
         return Settings(
             database_url=postgres_url,
             root_api_key="test_real_db_key_12345",
             secret_key="test-real-db-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12572,  # Unique port for this test class
-            smtp_tls_port=14682,
+            smtp_port=unused_tcp_port_factory(),
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
             smtp_max_message_size=1024 * 1024,
@@ -514,40 +514,44 @@ class TestSMTPServerWithRealDatabase:
         """
         from fastsmtp.db import session as db_session_module
 
-        # Reset the module-level singletons
+        # Reset the module-level singletons; the try/finally guarantees they are
+        # restored even if engine init or server.start() fails (e.g. a port
+        # stolen between fixture allocation and bind), so one setup failure
+        # doesn't cascade into unrelated tests seeing a dead engine.
         original_engine = db_session_module._engine
         original_session = db_session_module._async_session
         db_session_module._engine = None
         db_session_module._async_session = None
 
-        # Patch get_settings to return our test settings
-        with patch("fastsmtp.db.session.get_settings", return_value=smtp_settings):
-            # CRITICAL: Initialize the engine on THIS event loop (the main/test loop)
-            # This simulates what happens in production when FastAPI initializes
-            # the database before the SMTP server starts
-            _ = db_session_module.get_engine()  # Force engine initialization
-            session_factory = db_session_module.get_async_session_factory()
+        try:
+            # Patch get_settings to return our test settings
+            with patch("fastsmtp.db.session.get_settings", return_value=smtp_settings):
+                # CRITICAL: Initialize the engine on THIS event loop (the main/test
+                # loop). This simulates what happens in production when FastAPI
+                # initializes the database before the SMTP server starts
+                _ = db_session_module.get_engine()  # Force engine initialization
+                session_factory = db_session_module.get_async_session_factory()
 
-            # Verify the engine is initialized - do a simple query to ensure
-            # the connection pool is bound to this loop
-            async with session_factory() as session:
-                await session.execute(text("SELECT 1"))
+                # Verify the engine is initialized - do a simple query to ensure
+                # the connection pool is bound to this loop
+                async with session_factory() as session:
+                    await session.execute(text("SELECT 1"))
 
-            # NOW start the SMTP server - with UnthreadedController it runs
-            # on the SAME event loop, so database operations should work
-            server = SMTPServer(settings=smtp_settings)
-            await server.start()
-            await asyncio.sleep(0.2)  # Give server time to start
+                # NOW start the SMTP server - with UnthreadedController it runs
+                # on the SAME event loop, so database operations should work
+                server = SMTPServer(settings=smtp_settings)
+                await server.start()
+                await asyncio.sleep(0.2)  # Give server time to start
 
-            yield server
-
-            await server.stop()
-
-        # Clean up
-        if db_session_module._engine:
-            await db_session_module._engine.dispose()
-        db_session_module._engine = original_engine
-        db_session_module._async_session = original_session
+                try:
+                    yield server
+                finally:
+                    await server.stop()
+        finally:
+            if db_session_module._engine:
+                await db_session_module._engine.dispose()
+            db_session_module._engine = original_engine
+            db_session_module._async_session = original_session
 
     @pytest.mark.asyncio
     async def test_smtp_rcpt_with_real_database_lookup(
