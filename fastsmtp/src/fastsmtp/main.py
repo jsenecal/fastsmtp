@@ -5,10 +5,12 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from fastsmtp import __version__
 from fastsmtp.api.router import api_router
 from fastsmtp.config import Settings, get_settings
+from fastsmtp.db.migrations import verify_schema_is_current
 from fastsmtp.db.session import close_engine
 from fastsmtp.metrics import MetricsMiddleware
 from fastsmtp.metrics.access import require_metrics_access
@@ -22,7 +24,20 @@ from fastsmtp.middleware import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    # Startup
+    # Startup. Refuse a database older than this build rather than discovering
+    # it on the first query that touches a column the migration would add.
+    #
+    # The engine is built from the app's own settings, not the process-wide
+    # get_engine(): create_app() accepts a settings override and the test suite
+    # uses it, so the shared engine can point somewhere else entirely. Checking
+    # the wrong database would be worse than not checking.
+    settings = getattr(app.state, "settings", None) or get_settings()
+    if settings.verify_schema_on_startup:
+        engine = create_async_engine(settings.database_url)
+        try:
+            await verify_schema_is_current(engine)
+        finally:
+            await engine.dispose()
     yield
     # Shutdown
     await close_engine()

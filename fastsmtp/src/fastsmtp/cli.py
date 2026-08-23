@@ -247,9 +247,10 @@ def db_history():
 
 def _run_alembic(*args):
     """Run alembic command."""
-    # Find alembic.ini
-    package_dir = Path(__file__).parent.parent.parent.parent
-    alembic_ini = package_dir / "alembic.ini"
+    from fastsmtp.db.migrations import alembic_ini_path
+
+    alembic_ini = alembic_ini_path()
+    package_dir = alembic_ini.parent
 
     if not alembic_ini.exists():
         console.print(f"[red]alembic.ini not found at {alembic_ini}[/red]")

@@ -36,6 +36,22 @@ All configuration is via environment variables with the `FASTSMTP_` prefix.
 | `FASTSMTP_DATABASE_URL` | *required* | PostgreSQL or MariaDB connection URL |
 | `FASTSMTP_DATABASE_POOL_SIZE` | `5` | Connection pool size |
 | `FASTSMTP_DATABASE_POOL_MAX_OVERFLOW` | `10` | Max overflow connections |
+| `FASTSMTP_VERIFY_SCHEMA_ON_STARTUP` | `true` | Refuse to start when the database is behind this build's migrations |
+
+### Schema version check
+
+Nothing applies migrations automatically -- `fastsmtp serve` does not run Alembic. On
+startup the application compares the database's Alembic revision against the migrations
+shipped in the image and refuses to start if the database is behind, naming both
+revisions and the migrations that have not been applied.
+
+This turns a missed `fastsmtp db upgrade head` into an immediate, explicit failure
+instead of a `UndefinedColumn` error on the first query that touches a new column.
+
+A database *ahead* of the build is allowed, so a rolling deploy that migrates before the
+old pods are gone does not take them down. A database with no `alembic_version` table
+cannot be compared and is allowed with a warning.
+
 
 ## Webhooks
 

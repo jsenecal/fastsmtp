@@ -1,0 +1,55 @@
+# Applies pending Alembic migrations before a new image serves traffic.
+#
+# Run this to completion first, then roll the Deployments. The application
+# refuses to start against a database older than its own migrations (see
+# FASTSMTP_VERIFY_SCHEMA_ON_STARTUP), so rolling first only turns a missed
+# migration into a CrashLoopBackOff rather than into failing queries -- but a
+# clean upgrade means the Job finishes before the pods restart.
+#
+#   kubectl apply -f migrate-job.yaml
+#   kubectl wait --for=condition=complete --timeout=5m job/fastsmtp-migrate -n fastsmtp
+#
+# A Job rather than an initContainer on purpose: the Deployments here run 2 and
+# 3 replicas, and an initContainer would race five concurrent `alembic upgrade
+# head` runs against one database.
+#
+# Job specs are immutable, so bumping the image means deleting this Job first.
+# Name it per release (fastsmtp-migrate-v0-3-0) if you would rather keep the
+# history and avoid the delete.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fastsmtp-migrate
+  namespace: fastsmtp
+  labels:
+    app: fastsmtp
+    component: migrate
+spec:
+  # Alembic is not safe to run concurrently against one database.
+  parallelism: 1
+  completions: 1
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: fastsmtp
+        component: migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          # Must match the image the Deployments are about to run.
+          image: ghcr.io/jsenecal/fastsmtp:v0.3.0
+          command: ["fastsmtp", "db", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: fastsmtp-config
+            - secretRef:
+                name: fastsmtp-secrets
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
