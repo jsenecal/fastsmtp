@@ -36,6 +36,26 @@ ignore = ["B008"]  # Allow function calls in default arguments (FastAPI Depends 
 quote-style = "double"
 indent-style = "space"
 
+[tool.mypy]
+python_version = "3.12"
+# Both packages are gated, so `uv run mypy` with no arguments checks what CI
+# checks. This says nothing about CLI/server agreement -- the client builds
+# route strings and dict[str, Any] payloads that type-check no matter which
+# route they hit. That contract is enforced by
+# fastsmtp-cli/tests/test_api_contract.py against the live OpenAPI document.
+files = ["fastsmtp/src/fastsmtp", "fastsmtp-cli/src/fastsmtp_cli"]
+# Analyse the bodies of unannotated functions too. This does not require
+# annotations (that would be disallow_untyped_defs, a much larger job); it just
+# stops unannotated code from being silently skipped by the gate.
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# Neither ships stubs nor a py.typed marker, and no stub package exists for
+# dkim or spf. types-aiobotocore exists but pulls a large generated tree in to
+# type a single get_session() call.
+module = ["dkim", "spf", "aiobotocore.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

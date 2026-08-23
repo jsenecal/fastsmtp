@@ -5,3 +5,18 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+
+  # Not a pinned mirror: mypy needs the project's own dependencies resolvable to
+  # type-check against them, so it runs from the synced uv environment. Targets
+  # come from [tool.mypy] files, hence pass_filenames: false.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        # always_run rather than types: [python] -- pass_filenames: false means
+        # the whole project is checked regardless, and a dependency bump in
+        # pyproject.toml can break typing with no .py file staged.
+        always_run: true
+        pass_filenames: false

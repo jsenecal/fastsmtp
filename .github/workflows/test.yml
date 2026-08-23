@@ -41,6 +41,11 @@ jobs:
       - name: Run ruff format check
         run: uv run ruff format --check .
 
+      # Targets come from [tool.mypy] files in the root pyproject.toml, so this
+      # matches what `uv run mypy` does locally.
+      - name: Run mypy
+        run: uv run mypy
+
   test:
     name: Test
     runs-on: ubuntu-latest
