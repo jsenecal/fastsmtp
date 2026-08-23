@@ -78,11 +78,20 @@ class TestMatchers:
         for op in expected_operators:
             assert op in MATCHERS
 
+    @pytest.mark.timeout(300)
     def test_match_regex_redos_protection(self, monkeypatch):
         """Test that regex matching times out on ReDoS patterns.
 
         This test uses a pattern known to cause catastrophic backtracking
         and verifies the timeout protection works correctly.
+
+        The assertion below returns in 100ms, but the worker thread evaluating
+        the evil pattern keeps backtracking and holds the GIL while it does, so
+        the whole process is frozen until it finishes: 104s of single-core CPU
+        on a dev workstation, measured, hardware-dependent. That overruns the
+        global 120s timeout on any slower machine, hence the override. It is
+        also why the global timeout cannot rescue this particular test -- with
+        the GIL held, pytest-timeout's timer thread cannot run either.
         """
         # Set a very short timeout for testing
         from fastsmtp.config import Settings
