@@ -10,7 +10,6 @@ import pytest_asyncio
 from fastapi import FastAPI
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Base
-from fastsmtp.db.session import get_session
 from fastsmtp.main import create_app
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -75,14 +74,9 @@ class TestRateLimitingMiddleware:
             expire_on_commit=False,
         )
 
-        async def override_get_session():
-            async with session_factory() as session:
-                yield session
-                await session.commit()
-
         from fastsmtp.config import get_settings
 
-        application.dependency_overrides[get_session] = override_get_session
+        application.state.session_factory = session_factory
         application.dependency_overrides[get_settings] = lambda: rate_limited_settings
 
         yield application
@@ -135,12 +129,7 @@ class TestRateLimitingMiddleware:
                 engine, class_=AsyncSession, expire_on_commit=False
             )
 
-            async def override_get_session():
-                async with session_factory() as session:
-                    yield session
-                    await session.commit()
-
-            app.dependency_overrides[get_session] = override_get_session
+            app.state.session_factory = session_factory
             app.dependency_overrides[get_settings] = lambda: rate_limited_settings
 
             transport = ASGITransport(app=app)
@@ -194,12 +183,7 @@ class TestRateLimitingMiddleware:
                 engine, class_=AsyncSession, expire_on_commit=False
             )
 
-            async def override_get_session():
-                async with session_factory() as session:
-                    yield session
-                    await session.commit()
-
-            app.dependency_overrides[get_session] = override_get_session
+            app.state.session_factory = session_factory
             app.dependency_overrides[get_settings] = lambda: rate_limited_settings
 
             transport = ASGITransport(app=app)
@@ -275,12 +259,7 @@ class TestRateLimitingMiddleware:
                 engine, class_=AsyncSession, expire_on_commit=False
             )
 
-            async def override_get_session():
-                async with session_factory() as session:
-                    yield session
-                    await session.commit()
-
-            app.dependency_overrides[get_session] = override_get_session
+            app.state.session_factory = session_factory
             app.dependency_overrides[get_settings] = lambda: rate_limited_settings
 
             transport = ASGITransport(app=app)
@@ -356,12 +335,7 @@ class TestAuthRateLimiting:
 
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-        async def override_get_session():
-            async with session_factory() as session:
-                yield session
-                await session.commit()
-
-        app.dependency_overrides[get_session] = override_get_session
+        app.state.session_factory = session_factory
         app.dependency_overrides[get_settings] = lambda: settings
 
         auth_attempts = {}
