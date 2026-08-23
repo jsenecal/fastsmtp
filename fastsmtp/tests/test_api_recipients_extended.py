@@ -1,6 +1,7 @@
 """Extended tests for recipient API endpoints to improve coverage."""
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -197,3 +198,28 @@ class TestRecipientsUpdateExtended:
         )
         assert response.status_code == 409
         assert "catch-all" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_create_catchall_after_soft_delete(
+        self, auth_client: AsyncClient, test_domain: Domain, test_session: AsyncSession
+    ):
+        """A soft-deleted catch-all must not block creating a replacement."""
+        tombstone = Recipient(
+            domain_id=test_domain.id,
+            local_part=None,
+            webhook_url="https://example.com/old",
+            is_enabled=True,
+            deleted_at=datetime.now(UTC),
+        )
+        test_session.add(tombstone)
+        await test_session.commit()
+
+        response = await auth_client.post(
+            f"/api/v1/domains/{test_domain.id}/recipients",
+            json={
+                "local_part": "*",
+                "webhook_url": "https://example.com/new",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["local_part"] is None

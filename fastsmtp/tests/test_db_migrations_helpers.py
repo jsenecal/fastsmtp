@@ -35,7 +35,7 @@ class TestAlembicDiscovery:
 
     def test_expected_head_is_the_newest_migration(self):
         """The head comes from the shipped scripts, not a hardcoded string."""
-        assert expected_head_revision() == "005"
+        assert expected_head_revision() == "006"
 
 
 class TestSchemaVerification:
@@ -64,7 +64,7 @@ class TestSchemaVerification:
 
     @pytest.mark.asyncio
     async def test_stale_revision_raises_naming_both_ends(self, tmp_path):
-        """The exact production shape: code at 005 against a database at 003."""
+        """The production shape that motivated the check: a database behind the head."""
         engine = await self._engine(tmp_path)
         try:
             await self._stamp(engine, "003")
@@ -75,7 +75,7 @@ class TestSchemaVerification:
 
         message = str(exc_info.value)
         assert "003" in message
-        assert "005" in message
+        assert expected_head_revision() in message
         assert "fastsmtp db upgrade head" in message
 
     @pytest.mark.asyncio
