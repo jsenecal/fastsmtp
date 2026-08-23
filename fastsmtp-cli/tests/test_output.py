@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 
 from fastsmtp_cli.output import (
+    _format_expiry,
     console,
     field,
     format_datetime,
@@ -285,6 +286,25 @@ class TestUsersOutput:
         assert "Email - " in " ".join(capsys.readouterr().out.split())
 
 
+class TestFormatExpiry:
+    """Tests for the _format_expiry helper shared by both API-key printers."""
+
+    def test_none_renders_dim_never(self):
+        assert _format_expiry(None) == "[dim]Never[/dim]"
+
+    def test_future_timestamp_renders_plain(self):
+        assert _format_expiry("2999-01-15T10:00:00Z") == "2999-01-15 10:00:00"
+
+    def test_expired_timestamp_is_styled_red(self):
+        assert _format_expiry("2020-01-15T10:00:00Z") == "[red]2020-01-15 10:00:00[/red]"
+
+    def test_malformed_text_is_shown_literally_without_styling(self):
+        assert _format_expiry("soon-ish") == "soon-ish"
+
+    def test_malformed_text_with_markup_is_escaped(self):
+        assert _format_expiry("[red]x[/red]") == r"\[red]x\[/red]"
+
+
 class TestAPIKeysOutput:
     """Tests for API keys output formatting."""
 
@@ -346,6 +366,71 @@ class TestAPIKeysOutput:
             "key": "fsmtp_test_secret_key_12345",
         }
         print_api_key(key, show_secret=True)
+
+    def test_table_survives_malformed_expiry_and_shows_it_literally(self, capsys, monkeypatch):
+        """A non-ISO `expires_at` must not crash the table -- render it as-is.
+
+        The expired-vs-not check used to parse the string before
+        `format_datetime`'s literal-text fallback could run, so any server
+        value `datetime.fromisoformat` rejects killed the whole command.
+        """
+        monkeypatch.setattr(console, "_width", 120)
+        keys = [
+            {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "name": "Odd Key",
+                "scopes": [],
+                "expires_at": "soon-ish",
+                "last_used_at": None,
+                "created_at": "2024-01-01T10:00:00Z",
+            },
+        ]
+        print_api_keys_table(keys)
+        output = capsys.readouterr().out
+        assert "soon-ish" in output
+
+    def test_expired_key_markup_parses_instead_of_leaking(self, capsys, monkeypatch):
+        """The red styling on an expired key must parse, not print literally."""
+        monkeypatch.setattr(console, "_width", 120)
+        keys = [
+            {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "name": "Expired Key",
+                "scopes": [],
+                "expires_at": "2020-01-15T10:00:00Z",
+                "last_used_at": None,
+                "created_at": "2019-01-01T10:00:00Z",
+            },
+        ]
+        print_api_keys_table(keys)
+        output = capsys.readouterr().out
+        assert "2020-01-15" in output
+        assert "[red]" not in output
+
+    def test_no_expiry_renders_never_in_both_views(self, capsys, monkeypatch):
+        """A key with no expiry must say "Never" in the table AND the detail view.
+
+        The detail view used `format_datetime(...) or "Never"`, but
+        `format_datetime(None)` returns a truthy "-", so the or-arm was dead
+        and the two views disagreed.
+        """
+        monkeypatch.setattr(console, "_width", 120)
+        key = {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "name": "Eternal Key",
+            "scopes": [],
+            "expires_at": None,
+            "last_used_at": None,
+            "created_at": "2024-01-01T10:00:00Z",
+        }
+
+        print_api_keys_table([key])
+        assert "Never" in capsys.readouterr().out
+
+        print_api_key(key, show_secret=False)
+        output = capsys.readouterr().out
+        assert "Never" in output
+        assert "[dim]" not in output
 
 
 class TestDomainsOutput:
