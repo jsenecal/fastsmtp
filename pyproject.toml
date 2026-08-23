@@ -61,6 +61,11 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["fastsmtp/tests", "fastsmtp-cli/tests"]
 filterwarnings = [
+    # A new DeprecationWarning is a signal, not scenery: fail the run instead of
+    # letting it scroll past in the warnings summary. Later entries win over
+    # earlier ones, so every known exception is listed below with the reason it
+    # exists and the condition for deleting it.
+    "error::DeprecationWarning",
     "ignore::DeprecationWarning:aiosmtpd.*",
     # pyspf 2.0.14 (latest release, 2020) emits a SyntaxWarning (unescaped `\d`
     # in a docstring, spf.py:1724) and a DeprecationWarning (dns.resolver.query()
@@ -73,6 +78,23 @@ filterwarnings = [
     # path ending in "spf" rather than the module name.
     "ignore::DeprecationWarning:spf.*",
     "ignore:invalid escape sequence:SyntaxWarning:.*spf",
+    # uvicorn 0.40 still resolves its default ws="auto" to
+    # uvicorn.protocols.websockets.websockets_impl, which imports
+    # websockets.legacy and websockets.server.WebSocketServerProtocol -- both
+    # deprecated by websockets 14.0 ahead of the legacy implementation's
+    # removal. uvicorn already ships the replacement
+    # (websockets_sansio_impl, selectable as ws="websockets-sansio", added for
+    # https://github.com/encode/uvicorn/issues/1908) but has not made it the
+    # default. Nothing here uses websockets: it arrives with the
+    # uvicorn[standard] extra, and the conftest `serving` fixture starts a real
+    # uvicorn server, so the import happens in the first test that does. Drop
+    # both filters once a uvicorn release stops importing the legacy
+    # implementation for ws="auto".
+    # Matched on message rather than module -- the two warnings are raised from
+    # different modules (websockets.legacy and uvicorn's impl) and the messages
+    # are the stable part.
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
 ]
 
 [tool.coverage.run]
