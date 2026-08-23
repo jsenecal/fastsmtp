@@ -27,18 +27,9 @@ class TestSMTPProtocolE2E:
     """End-to-end tests for SMTP protocol behavior."""
 
     @pytest.fixture
-    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
-        """Create settings for SMTP testing."""
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_e2e_key_12345",
-            secret_key="test-e2e-secret-key",
-            smtp_host="127.0.0.1",
-            smtp_port=unused_tcp_port_factory(),
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-            smtp_max_message_size=1024 * 1024,
-        )
+    def smtp_settings(self, make_smtp_settings: Callable[..., Settings]) -> Settings:
+        """Create settings for SMTP testing (port 0 = OS-assigned)."""
+        return make_smtp_settings(smtp_max_message_size=1024 * 1024)
 
     @pytest_asyncio.fixture
     async def smtp_server(self, smtp_settings: Settings):
@@ -58,7 +49,7 @@ class TestSMTPProtocolE2E:
         """Test that SMTP server accepts connections."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
         assert smtp.is_connected
@@ -73,7 +64,7 @@ class TestSMTPProtocolE2E:
         """Test that SMTP server advertises correct capabilities."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -96,7 +87,7 @@ class TestSMTPProtocolE2E:
         """Test that SMTP server accepts MAIL FROM command."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
         await smtp.ehlo()
@@ -115,7 +106,7 @@ class TestSMTPProtocolE2E:
         """Test that SMTP server advertises correct message size limit."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -136,7 +127,7 @@ class TestSMTPProtocolE2E:
         """Test RSET command resets the mail transaction."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
         await smtp.ehlo()
@@ -159,7 +150,7 @@ class TestSMTPProtocolE2E:
         """Test NOOP command returns success."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -177,7 +168,7 @@ class TestSMTPProtocolE2E:
         """Test that connection can be reused for multiple MAIL transactions."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
         await smtp.ehlo()
@@ -198,18 +189,9 @@ class TestSMTPServerWithMockedDatabase:
     """Tests that verify SMTP handling with mocked database lookups."""
 
     @pytest.fixture
-    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
-        """Create settings for SMTP testing."""
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_mock_key_12345",
-            secret_key="test-mock-secret-key",
-            smtp_host="127.0.0.1",
-            smtp_port=unused_tcp_port_factory(),
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-            smtp_max_message_size=1024 * 1024,
-        )
+    def smtp_settings(self, make_smtp_settings: Callable[..., Settings]) -> Settings:
+        """Create settings for SMTP testing (port 0 = OS-assigned)."""
+        return make_smtp_settings(smtp_max_message_size=1024 * 1024)
 
     @pytest_asyncio.fixture
     async def smtp_server_with_mock(self, smtp_settings: Settings):
@@ -256,7 +238,7 @@ class TestSMTPServerWithMockedDatabase:
         """Test that SMTP server accepts emails to configured recipients."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_with_mock.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -291,7 +273,7 @@ This is a test email.
         """Test that SMTP server rejects recipients from unknown domains."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_with_mock.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -314,7 +296,7 @@ This is a test email.
         """Test sending to multiple recipients."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_with_mock.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -349,7 +331,7 @@ Message to multiple recipients.
         """Test that multipart emails are accepted."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_with_mock.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -395,7 +377,7 @@ Content-Type: text/html; charset="utf-8"
         """Test sending multiple emails over a single connection."""
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_with_mock.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -437,19 +419,10 @@ class TestSMTPServerWithRealDatabase:
 
     @pytest.fixture
     def smtp_settings(
-        self, postgres_url: str, unused_tcp_port_factory: Callable[[], int]
+        self, postgres_url: str, make_smtp_settings: Callable[..., Settings]
     ) -> Settings:
         """Create settings for SMTP testing with real PostgreSQL."""
-        return Settings(
-            database_url=postgres_url,
-            root_api_key="test_real_db_key_12345",
-            secret_key="test-real-db-secret-key",
-            smtp_host="127.0.0.1",
-            smtp_port=unused_tcp_port_factory(),
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-            smtp_max_message_size=1024 * 1024,
-        )
+        return make_smtp_settings(database_url=postgres_url, smtp_max_message_size=1024 * 1024)
 
     @pytest_asyncio.fixture
     async def db_engine(self, smtp_settings: Settings):
@@ -569,7 +542,7 @@ class TestSMTPServerWithRealDatabase:
         """
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_real_db.bound_smtp_port,
         )
         await smtp.connect()
         await smtp.ehlo()
@@ -603,7 +576,7 @@ class TestSMTPServerWithRealDatabase:
         """
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_real_db.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -649,7 +622,7 @@ This email tests the SMTP server with a real database.
             try:
                 smtp = aiosmtplib.SMTP(
                     hostname=smtp_settings.smtp_host,
-                    port=smtp_settings.smtp_port,
+                    port=smtp_server_real_db.bound_smtp_port,
                     timeout=30,
                 )
                 await smtp.connect()
@@ -701,7 +674,7 @@ This is concurrent email number {connection_id}.
         """
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_real_db.bound_smtp_port,
         )
         await smtp.connect()
         await smtp.ehlo()
@@ -728,7 +701,7 @@ This is concurrent email number {connection_id}.
         """
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server_real_db.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -773,7 +746,7 @@ Sustained load email number {i}.
             try:
                 smtp = aiosmtplib.SMTP(
                     hostname=smtp_settings.smtp_host,
-                    port=smtp_settings.smtp_port,
+                    port=smtp_server_real_db.bound_smtp_port,
                     timeout=30,
                 )
                 await smtp.connect()

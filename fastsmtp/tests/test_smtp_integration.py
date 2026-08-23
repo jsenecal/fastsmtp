@@ -4,6 +4,7 @@ Tests the complete email flow: SMTP -> parse -> database delivery queue.
 """
 
 from collections.abc import Callable
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosmtplib
@@ -21,18 +22,9 @@ class TestSMTPIntegration:
     """Integration tests for SMTP server."""
 
     @pytest.fixture
-    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
-        """Create settings for integration testing with ephemeral ports."""
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret-key",
-            smtp_host="127.0.0.1",
-            smtp_port=unused_tcp_port_factory(),
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-            smtp_max_message_size=1024 * 1024,  # 1MB for testing
-        )
+    def smtp_settings(self, make_smtp_settings: Callable[..., Settings]) -> Settings:
+        """Create settings for integration testing (port 0 = OS-assigned)."""
+        return make_smtp_settings(smtp_max_message_size=1024 * 1024)  # 1MB for testing
 
     @pytest_asyncio.fixture
     async def smtp_server(self, smtp_settings: Settings):
@@ -78,12 +70,11 @@ class TestSMTPIntegration:
         self, smtp_server, smtp_settings: Settings
     ):
         """Test that SMTP server starts and accepts connections."""
-        _ = smtp_server  # Ensure fixture runs
 
         # Try to connect to the SMTP server
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
         assert smtp.is_connected
@@ -97,11 +88,10 @@ class TestSMTPIntegration:
     @pytest.mark.asyncio
     async def test_smtp_ehlo_returns_capabilities(self, smtp_server, smtp_settings: Settings):
         """Test that EHLO returns server capabilities."""
-        _ = smtp_server  # Ensure fixture runs
 
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
 
@@ -122,16 +112,8 @@ class TestMailFromAuthParam:
     """
 
     @pytest.fixture
-    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret-key",
-            smtp_host="127.0.0.1",
-            smtp_port=unused_tcp_port_factory(),
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-        )
+    def smtp_settings(self, make_smtp_settings: Callable[..., Settings]) -> Settings:
+        return make_smtp_settings()
 
     @pytest_asyncio.fixture
     async def smtp_server(self, smtp_settings: Settings):
@@ -142,10 +124,9 @@ class TestMailFromAuthParam:
 
     @pytest_asyncio.fixture
     async def smtp_client(self, smtp_server, smtp_settings: Settings):
-        _ = smtp_server
         smtp = aiosmtplib.SMTP(
             hostname=smtp_settings.smtp_host,
-            port=smtp_settings.smtp_port,
+            port=smtp_server.bound_smtp_port,
         )
         await smtp.connect()
         await smtp.ehlo()
@@ -189,15 +170,9 @@ class TestFastSMTPHandlerIntegration:
     """Test the handler directly for better control over database sessions."""
 
     @pytest.fixture
-    def test_settings(self) -> Settings:
+    def test_settings(self, make_smtp_settings: Callable[..., Settings]) -> Settings:
         """Create test settings."""
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret-key",
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-        )
+        return make_smtp_settings()
 
     @pytest_asyncio.fixture
     async def test_domain_with_recipient(self, test_session: AsyncSession) -> Domain:
@@ -390,19 +365,10 @@ class TestSMTPLargeMessageHandling:
 
     @pytest.mark.asyncio
     async def test_smtp_server_advertises_size_limit(
-        self, unused_tcp_port_factory: Callable[[], int]
+        self, make_smtp_settings: Callable[..., Settings]
     ):
         """Test that SMTP server advertises SIZE limit in EHLO."""
-        settings = Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret-key",
-            smtp_host="127.0.0.1",
-            smtp_port=unused_tcp_port_factory(),
-            smtp_max_message_size=5 * 1024 * 1024,  # 5MB
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-        )
+        settings = make_smtp_settings(smtp_max_message_size=5 * 1024 * 1024)  # 5MB
 
         server = SMTPServer(settings=settings)
         try:
@@ -410,7 +376,7 @@ class TestSMTPLargeMessageHandling:
 
             smtp = aiosmtplib.SMTP(
                 hostname=settings.smtp_host,
-                port=settings.smtp_port,
+                port=server.bound_smtp_port,
             )
             await smtp.connect()
 
@@ -428,19 +394,18 @@ class TestSMTPLargeMessageHandling:
 class TestSMTPSTARTTLS:
     """Tests for STARTTLS functionality."""
 
-    @pytest.fixture
-    def tls_settings(self, tmp_path, unused_tcp_port_factory: Callable[[], int]) -> Settings:
-        """Create settings with TLS configured.
+    @pytest.fixture(scope="class")
+    def tls_cert_files(self, tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+        """Generate one self-signed certificate for the whole class.
 
-        The only fixture that really binds both ports: smtp_port and
-        smtp_tls_port must be two DISTINCT free ports, which the factory
-        guarantees (unused_tcp_port would return the same cached value twice).
+        openssl is slow enough that generating per test is wasted work; the
+        cert is only read, never mutated, so one class-scoped copy is safe.
         """
         from subprocess import run
 
-        # Generate self-signed certificate for testing
-        cert_path = tmp_path / "cert.pem"
-        key_path = tmp_path / "key.pem"
+        cert_dir = tmp_path_factory.mktemp("smtp-tls-certs")
+        cert_path = cert_dir / "cert.pem"
+        key_path = cert_dir / "key.pem"
 
         result = run(
             [
@@ -466,18 +431,21 @@ class TestSMTPSTARTTLS:
         if result.returncode != 0:
             pytest.skip("openssl not available for TLS testing")
 
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret-key",
-            smtp_host="127.0.0.1",
-            smtp_port=unused_tcp_port_factory(),
-            smtp_tls_port=unused_tcp_port_factory(),
-            smtp_tls_cert=cert_path,
-            smtp_tls_key=key_path,
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-        )
+        return cert_path, key_path
+
+    @pytest.fixture
+    def tls_settings(
+        self,
+        tls_cert_files: tuple[Path, Path],
+        make_smtp_settings: Callable[..., Settings],
+    ) -> Settings:
+        """Create settings with TLS configured.
+
+        Both listeners bind port 0, so the OS hands out two distinct free
+        ports; read them back via bound_smtp_port / bound_smtp_tls_port.
+        """
+        cert_path, key_path = tls_cert_files
+        return make_smtp_settings(smtp_tls_cert=cert_path, smtp_tls_key=key_path)
 
     @pytest.mark.asyncio
     async def test_tls_server_starts(self, tls_settings: Settings):
@@ -503,7 +471,7 @@ class TestSMTPSTARTTLS:
             # and that STARTTLS is advertised, not actual TLS upgrade
             smtp = aiosmtplib.SMTP(
                 hostname=tls_settings.smtp_host,
-                port=tls_settings.smtp_port,
+                port=server.bound_smtp_port,
                 start_tls=False,
             )
             await smtp.connect()
@@ -535,7 +503,7 @@ class TestSMTPSTARTTLS:
 
             smtp = aiosmtplib.SMTP(
                 hostname=tls_settings.smtp_host,
-                port=tls_settings.smtp_port,
+                port=server.bound_smtp_port,
                 start_tls=False,  # Don't auto-upgrade, we'll do it manually
             )
             await smtp.connect()
@@ -572,7 +540,7 @@ class TestSMTPSTARTTLS:
 
             smtp = aiosmtplib.SMTP(
                 hostname=tls_settings.smtp_host,
-                port=tls_settings.smtp_tls_port,
+                port=server.bound_smtp_tls_port,
                 use_tls=True,
                 tls_context=context,
             )
@@ -592,14 +560,9 @@ class TestSMTPAuthSettings:
     """Tests for SMTP authentication rejection settings."""
 
     @pytest.fixture
-    def strict_auth_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
+    def strict_auth_settings(self, make_smtp_settings: Callable[..., Settings]) -> Settings:
         """Create settings that reject on auth failure."""
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret-key",
-            smtp_host="127.0.0.1",
-            smtp_port=unused_tcp_port_factory(),
+        return make_smtp_settings(
             smtp_verify_dkim=True,
             smtp_verify_spf=True,
             smtp_reject_dkim_fail=True,
@@ -617,7 +580,7 @@ class TestSMTPAuthSettings:
 
             smtp = aiosmtplib.SMTP(
                 hostname=strict_auth_settings.smtp_host,
-                port=strict_auth_settings.smtp_port,
+                port=server.bound_smtp_port,
             )
             await smtp.connect()
             assert smtp.is_connected
@@ -627,15 +590,11 @@ class TestSMTPAuthSettings:
             await server.stop()
 
     @pytest.mark.asyncio
-    async def test_handler_rejects_dkim_fail_when_configured(self):
+    async def test_handler_rejects_dkim_fail_when_configured(
+        self, make_smtp_settings: Callable[..., Settings]
+    ):
         """Test handler rejects messages with DKIM failure when configured."""
-        settings = Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret-key",
-            smtp_verify_dkim=True,
-            smtp_reject_dkim_fail=True,
-        )
+        settings = make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=True)
 
         handler = FastSMTPHandler(settings)
 
@@ -674,15 +633,11 @@ Body.
         assert "DKIM" in result
 
     @pytest.mark.asyncio
-    async def test_handler_rejects_spf_fail_when_configured(self):
+    async def test_handler_rejects_spf_fail_when_configured(
+        self, make_smtp_settings: Callable[..., Settings]
+    ):
         """Test handler rejects messages with SPF failure when configured."""
-        settings = Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret-key",
-            smtp_verify_spf=True,
-            smtp_reject_spf_fail=True,
-        )
+        settings = make_smtp_settings(smtp_verify_spf=True, smtp_reject_spf_fail=True)
 
         handler = FastSMTPHandler(settings)
 
