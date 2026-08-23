@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 
 from fastsmtp_cli.output import (
+    console,
     format_datetime,
     print_api_key,
     print_api_keys_table,
@@ -221,8 +222,15 @@ class TestUsersOutput:
         }
         print_user(user)
 
-    def test_users_render_a_null_email_as_a_dash(self, capsys):
-        """`UserResponse.email` is nullable - both views must show a placeholder."""
+    def test_users_render_a_null_email_as_a_dash(self, capsys, monkeypatch):
+        """`UserResponse.email` is nullable - both views must show a placeholder.
+
+        The width is pinned so the assertions below cannot depend on rich's
+        terminal-size detection: a narrower console truncates cells to an
+        ellipsis and a wider one repads them. ``console`` reads ``COLUMNS`` once,
+        when ``output`` is imported, so the size has to be set on the object.
+        """
+        monkeypatch.setattr(console, "_width", 100)
         user = {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "username": "testuser",

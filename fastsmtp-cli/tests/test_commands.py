@@ -1121,21 +1121,6 @@ class TestOpsErrorPaths:
         assert result.exit_code == 1
 
 
-def user_json(user_id: str, **overrides) -> dict:
-    """A ``UserResponse``-shaped body."""
-    payload = {
-        "id": user_id,
-        "username": "alice",
-        "email": "alice@example.com",
-        "is_active": True,
-        "is_superuser": False,
-        "created_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-02T00:00:00Z",
-    }
-    payload.update(overrides)
-    return payload
-
-
 class TestUserCommands:
     """Tests for user commands."""
 
@@ -1143,7 +1128,19 @@ class TestUserCommands:
     def test_user_list(self, temp_config):
         """Test users list command."""
         respx.get("https://api.example.com/api/v1/users").mock(
-            return_value=httpx.Response(200, json=[user_json(str(uuid4()))])
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": str(uuid4()),
+                        "username": "alice",
+                        "email": "alice@example.com",
+                        "is_active": True,
+                        "is_superuser": False,
+                        "created_at": "2026-01-01T00:00:00Z",
+                    }
+                ],
+            )
         )
 
         result = runner.invoke(app, ["users", "list"])
@@ -1155,7 +1152,18 @@ class TestUserCommands:
         """Test users get command."""
         user_id = str(uuid4())
         respx.get(f"https://api.example.com/api/v1/users/{user_id}").mock(
-            return_value=httpx.Response(200, json=user_json(user_id))
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": user_id,
+                    "username": "alice",
+                    "email": "alice@example.com",
+                    "is_active": True,
+                    "is_superuser": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-02T00:00:00Z",
+                },
+            )
         )
 
         result = runner.invoke(app, ["users", "get", user_id])
@@ -1166,7 +1174,17 @@ class TestUserCommands:
     def test_user_create(self, temp_config):
         """Test users create command."""
         respx.post("https://api.example.com/api/v1/users").mock(
-            return_value=httpx.Response(201, json=user_json(str(uuid4())))
+            return_value=httpx.Response(
+                201,
+                json={
+                    "id": str(uuid4()),
+                    "username": "alice",
+                    "email": "alice@example.com",
+                    "is_active": True,
+                    "is_superuser": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
         )
 
         result = runner.invoke(app, ["users", "create", "alice", "--email", "alice@example.com"])
@@ -1178,7 +1196,17 @@ class TestUserCommands:
         """Test users update command."""
         user_id = str(uuid4())
         respx.put(f"https://api.example.com/api/v1/users/{user_id}").mock(
-            return_value=httpx.Response(200, json=user_json(user_id, is_active=False))
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": user_id,
+                    "username": "alice",
+                    "email": "alice@example.com",
+                    "is_active": False,
+                    "is_superuser": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
         )
 
         result = runner.invoke(app, ["users", "update", user_id, "--inactive"])
