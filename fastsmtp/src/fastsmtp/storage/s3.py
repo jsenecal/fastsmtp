@@ -48,10 +48,16 @@ class S3UploadError(Exception):
         super().__init__(message)
 
 
-def sanitize_key_component(value: str) -> str:
+def sanitize_key_component(value: str, fallback: str = "unnamed") -> str:
     """Sanitize a string for use in S3 key.
 
     Removes characters that are problematic in S3 keys.
+
+    ``fallback`` is what to return when nothing survives. It is right for a
+    genuinely optional component like a filename, where every message sharing
+    one literal is harmless. It is wrong for an identity-bearing component:
+    pass ``fallback=""`` there and substitute something unique, or every such
+    message shares one key and silently overwrites the last.
     """
     # Remove < > and other problematic characters
     sanitized = re.sub(r"[<>\"'\\|?*\x00-\x1f]", "", value)
@@ -61,7 +67,7 @@ def sanitize_key_component(value: str) -> str:
     sanitized = re.sub(r"_+", "_", sanitized)
     # Remove leading/trailing underscores
     sanitized = sanitized.strip("_")
-    return sanitized or "unnamed"
+    return sanitized or fallback
 
 
 class S3Storage:

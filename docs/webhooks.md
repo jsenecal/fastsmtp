@@ -137,6 +137,13 @@ recipient, or when an optional archive upload failed. See
 [Raw Message Preservation](configuration.md#raw-message-preservation-s3) for how
 preservation is enabled per domain and per rule.
 
+The `key` is unique per message. A Message-ID that is absent, empty, or present but
+degenerate (`<>`) is replaced with a generated one before the key is built, so two
+messages never share an archive object and silently overwrite one another. Consumers may
+therefore treat `key` as a stable per-message identifier. The block itself is still
+optional -- absent when preservation is off, or when an optional upload failed -- so
+check for it before reading `key`.
+
 ## S3 Fallback to Inline
 
 If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attachment will have `storage_fallback: true` to indicate this:
