@@ -689,6 +689,37 @@ class SMTPServer:
         self._tls_manager: TLSContextManager | None = None
         self._hot_reload_task: asyncio.Task | None = None
 
+    @staticmethod
+    def _bound_port(server: asyncio.AbstractServer | None, name: str) -> int:
+        # loop.create_server() always returns an asyncio.Server; the isinstance
+        # check narrows from the AbstractServer the aiosmtpd controller is
+        # annotated with, which lacks ``sockets``.
+        if server is None or not isinstance(server, asyncio.Server) or not server.sockets:
+            raise RuntimeError(f"{name} is not started; no socket is bound yet")
+        port = server.sockets[0].getsockname()[1]
+        return int(port)
+
+    @property
+    def bound_smtp_port(self) -> int:
+        """Port the plain SMTP listener is actually bound to.
+
+        ``settings.smtp_port`` is only the *requested* port: with
+        ``smtp_port=0`` the OS assigns a free port at bind time and the bound
+        socket is the sole source of truth (aiosmtpd's controller keeps just
+        the requested value). Raises ``RuntimeError`` until :meth:`start` has
+        run.
+        """
+        return self._bound_port(self._server, "SMTP server")
+
+    @property
+    def bound_smtp_tls_port(self) -> int:
+        """Port the implicit-TLS listener is actually bound to.
+
+        Same contract as :attr:`bound_smtp_port` for the TLS listener. Raises
+        ``RuntimeError`` until :meth:`start` has run with TLS configured.
+        """
+        return self._bound_port(self._tls_server, "SMTP TLS server")
+
     async def _restart_tls_controller(self) -> None:
         """Restart the TLS controller with a new context."""
         if not self._tls_manager or not self._tls_manager.context:

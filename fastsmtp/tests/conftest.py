@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Generator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator
 from contextlib import asynccontextmanager
 
 import pytest
@@ -58,15 +58,49 @@ def test_settings(postgres_url: str) -> Settings:
         smtp_host="127.0.0.1",
         # INVARIANT: nothing may ever bind these ports. API tests run through
         # ASGITransport and the live-server fixture passes port=0 to uvicorn.
-        # A test that actually listens must draw its ports from
-        # unused_tcp_port_factory instead (see the SMTP test fixtures) --
-        # fixed ports collide across concurrent runs (issue #87).
+        # A test that actually listens must bind port 0 and read the OS-assigned
+        # port back after start (SMTPServer.bound_smtp_port; see
+        # make_smtp_settings below) -- fixed ports collide across concurrent
+        # runs (issue #87), and ports probed for freeness ahead of time are
+        # stealable before the server binds them (issue #98).
+        # test_no_hardcoded_ports.py enforces this outside this file.
         smtp_port=12525,
         api_host="127.0.0.1",
         api_port=18000,
         secret_key="test-secret-key-for-testing",
         instance_id="test-instance",
     )
+
+
+@pytest.fixture
+def make_smtp_settings() -> Callable[..., Settings]:
+    """Build the Settings the SMTP server tests need, with overrides.
+
+    The base binds smtp_port/smtp_tls_port to 0 so the OS assigns free ports
+    at bind time -- read the real ports back through
+    ``SMTPServer.bound_smtp_port`` / ``bound_smtp_tls_port`` after ``start()``.
+    Pre-probing for a free port (unused_tcp_port_factory) leaves a window in
+    which another process can steal it before the server binds (issue #98).
+
+    Exposed as a fixture rather than a module-level function because the tests
+    directory is not an importable package.
+    """
+
+    def make(**overrides: object) -> Settings:
+        base: dict[str, object] = {
+            "database_url": "sqlite+aiosqlite:///:memory:",
+            "root_api_key": "test_key_12345",
+            "secret_key": "test-secret-key",
+            "smtp_host": "127.0.0.1",
+            "smtp_port": 0,
+            "smtp_tls_port": 0,
+            "smtp_verify_dkim": False,
+            "smtp_verify_spf": False,
+        }
+        base.update(overrides)
+        return Settings(**base)
+
+    return make
 
 
 @pytest_asyncio.fixture

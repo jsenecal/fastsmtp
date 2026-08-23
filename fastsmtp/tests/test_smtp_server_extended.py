@@ -1,5 +1,6 @@
 """Extended tests for SMTP server module to improve coverage."""
 
+from collections.abc import Callable
 from email.message import EmailMessage
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -231,15 +232,9 @@ class TestFastSMTPHandler:
     """Tests for FastSMTPHandler."""
 
     @pytest.fixture
-    def test_settings(self):
+    def test_settings(self, make_smtp_settings: Callable[..., Settings]) -> Settings:
         """Create test settings."""
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret",
-            smtp_verify_dkim=False,
-            smtp_verify_spf=False,
-        )
+        return make_smtp_settings()
 
     @pytest.fixture
     def handler(self, test_settings):
@@ -270,15 +265,11 @@ class TestSMTPServer:
     """Tests for SMTPServer class."""
 
     @pytest.fixture
-    def test_settings(self):
-        """Create test settings. Nothing here binds the SMTP ports, so the
-        Settings defaults are fine -- see test_smtp_server_init."""
-        return Settings(
-            database_url="sqlite+aiosqlite:///:memory:",
-            root_api_key="test_key_12345",
-            secret_key="test-secret",
-            smtp_host="127.0.0.1",
-        )
+    def test_settings(self, make_smtp_settings: Callable[..., Settings]) -> Settings:
+        """Create test settings. Nothing here binds the SMTP ports until a
+        test calls start(), and the factory's port-0 base is inert until
+        then -- see test_smtp_server_init."""
+        return make_smtp_settings()
 
     def test_smtp_server_init(self, test_settings):
         """Test SMTPServer initialization."""
@@ -288,3 +279,32 @@ class TestSMTPServer:
         assert server.handler is not None
         assert server.controller is None  # Not started yet
         assert server.tls_controller is None
+
+    def test_bound_port_before_start_raises(self, test_settings):
+        """Test bound_smtp_port raises before the server has bound a socket."""
+        server = SMTPServer(settings=test_settings)
+
+        with pytest.raises(RuntimeError, match="not started"):
+            _ = server.bound_smtp_port
+
+    def test_bound_tls_port_without_tls_raises(self, test_settings):
+        """Test bound_smtp_tls_port raises when no TLS listener is running."""
+        server = SMTPServer(settings=test_settings)
+
+        with pytest.raises(RuntimeError, match="not started"):
+            _ = server.bound_smtp_tls_port
+
+    @pytest.mark.asyncio
+    async def test_bound_port_reports_os_assigned_port(
+        self, make_smtp_settings: Callable[..., Settings]
+    ):
+        """Test binding port 0 and reading the real port back after start."""
+        server = SMTPServer(settings=make_smtp_settings())
+        try:
+            await server.start()
+
+            port = server.bound_smtp_port
+            assert isinstance(port, int)
+            assert port != 0  # the OS assigned a real ephemeral port
+        finally:
+            await server.stop()
