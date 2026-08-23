@@ -60,6 +60,9 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["fastsmtp/tests", "fastsmtp-cli/tests"]
+markers = [
+    "migrations: runs the Alembic chain against a throwaway database (deselect with -m 'not migrations')",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:aiosmtpd.*",
     # pyspf 2.0.14 (latest release, 2020) emits a SyntaxWarning (unescaped `\d`
@@ -79,8 +82,8 @@ filterwarnings = [
 source = ["fastsmtp", "fastsmtp_cli"]
 branch = true
 omit = [
-    # Alembic migrations are not executed by the suite (conftest builds the
-    # schema with create_all), so measuring them only depresses the number.
+    # tests/test_migrations.py runs the Alembic chain, but in a child process
+    # this run does not trace, so measuring migrations only depresses the number.
     "*/alembic/*",
     "*/tests/*",
 ]
