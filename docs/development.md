@@ -49,6 +49,11 @@ uv run zensical build --clean
 
 The site is deployed to GitHub Pages automatically on every push to `main` by the `Documentation` workflow.
 
+## Releasing
+
+Cutting a release — version bump, PR labels, publishing, schema checks, and image
+verification — is covered in [Releasing](releasing.md).
+
 ## License
 
 AGPL-3.0 — see the [LICENSE](https://github.com/jsenecal/fastsmtp/blob/main/LICENSE) file for details.
