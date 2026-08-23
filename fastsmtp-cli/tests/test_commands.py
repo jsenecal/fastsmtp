@@ -1,5 +1,6 @@
 """Tests for CLI commands."""
 
+import json
 import re
 import tempfile
 from pathlib import Path
@@ -1222,6 +1223,145 @@ class TestUserCommands:
 
         result = runner.invoke(app, ["users", "delete", user_id, "--force"])
         assert result.exit_code == 0
+
+
+class TestClearableStringOptions:
+    """CLI-wide convention: passing '' to a nullable string option clears it.
+
+    Each nullable string option is three-valued: omitted leaves the column
+    untouched (absent from the payload), '' clears it (present as JSON null),
+    and any other value sets it.
+    """
+
+    # users update --email
+
+    @respx.mock
+    def test_user_update_omitted_email_is_absent(self, temp_config):
+        user_id = str(uuid4())
+        route = respx.put(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json={"id": user_id, "username": "bob"})
+        )
+
+        result = runner.invoke(app, ["users", "update", user_id, "--username", "bob"])
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {"username": "bob"}
+
+    @respx.mock
+    def test_user_update_empty_email_sends_null(self, temp_config):
+        user_id = str(uuid4())
+        route = respx.put(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json={"id": user_id, "username": "bob"})
+        )
+
+        result = runner.invoke(app, ["users", "update", user_id, "--email", ""])
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {"email": None}
+
+    @respx.mock
+    def test_user_update_email_value_is_passed_through(self, temp_config):
+        user_id = str(uuid4())
+        route = respx.put(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json={"id": user_id, "username": "bob"})
+        )
+
+        result = runner.invoke(app, ["users", "update", user_id, "--email", "bob@example.com"])
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {"email": "bob@example.com"}
+
+    # recipient update --local
+
+    @respx.mock
+    def test_recipient_update_omitted_local_is_absent(self, temp_config):
+        domain_id = str(uuid4())
+        recipient_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": recipient_id}))
+
+        result = runner.invoke(app, ["recipient", "update", domain_id, recipient_id, "--enabled"])
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {"is_enabled": True}
+
+    @respx.mock
+    def test_recipient_update_empty_local_sends_null(self, temp_config):
+        domain_id = str(uuid4())
+        recipient_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": recipient_id}))
+
+        result = runner.invoke(app, ["recipient", "update", domain_id, recipient_id, "--local", ""])
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {"local_part": None}
+
+    @respx.mock
+    def test_recipient_update_local_value_is_passed_through(self, temp_config):
+        domain_id = str(uuid4())
+        recipient_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": recipient_id}))
+
+        result = runner.invoke(
+            app, ["recipient", "update", domain_id, recipient_id, "--local", "support"]
+        )
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {"local_part": "support"}
+
+    # rules rule update --webhook-url
+
+    @respx.mock
+    def test_rule_update_omitted_webhook_url_is_absent(self, temp_config):
+        domain_id = str(uuid4())
+        rule_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rules/{rule_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": rule_id}))
+
+        result = runner.invoke(
+            app, ["rules", "rule", "update", domain_id, rule_id, "--value", "spam"]
+        )
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {"value": "spam"}
+
+    @respx.mock
+    def test_rule_update_empty_webhook_url_sends_null(self, temp_config):
+        domain_id = str(uuid4())
+        rule_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rules/{rule_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": rule_id}))
+
+        result = runner.invoke(
+            app, ["rules", "rule", "update", domain_id, rule_id, "--webhook-url", ""]
+        )
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {"webhook_url_override": None}
+
+    @respx.mock
+    def test_rule_update_webhook_url_value_is_passed_through(self, temp_config):
+        domain_id = str(uuid4())
+        rule_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rules/{rule_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": rule_id}))
+
+        result = runner.invoke(
+            app,
+            [
+                "rules",
+                "rule",
+                "update",
+                domain_id,
+                rule_id,
+                "--webhook-url",
+                "https://hooks.example.com/x",
+            ],
+        )
+        assert result.exit_code == 0
+        assert json.loads(route.calls[0].request.content) == {
+            "webhook_url_override": "https://hooks.example.com/x"
+        }
 
 
 class TestUserErrorPaths:

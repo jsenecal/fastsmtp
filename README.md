@@ -774,7 +774,8 @@ fsmtp auth delete-key <key-id>
 
 Every command in this group requires a superuser API key. Accounts have no password —
 they authenticate with API keys — so no command here takes one. `users update` sends only
-the options you name; an omitted flag leaves that column untouched.
+the options you name; an omitted flag leaves that column untouched, while `--email ''`
+clears the stored address (the CLI sends an explicit JSON null).
 
 ```bash
 # List all users
@@ -791,6 +792,9 @@ fsmtp users create alice --email alice@example.com --superuser
 
 # Rename a user or change their email
 fsmtp users update <user-id> --username bob --email bob@example.com
+
+# Clear the stored email (empty string sends an explicit null)
+fsmtp users update <user-id> --email ''
 
 # Deactivate an account, or grant/revoke superuser
 fsmtp users update <user-id> --inactive

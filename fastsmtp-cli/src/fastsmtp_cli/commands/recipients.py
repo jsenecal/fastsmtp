@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from fastsmtp_cli.client import APIError, FastSMTPClient
+from fastsmtp_cli.commands.options import clearable_str
 from fastsmtp_cli.output import (
     print_error,
     print_recipient,
@@ -121,7 +122,7 @@ def update_recipient(
     recipient_id: Annotated[str, typer.Argument(help="Recipient ID")],
     local_part: Annotated[
         str | None,
-        typer.Option("--local", "-l", help="Local part"),
+        typer.Option("--local", "-l", help="Local part; pass '' to clear it (catch-all)"),
     ] = None,
     webhook_url: Annotated[
         str | None,
@@ -149,7 +150,7 @@ def update_recipient(
             recipient = client.update_recipient(
                 domain_id=domain_id,
                 recipient_id=recipient_id,
-                local_part=local_part,
+                local_part=clearable_str(local_part),
                 webhook_url=webhook_url,
                 is_enabled=enabled,
                 webhook_headers=webhook_headers,

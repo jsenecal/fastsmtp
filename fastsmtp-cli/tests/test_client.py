@@ -274,6 +274,82 @@ class TestUpdateSemantics:
 
         assert json.loads(route.calls[0].request.content) == {"preserve_raw_message": None}
 
+    @respx.mock
+    def test_update_user_unset_email_is_omitted(self, test_profile):
+        user_id = str(uuid4())
+        route = respx.put(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json={"id": user_id})
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.update_user(user_id, username="bob")
+
+        assert json.loads(route.calls[0].request.content) == {"username": "bob"}
+
+    @respx.mock
+    def test_update_user_none_email_is_sent_as_null(self, test_profile):
+        user_id = str(uuid4())
+        route = respx.put(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json={"id": user_id})
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.update_user(user_id, email=None)
+
+        assert json.loads(route.calls[0].request.content) == {"email": None}
+
+    @respx.mock
+    def test_update_recipient_none_local_part_is_sent_as_null(self, test_profile):
+        domain_id = str(uuid4())
+        recipient_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": recipient_id}))
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.update_recipient(domain_id, recipient_id, local_part=None)
+
+        assert json.loads(route.calls[0].request.content) == {"local_part": None}
+
+    @respx.mock
+    def test_update_recipient_unset_local_part_is_omitted(self, test_profile):
+        domain_id = str(uuid4())
+        recipient_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/recipients/{recipient_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": recipient_id}))
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.update_recipient(domain_id, recipient_id, is_enabled=True)
+
+        assert json.loads(route.calls[0].request.content) == {"is_enabled": True}
+
+    @respx.mock
+    def test_update_rule_none_webhook_override_is_sent_as_null(self, test_profile):
+        domain_id = str(uuid4())
+        rule_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rules/{rule_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": rule_id}))
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.update_rule(domain_id, rule_id, webhook_url_override=None)
+
+        assert json.loads(route.calls[0].request.content) == {"webhook_url_override": None}
+
+    @respx.mock
+    def test_update_rule_unset_webhook_override_is_omitted(self, test_profile):
+        domain_id = str(uuid4())
+        rule_id = str(uuid4())
+        route = respx.put(
+            f"https://api.example.com/api/v1/domains/{domain_id}/rules/{rule_id}"
+        ).mock(return_value=httpx.Response(200, json={"id": rule_id}))
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.update_rule(domain_id, rule_id, value="spam")
+
+        assert json.loads(route.calls[0].request.content) == {"value": "spam"}
+
 
 class TestClientEndpoints:
     """Tests for API client endpoint methods."""

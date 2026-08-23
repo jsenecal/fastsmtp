@@ -93,6 +93,26 @@ class TestUsersCRUD:
         assert data["is_active"] is False
 
     @pytest.mark.asyncio
+    async def test_update_user_explicit_null_clears_email(
+        self, auth_client: AsyncClient, test_session: AsyncSession
+    ):
+        """An explicit ``"email": null`` clears the column, it is not ignored.
+
+        The CLI relies on this to implement ``fsmtp users update --email ''``.
+        """
+        user = User(username="clearemail", email="clear@test.com", is_active=True)
+        test_session.add(user)
+        await test_session.commit()
+        await test_session.refresh(user)
+
+        response = await auth_client.put(
+            f"/api/v1/users/{user.id}",
+            json={"email": None},
+        )
+        assert response.status_code == 200
+        assert response.json()["email"] is None
+
+    @pytest.mark.asyncio
     async def test_delete_user(self, auth_client: AsyncClient, test_session: AsyncSession):
         """Test deleting a user."""
         user = User(username="deleteuser", email="delete@test.com", is_active=True)
