@@ -7,7 +7,6 @@ private network need a way to restrict who may scrape it.
 """
 
 import logging
-import threading
 import time
 
 from fastapi import HTTPException, Request, status
@@ -56,7 +55,6 @@ class _DenialLogThrottle:
     ):
         self.window_seconds = window_seconds
         self.max_tracked_addresses = max_tracked_addresses
-        self._lock = threading.Lock()
         self._window_start: float | None = None
         self._suppressed = 0
         self._addresses: set[str] = set()
@@ -71,19 +69,18 @@ class _DenialLogThrottle:
         Returns:
             A message to log, or None while the current window is suppressing.
         """
-        with self._lock:
-            if self._window_start is not None and now - self._window_start < self.window_seconds:
-                self._suppressed += 1
-                if len(self._addresses) < self.max_tracked_addresses:
-                    self._addresses.add(address)
-                return None
+        if self._window_start is not None and now - self._window_start < self.window_seconds:
+            self._suppressed += 1
+            if len(self._addresses) < self.max_tracked_addresses:
+                self._addresses.add(address)
+            return None
 
-            suppressed, distinct = self._suppressed, len(self._addresses)
-            capped = distinct >= self.max_tracked_addresses
-            elapsed = now - self._window_start if self._window_start is not None else 0.0
-            self._window_start = now
-            self._suppressed = 0
-            self._addresses = set()
+        suppressed, distinct = self._suppressed, len(self._addresses)
+        capped = distinct >= self.max_tracked_addresses
+        elapsed = now - self._window_start if self._window_start is not None else 0.0
+        self._window_start = now
+        self._suppressed = 0
+        self._addresses = set()
 
         if not suppressed:
             return f"Denied metrics scrape from {address}"
@@ -152,11 +149,15 @@ def _settings_for(request: Request) -> Settings:
     return getattr(request.app.state, "settings", None) or get_settings()
 
 
-def require_metrics_access(request: Request) -> None:
+async def require_metrics_access(request: Request) -> None:
     """Reject metrics scrapes from addresses outside the allowlist.
 
     An empty ``metrics_allowed_ips`` leaves the endpoint unrestricted, which is
     the historical behaviour.
+
+    Async on purpose: a sync dependency would be dispatched to a threadpool,
+    putting the denial throttle's shared state under concurrent access. It does
+    no blocking I/O, so there is nothing to gain from a worker thread anyway.
 
     Raises:
         HTTPException: 403 if the resolved client address is not allowed.

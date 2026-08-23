@@ -107,54 +107,54 @@ class TestClientAddressForMetrics:
 class TestRequireMetricsAccess:
     """Whether a request is allowed through."""
 
-    def test_allows_everything_when_unset(self):
+    async def test_allows_everything_when_unset(self):
         """Test an empty allowlist leaves the endpoint unrestricted."""
-        require_metrics_access(with_settings(FakeRequest("203.0.113.9"), make_settings()))
+        await require_metrics_access(with_settings(FakeRequest("203.0.113.9"), make_settings()))
 
-    def test_allows_address_inside_prefix(self):
+    async def test_allows_address_inside_prefix(self):
         """Test an address inside an allowed prefix is permitted."""
         settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
-        require_metrics_access(with_settings(FakeRequest("10.1.2.3"), settings))
+        await require_metrics_access(with_settings(FakeRequest("10.1.2.3"), settings))
 
-    def test_allows_exact_address(self):
+    async def test_allows_exact_address(self):
         """Test a bare allowlist entry permits exactly that address."""
         settings = make_settings(metrics_allowed_ips=["192.0.2.5"])
-        require_metrics_access(with_settings(FakeRequest("192.0.2.5"), settings))
+        await require_metrics_access(with_settings(FakeRequest("192.0.2.5"), settings))
 
-    def test_denies_address_outside_allowlist(self):
+    async def test_denies_address_outside_allowlist(self):
         """Test an address outside the allowlist is refused with 403."""
         settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
 
         with pytest.raises(HTTPException) as exc_info:
-            require_metrics_access(with_settings(FakeRequest("203.0.113.9"), settings))
+            await require_metrics_access(with_settings(FakeRequest("203.0.113.9"), settings))
 
         assert exc_info.value.status_code == 403
 
-    def test_denies_unknown_peer_when_restricted(self):
+    async def test_denies_unknown_peer_when_restricted(self):
         """Test a request with no resolvable peer is refused when restricted."""
         settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
 
         with pytest.raises(HTTPException) as exc_info:
-            require_metrics_access(with_settings(FakeRequest(None), settings))
+            await require_metrics_access(with_settings(FakeRequest(None), settings))
 
         assert exc_info.value.status_code == 403
 
-    def test_allows_ipv6_inside_prefix(self):
+    async def test_allows_ipv6_inside_prefix(self):
         """Test IPv6 allowlisting works."""
         settings = make_settings(metrics_allowed_ips=["2001:db8::/32"])
-        require_metrics_access(with_settings(FakeRequest("2001:db8::1"), settings))
+        await require_metrics_access(with_settings(FakeRequest("2001:db8::1"), settings))
 
-    def test_spoofed_forwarded_for_does_not_grant_access(self):
+    async def test_spoofed_forwarded_for_does_not_grant_access(self):
         """Test forging X-Forwarded-For cannot bypass the allowlist."""
         settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
         request = FakeRequest("203.0.113.9", {"X-Forwarded-For": "10.1.2.3"})
 
         with pytest.raises(HTTPException) as exc_info:
-            require_metrics_access(with_settings(request, settings))
+            await require_metrics_access(with_settings(request, settings))
 
         assert exc_info.value.status_code == 403
 
-    def test_trusted_proxy_can_present_an_allowed_client(self):
+    async def test_trusted_proxy_can_present_an_allowed_client(self):
         """Test a genuine proxy hop resolves to the real client address."""
         settings = make_settings(
             metrics_allowed_ips=["203.0.113.0/24"],
@@ -162,9 +162,9 @@ class TestRequireMetricsAccess:
         )
         request = FakeRequest("10.9.9.1", {"X-Forwarded-For": "203.0.113.9"})
 
-        require_metrics_access(with_settings(request, settings))
+        await require_metrics_access(with_settings(request, settings))
 
-    def test_trusted_proxy_is_not_itself_allowed_by_default(self):
+    async def test_trusted_proxy_is_not_itself_allowed_by_default(self):
         """Test trusting a proxy does not implicitly allowlist it.
 
         The two settings answer different questions: one is who may assert a
@@ -176,7 +176,7 @@ class TestRequireMetricsAccess:
         )
 
         with pytest.raises(HTTPException):
-            require_metrics_access(with_settings(FakeRequest("10.9.9.1"), settings))
+            await require_metrics_access(with_settings(FakeRequest("10.9.9.1"), settings))
 
 
 class TestMetricsRouteEnforcement:
@@ -447,7 +447,7 @@ class TestDenialLogThrottle:
 class TestDenialCounter:
     """Denials stay alertable at fixed cost even while logging is throttled."""
 
-    def test_counter_increments_for_every_denial_including_suppressed(self):
+    async def test_counter_increments_for_every_denial_including_suppressed(self):
         """Test the counter is not throttled along with the log."""
         from fastsmtp.metrics.definitions import METRICS_SCRAPES_DENIED
 
@@ -456,18 +456,18 @@ class TestDenialCounter:
 
         for _ in range(5):
             with pytest.raises(HTTPException):
-                require_metrics_access(with_settings(FakeRequest("203.0.113.9"), settings))
+                await require_metrics_access(with_settings(FakeRequest("203.0.113.9"), settings))
 
         assert METRICS_SCRAPES_DENIED._value.get() - before == 5
 
-    def test_counter_unchanged_for_allowed_scrapes(self):
+    async def test_counter_unchanged_for_allowed_scrapes(self):
         """Test permitted scrapes do not increment the denial counter."""
         from fastsmtp.metrics.definitions import METRICS_SCRAPES_DENIED
 
         settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
         before = METRICS_SCRAPES_DENIED._value.get()
 
-        require_metrics_access(with_settings(FakeRequest("10.1.2.3"), settings))
+        await require_metrics_access(with_settings(FakeRequest("10.1.2.3"), settings))
 
         assert METRICS_SCRAPES_DENIED._value.get() == before
 
@@ -475,7 +475,25 @@ class TestDenialCounter:
 class TestDenialLoggingIsWired:
     """The throttle must actually be used by require_metrics_access."""
 
-    def test_repeated_denials_log_once(self, caplog) -> None:
+    def test_dependency_is_async(self) -> None:
+        """Test the dependency stays a coroutine function.
+
+        FastAPI dispatches *sync* dependencies to a threadpool, so a sync version
+        would run the throttle's check-then-act on several OS threads at once.
+        As a coroutine it runs on the event loop instead: single-threaded, so the
+        state needs no locking, and one less threadpool hop per request.
+
+        Verified empirically before relying on it - a sync dependency was
+        observed on 8 distinct threads, an async one on 1.
+        """
+        import inspect
+
+        assert inspect.iscoroutinefunction(require_metrics_access), (
+            "require_metrics_access must stay async: as a sync dependency FastAPI "
+            "would run it in a threadpool and _DenialLogThrottle would need a lock"
+        )
+
+    async def test_repeated_denials_log_once(self, caplog) -> None:
         """Test a burst of denials produces a single WARNING, not one each."""
         import logging
 
@@ -484,7 +502,9 @@ class TestDenialLoggingIsWired:
         with caplog.at_level(logging.WARNING, logger="fastsmtp.metrics.access"):
             for _ in range(10):
                 with pytest.raises(HTTPException):
-                    require_metrics_access(with_settings(FakeRequest("203.0.113.9"), settings))
+                    await require_metrics_access(
+                        with_settings(FakeRequest("203.0.113.9"), settings)
+                    )
 
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1, f"expected 1 throttled warning, got {len(warnings)}"
