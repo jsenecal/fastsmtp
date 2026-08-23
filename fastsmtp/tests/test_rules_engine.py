@@ -121,6 +121,21 @@ class TestMatchers:
 
         assert "Invalid regex pattern" in caplog.text
 
+    def test_match_regex_lone_surrogate_value_still_matches(self):
+        """A value carrying a lone surrogate is sanitized, not fatal.
+
+        Sender-controlled text can smuggle an unpaired surrogate past the
+        body decode (a UTF-7 part declaring one decodes successfully), and
+        RE2 requires valid UTF-8. If that raised, or silently blinded the
+        matcher, one crafted code point would disable every regex rule for
+        the whole message. The surrogate is replaced and the rest of the
+        value stays matchable.
+        """
+        assert match_regex("\ud800 hello world", r"hello") is True
+        assert match_regex("\ud800", r"x") is False
+        # Sanitization must not disturb valid non-ASCII text around it
+        assert match_regex("caf\u00e9 \ud800 menu", "caf\u00e9") is True
+
 
 class TestEvaluateCondition:
     """Tests for the evaluate_condition function."""

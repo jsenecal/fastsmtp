@@ -83,7 +83,19 @@ def match_regex(value: str, pattern: str, case_sensitive: bool = False) -> bool:
     crafted pattern cannot trigger catastrophic backtracking (ReDoS). A stored
     pattern RE2 cannot compile (backreferences, lookaround, plain syntax
     errors) logs a warning and does not match, never raises.
+
+    RE2 requires valid UTF-8, and sender-controlled text can carry lone
+    surrogates (a UTF-7 body part declaring an unpaired surrogate decodes
+    successfully, so the errors="replace" fallback never runs). Those are
+    replaced with U+FFFD before matching -- raising would tempfail the
+    message, and refusing to match would let one crafted code point blind
+    every regex rule.
     """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        logger.debug("Regex value contains unencodable code points; sanitizing")
+        value = value.encode("utf-8", errors="replace").decode("utf-8")
     try:
         return bool(re2.search(pattern, value, options=_re2_options(case_sensitive)))
     except re2.error as e:
