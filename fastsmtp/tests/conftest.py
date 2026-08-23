@@ -56,6 +56,11 @@ def test_settings(postgres_url: str) -> Settings:
         database_url=postgres_url,
         root_api_key="test_root_api_key_12345",
         smtp_host="127.0.0.1",
+        # INVARIANT: nothing may ever bind these ports. API tests run through
+        # ASGITransport and the live-server fixture passes port=0 to uvicorn.
+        # A test that actually listens must draw its ports from
+        # unused_tcp_port_factory instead (see the SMTP test fixtures) --
+        # fixed ports collide across concurrent runs (issue #87).
         smtp_port=12525,
         api_host="127.0.0.1",
         api_port=18000,
