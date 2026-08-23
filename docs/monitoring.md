@@ -62,6 +62,16 @@ operational one. A sustained non-zero rate means a rule's pattern is being drive
 into catastrophic backtracking — either a badly written rule, or a sender probing
 for ReDoS. It should be zero in a healthy system, so alert on any increase.
 
+### Metrics access
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `fastsmtp_metrics_scrapes_denied_total` | Counter | — | Scrapes refused because the client was not in `FASTSMTP_METRICS_ALLOWED_IPS` |
+
+Only meaningful once an allowlist is configured. It has no source-address label:
+that would be unbounded cardinality, and the address appears in the log line
+instead.
+
 ## Restricting access
 
 Two settings control who may scrape. Both accept bare addresses and CIDR
@@ -79,6 +89,13 @@ export FASTSMTP_METRICS_ALLOWED_IPS='["10.0.0.0/8","192.0.2.5","2001:db8::/32"]'
 A refused scrape gets `403` and no metric data. Malformed entries are rejected at
 startup rather than skipped — an allowlist that silently drops a typo is worse
 than none, because it looks enforced while standing open.
+
+Refusals are logged at WARNING, but **throttled**: the first denial in each
+60-second window is logged with its source address, and the rest are counted and
+reported when the window rolls over. `/metrics` needs no credential and is
+excluded from rate limiting, so logging every refusal would let any client drive
+unbounded log volume. `fastsmtp_metrics_scrapes_denied_total` is not throttled,
+so alert on that for the true rate.
 
 ### Behind a reverse proxy
 
@@ -176,6 +193,7 @@ rate(fastsmtp_rules_regex_timeouts_total[5m])
 | `fastsmtp_webhook_deliveries_total{status="exhausted"}` increasing | Deliveries are being abandoned. Pair with `FASTSMTP_DLQ_WEBHOOK_URL` so the payloads are not lost |
 | `fastsmtp_rules_regex_timeouts_total` increasing | Catastrophic backtracking in a rule pattern |
 | `fastsmtp_smtp_rate_limited_total` increasing | Either a misconfigured limit or a sender hammering the server |
+| `fastsmtp_metrics_scrapes_denied_total` increasing | Something is repeatedly trying to scrape metrics it is not allowed to. Also worth checking after changing the allowlist, in case a legitimate scraper was locked out |
 
 ## Health checks
 
