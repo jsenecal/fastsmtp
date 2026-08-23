@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: fastsmtp
-          image: fastsmtp:latest
+          image: ghcr.io/jsenecal/fastsmtp:v0.3.0
           ports:
             - containerPort: 8000
               name: http
@@ -75,7 +75,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: fastsmtp:latest
+          image: ghcr.io/jsenecal/fastsmtp:v0.3.0
           command: ["python", "-m", "fastsmtp.cli", "serve", "--worker-only"]
           envFrom:
             - configMapRef:

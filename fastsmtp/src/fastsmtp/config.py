@@ -260,6 +260,15 @@ class Settings(BaseSettings):
         description="Maximum recipients per SMTP message",
     )
 
+    verify_schema_on_startup: bool = Field(
+        default=True,
+        description=(
+            "Refuse to start when the database is behind the migrations shipped "
+            "with this build. Disable only if migrations are applied out of band "
+            "and the startup check gets in the way."
+        ),
+    )
+
     @property
     def s3_configured(self) -> bool:
         """Whether bucket and credentials are available to talk to S3."""
