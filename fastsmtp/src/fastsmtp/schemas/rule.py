@@ -3,7 +3,9 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
+
+from fastsmtp.rules.conditions import validate_regex_pattern
 
 # Valid field names for rules
 RULE_FIELDS = {
@@ -145,7 +147,12 @@ class RuleBase(BaseModel):
 class RuleCreate(RuleBase):
     """Schema for creating a rule."""
 
-    pass
+    @model_validator(mode="after")
+    def validate_regex_value(self) -> "RuleCreate":
+        """Reject regex rules whose pattern RE2 cannot compile."""
+        if self.operator == "regex":
+            validate_regex_pattern(self.value)
+        return self
 
 
 class RuleUpdate(BaseModel):
@@ -197,6 +204,17 @@ class RuleUpdate(BaseModel):
             valid_actions = ", ".join(sorted(RULE_ACTIONS))
             raise ValueError(f"Invalid action '{v}'. Valid actions: {valid_actions}")
         return v
+
+    @model_validator(mode="after")
+    def validate_regex_value(self) -> "RuleUpdate":
+        """Reject regex rules whose pattern RE2 cannot compile.
+
+        Only covers payloads carrying both operator and value; a partial
+        update is checked against the stored rule by the update endpoint.
+        """
+        if self.operator == "regex" and self.value is not None:
+            validate_regex_pattern(self.value)
+        return self
 
 
 class RuleResponse(RuleBase):

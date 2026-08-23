@@ -9,6 +9,7 @@ from fastsmtp.rules.conditions import (
     match_exists,
     match_regex,
     match_starts_with,
+    validate_regex_pattern,
 )
 from fastsmtp.rules.engine import (
     RuleEvaluationResult,
@@ -34,4 +35,5 @@ __all__ = [
     "match_exists",
     "match_regex",
     "match_starts_with",
+    "validate_regex_pattern",
 ]

@@ -284,6 +284,62 @@ class TestRulesCRUD:
         assert any("Invalid action" in err["msg"] for err in detail)
 
     @pytest.mark.asyncio
+    async def test_create_rule_with_regex_operator(
+        self, auth_client: AsyncClient, test_domain_and_ruleset: tuple[Domain, RuleSet]
+    ):
+        """Test creating a rule with a valid RE2 pattern."""
+        domain, ruleset = test_domain_and_ruleset
+        response = await auth_client.post(
+            f"/api/v1/domains/{domain.id}/rulesets/{ruleset.id}/rules",
+            json={
+                "field": "from",
+                "operator": "regex",
+                "value": r".*@example\.com$",
+                "action": "tag",
+                "add_tags": ["external"],
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["operator"] == "regex"
+
+    @pytest.mark.asyncio
+    async def test_create_rule_invalid_regex(
+        self, auth_client: AsyncClient, test_domain_and_ruleset: tuple[Domain, RuleSet]
+    ):
+        """Test creating a regex rule whose pattern RE2 cannot compile fails with 422."""
+        domain, ruleset = test_domain_and_ruleset
+        for bad_pattern in (r"(a)\1", r"foo(?=bar)", r"[unclosed"):
+            response = await auth_client.post(
+                f"/api/v1/domains/{domain.id}/rulesets/{ruleset.id}/rules",
+                json={
+                    "field": "from",
+                    "operator": "regex",
+                    "value": bad_pattern,
+                    "action": "tag",
+                },
+            )
+            assert response.status_code == 422, response.json()
+            detail = response.json()["detail"]
+            assert any("Invalid regex pattern" in err["msg"] for err in detail)
+
+    @pytest.mark.asyncio
+    async def test_create_rule_non_regex_operator_allows_any_value(
+        self, auth_client: AsyncClient, test_domain_and_ruleset: tuple[Domain, RuleSet]
+    ):
+        """A value that is not valid RE2 is fine when the operator is not regex."""
+        domain, ruleset = test_domain_and_ruleset
+        response = await auth_client.post(
+            f"/api/v1/domains/{domain.id}/rulesets/{ruleset.id}/rules",
+            json={
+                "field": "subject",
+                "operator": "contains",
+                "value": r"(a)\1",
+                "action": "tag",
+            },
+        )
+        assert response.status_code == 201
+
+    @pytest.mark.asyncio
     async def test_create_multiple_rules_order(
         self, auth_client: AsyncClient, test_domain_and_ruleset: tuple[Domain, RuleSet]
     ):
@@ -346,6 +402,119 @@ class TestRulesCRUD:
         data = response.json()
         assert data["value"] == "new@test.com"
         assert data["action"] == "drop"
+
+    @pytest.mark.asyncio
+    async def test_update_rule_value_to_invalid_regex(
+        self,
+        auth_client: AsyncClient,
+        test_domain_and_ruleset: tuple[Domain, RuleSet],
+        test_session: AsyncSession,
+    ):
+        """Changing the value of a regex rule to a non-RE2 pattern fails with 422."""
+        domain, ruleset = test_domain_and_ruleset
+        rule = Rule(
+            ruleset_id=ruleset.id,
+            order=0,
+            field="from",
+            operator="regex",
+            value=r".*@example\.com$",
+            action="tag",
+        )
+        test_session.add(rule)
+        await test_session.commit()
+        await test_session.refresh(rule)
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{domain.id}/rules/{rule.id}",
+            json={"value": r"[unclosed"},
+        )
+        assert response.status_code == 422, response.json()
+        assert "Invalid regex pattern" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_update_rule_operator_to_regex_with_stored_invalid_value(
+        self,
+        auth_client: AsyncClient,
+        test_domain_and_ruleset: tuple[Domain, RuleSet],
+        test_session: AsyncSession,
+    ):
+        """Switching operator to regex fails with 422 when the stored value cannot compile."""
+        domain, ruleset = test_domain_and_ruleset
+        rule = Rule(
+            ruleset_id=ruleset.id,
+            order=0,
+            field="subject",
+            operator="contains",
+            value=r"(a)\1",
+            action="tag",
+        )
+        test_session.add(rule)
+        await test_session.commit()
+        await test_session.refresh(rule)
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{domain.id}/rules/{rule.id}",
+            json={"operator": "regex"},
+        )
+        assert response.status_code == 422, response.json()
+        assert "Invalid regex pattern" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_update_rule_operator_and_value_to_invalid_regex(
+        self,
+        auth_client: AsyncClient,
+        test_domain_and_ruleset: tuple[Domain, RuleSet],
+        test_session: AsyncSession,
+    ):
+        """Updating operator and value together to a non-RE2 pattern fails with 422."""
+        domain, ruleset = test_domain_and_ruleset
+        rule = Rule(
+            ruleset_id=ruleset.id,
+            order=0,
+            field="subject",
+            operator="contains",
+            value="spam",
+            action="tag",
+        )
+        test_session.add(rule)
+        await test_session.commit()
+        await test_session.refresh(rule)
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{domain.id}/rules/{rule.id}",
+            json={"operator": "regex", "value": r"foo(?=bar)"},
+        )
+        assert response.status_code == 422, response.json()
+        detail = response.json()["detail"]
+        assert any("Invalid regex pattern" in err["msg"] for err in detail)
+
+    @pytest.mark.asyncio
+    async def test_update_rule_value_to_valid_regex(
+        self,
+        auth_client: AsyncClient,
+        test_domain_and_ruleset: tuple[Domain, RuleSet],
+        test_session: AsyncSession,
+    ):
+        """Changing the value of a regex rule to another valid pattern succeeds."""
+        domain, ruleset = test_domain_and_ruleset
+        rule = Rule(
+            ruleset_id=ruleset.id,
+            order=0,
+            field="from",
+            operator="regex",
+            value=r".*@example\.com$",
+            action="tag",
+        )
+        test_session.add(rule)
+        await test_session.commit()
+        await test_session.refresh(rule)
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{domain.id}/rules/{rule.id}",
+            json={"value": r".*@other\.org$"},
+        )
+        assert response.status_code == 200, response.json()
+        assert response.json()["value"] == r".*@other\.org$"
 
     @pytest.mark.asyncio
     async def test_delete_rule(

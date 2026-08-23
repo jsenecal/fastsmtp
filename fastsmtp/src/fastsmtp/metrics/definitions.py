@@ -56,12 +56,6 @@ AUTH_RESULTS = Counter(
     ["type", "result"],  # type=dkim/spf, result=pass/fail/none
 )
 
-# Rules engine metrics
-RULES_REGEX_TIMEOUTS = Counter(
-    "fastsmtp_rules_regex_timeouts_total",
-    "Number of regex evaluations that timed out (potential ReDoS)",
-)
-
 # Metrics endpoint access control
 METRICS_SCRAPES_DENIED = Counter(
     "fastsmtp_metrics_scrapes_denied_total",

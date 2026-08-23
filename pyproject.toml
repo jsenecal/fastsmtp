@@ -53,8 +53,9 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 # Neither ships stubs nor a py.typed marker, and no stub package exists for
 # dkim or spf. types-aiobotocore exists but pulls a large generated tree in to
-# type a single get_session() call.
-module = ["dkim", "spf", "aiobotocore.*"]
+# type a single get_session() call. google-re2 (module re2) ships no py.typed
+# marker either and has no stub package.
+module = ["dkim", "spf", "aiobotocore.*", "re2"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

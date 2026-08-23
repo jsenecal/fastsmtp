@@ -51,17 +51,6 @@ absent from the OpenAPI schema — Prometheus text output is not a JSON API.
 |--------|------|--------|---------|
 | `fastsmtp_auth_results_total` | Counter | `type` = `dkim`/`spf`, `result` = `pass`/`fail`/`none` | Verification outcomes per message |
 
-### Rules engine
-
-| Metric | Type | Labels | Meaning |
-|--------|------|--------|---------|
-| `fastsmtp_rules_regex_timeouts_total` | Counter | — | Regex evaluations that hit `FASTSMTP_REGEX_TIMEOUT_SECONDS` |
-
-`fastsmtp_rules_regex_timeouts_total` is a **security signal**, not just an
-operational one. A sustained non-zero rate means a rule's pattern is being driven
-into catastrophic backtracking — either a badly written rule, or a sender probing
-for ReDoS. It should be zero in a healthy system, so alert on any increase.
-
 ### Metrics access
 
 | Metric | Type | Labels | Meaning |
@@ -180,9 +169,6 @@ histogram_quantile(0.95, sum by (le) (
 
 # Authentication failure rate
 sum by (type) (rate(fastsmtp_auth_results_total{result="fail"}[5m]))
-
-# Possible ReDoS - should be flat at zero
-rate(fastsmtp_rules_regex_timeouts_total[5m])
 ```
 
 ### Alerts worth having
@@ -191,7 +177,6 @@ rate(fastsmtp_rules_regex_timeouts_total[5m])
 |-----------|-----|
 | `fastsmtp_queue_depth{status="pending"}` rising steadily | Delivery is falling behind intake; with `FASTSMTP_QUEUE_MAX_PENDING` set, new mail will eventually be rejected |
 | `fastsmtp_webhook_deliveries_total{status="exhausted"}` increasing | Deliveries are being abandoned. Pair with `FASTSMTP_DLQ_WEBHOOK_URL` so the payloads are not lost |
-| `fastsmtp_rules_regex_timeouts_total` increasing | Catastrophic backtracking in a rule pattern |
 | `fastsmtp_smtp_rate_limited_total` increasing | Either a misconfigured limit or a sender hammering the server |
 | `fastsmtp_metrics_scrapes_denied_total` increasing | Something is repeatedly trying to scrape metrics it is not allowed to. Also worth checking after changing the allowlist, in case a legitimate scraper was locked out |
 

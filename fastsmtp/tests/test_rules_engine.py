@@ -1,5 +1,7 @@
 """Tests for the rules engine."""
 
+import logging
+import time
 import uuid
 from email.message import EmailMessage
 
@@ -78,45 +80,46 @@ class TestMatchers:
         for op in expected_operators:
             assert op in MATCHERS
 
-    @pytest.mark.timeout(300)
-    def test_match_regex_redos_protection(self, monkeypatch):
-        """Test that regex matching times out on ReDoS patterns.
+    def test_match_regex_redos_returns_promptly(self):
+        """A catastrophic-backtracking pattern is a fast non-match, not a stall.
 
-        This test uses a pattern known to cause catastrophic backtracking
-        and verifies the timeout protection works correctly.
-
-        The assertion below returns in 100ms, but the worker thread evaluating
-        the evil pattern keeps backtracking and holds the GIL while it does, so
-        the whole process is frozen until it finishes: 104s of single-core CPU
-        on a dev workstation, measured, hardware-dependent. That overruns the
-        global 120s timeout on any slower machine, hence the override. It is
-        also why the global timeout cannot rescue this particular test -- with
-        the GIL held, pytest-timeout's timer thread cannot run either.
+        Patterns are evaluated with RE2, which matches in linear time by
+        construction, so the classic exponential-backtracking attack cannot
+        exist. Under the old re-based implementation this exact input held the
+        GIL in a worker thread and froze the whole process for hours.
         """
-        # Set a very short timeout for testing
-        from fastsmtp.config import Settings
-
-        def mock_settings():
-            return Settings(
-                root_api_key="test123",
-                regex_timeout_seconds=0.1,  # 100ms timeout
-            )
-
-        monkeypatch.setattr("fastsmtp.rules.conditions.get_settings", mock_settings)
-
-        # Clear the executor cache to use new settings
-        import fastsmtp.rules.conditions as conditions
-
-        conditions._regex_executor = None
-
-        # A classic ReDoS pattern: catastrophic backtracking
         evil_pattern = r"(a+)+b"
-        # Input that causes exponential backtracking
-        evil_input = "a" * 30  # No 'b' at end causes backtracking
+        evil_input = "a" * 50  # no 'b' at the end: exponential under re
 
-        # Should timeout and return False instead of hanging
+        start = time.monotonic()
         result = match_regex(evil_input, evil_pattern)
-        assert result is False  # Times out or doesn't match
+        elapsed = time.monotonic() - start
+
+        assert result is False
+        assert elapsed < 1.0
+
+    def test_match_regex_case_insensitive_by_default(self):
+        """Case-insensitive matching (the default) still works under RE2."""
+        assert match_regex("Hello World", r"hello w") is True
+        assert match_regex("HELLO", r"h[ae]llo") is True
+
+    def test_match_regex_case_sensitive(self):
+        """Case-sensitive matching still works under RE2."""
+        assert match_regex("Hello World", r"hello", case_sensitive=True) is False
+        assert match_regex("Hello World", r"Hello", case_sensitive=True) is True
+
+    def test_match_regex_unsupported_pattern_degrades(self, caplog):
+        """A stored pattern RE2 cannot compile logs a warning and does not match.
+
+        RE2 rejects backreferences and lookaround at compile time. A rule
+        stored before validation existed must degrade to a non-match, exactly
+        like the invalid-pattern path, never raise.
+        """
+        with caplog.at_level(logging.WARNING):
+            assert match_regex("abcabc", r"(abc)\1") is False  # backreference
+            assert match_regex("foobar", r"foo(?=bar)") is False  # lookahead
+
+        assert "Invalid regex pattern" in caplog.text
 
 
 class TestEvaluateCondition:

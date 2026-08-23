@@ -211,14 +211,6 @@ class Settings(BaseSettings):
     )
 
     # Rules engine
-    regex_timeout_seconds: float = Field(
-        default=1.0,
-        description="Timeout for regex matching in rules engine (ReDoS protection)",
-    )
-    regex_thread_pool_size: int | None = Field(
-        default=None,
-        description="Thread pool size for regex operations (default: CPU count, min 2)",
-    )
     rules_max_body_size: int = Field(
         default=1024 * 1024,  # 1MB
         description="Maximum body size (bytes) to evaluate in rules. Larger bodies are truncated.",

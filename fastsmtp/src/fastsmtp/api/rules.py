@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from fastsmtp.api.validation import require_s3_for_preservation
+from fastsmtp.api.validation import require_s3_for_preservation, require_valid_rule_regex
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Rule, RuleSet
@@ -348,6 +348,13 @@ async def update_rule(
         validate_rule_action(update_data["action"])
     if update_data.get("preserve_raw"):
         require_s3_for_preservation(settings)
+
+    # Validate the merged regex state: a partial update touching only operator
+    # or only value can make the stored counterpart invalid.
+    if "operator" in update_data or "value" in update_data:
+        effective_operator = update_data.get("operator", rule.operator)
+        if effective_operator == "regex":
+            require_valid_rule_regex(update_data.get("value", rule.value))
 
     # Handle webhook_url conversion
     if "webhook_url_override" in update_data and update_data["webhook_url_override"]:

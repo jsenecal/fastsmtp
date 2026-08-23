@@ -4,18 +4,28 @@ The rule engine allows conditional processing of emails based on various attribu
 
 ## Rule Fields
 
-- `from`, `to`, `cc`, `subject`, `body`
+- `from`, `to`, `subject`, `body`
 - `header:<name>` (e.g., `header:X-Priority`)
-- `has_attachments`, `attachment_count`
+- `has_attachment`
 - `dkim_result`, `spf_result`
 
 ## Rule Operators
 
-- `equals`, `not_equals`
-- `contains`, `not_contains`
+- `equals`
+- `contains`
 - `starts_with`, `ends_with`
-- `matches` (regex)
-- `greater_than`, `less_than` (for numeric fields)
+- `regex`
+- `exists`
+
+### Regex patterns use RE2 syntax
+
+`regex` conditions are evaluated with [Google RE2](https://github.com/google/re2/wiki/Syntax),
+which matches in linear time by construction, so an operator-supplied pattern can
+never trigger catastrophic backtracking (ReDoS). The trade-off is that RE2 does not
+support backreferences (`\1`) or lookaround (`(?=...)`, `(?!...)`, `(?<=...)`,
+`(?<!...)`). The API rejects such patterns with a 422 when a rule is created or
+updated; a pattern stored before this validation existed simply never matches and
+logs a warning.
 
 ## Rule Actions
 

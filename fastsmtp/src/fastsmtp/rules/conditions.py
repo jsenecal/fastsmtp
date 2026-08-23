@@ -1,48 +1,51 @@
 """Rule condition matchers."""
 
-import concurrent.futures
 import logging
-import os
-import re
 from typing import Any
 
-from fastsmtp.config import get_settings
-from fastsmtp.metrics.definitions import RULES_REGEX_TIMEOUTS
+import re2
 
 logger = logging.getLogger(__name__)
 
-# Thread pool for regex timeout (ReDoS protection)
-_regex_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
+def _re2_options(case_sensitive: bool) -> re2.Options:
+    """Build RE2 options for a match.
 
-class RegexTimeoutError(Exception):
-    """Raised when a regex evaluation times out (potential ReDoS attack)."""
-
-    def __init__(self, pattern: str, timeout: float):
-        self.pattern = pattern
-        self.timeout = timeout
-        super().__init__(
-            f"Regex evaluation timed out after {timeout}s (pattern: {pattern[:50]}...)"
-        )
-
-
-def _get_regex_executor() -> concurrent.futures.ThreadPoolExecutor:
-    """Get or create the regex thread pool executor.
-
-    Pool size is determined by:
-    1. Settings.regex_thread_pool_size if set
-    2. CPU count (with minimum of 2)
+    log_errors is disabled because RE2 otherwise writes compile failures
+    straight to stderr; we log them ourselves with context.
     """
-    global _regex_executor
-    if _regex_executor is None:
-        settings = get_settings()
-        if settings.regex_thread_pool_size is not None:
-            pool_size = max(1, settings.regex_thread_pool_size)
-        else:
-            pool_size = max(2, os.cpu_count() or 2)
-        _regex_executor = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
-        logger.debug(f"Created regex thread pool with {pool_size} workers")
-    return _regex_executor
+    options = re2.Options()
+    options.case_sensitive = case_sensitive
+    options.log_errors = False
+    return options
+
+
+def _re2_error_reason(exc: re2.error) -> str:
+    """Extract a readable message from an re2.error (its args are bytes)."""
+    reason = exc.args[0] if exc.args else str(exc)
+    if isinstance(reason, bytes):
+        return reason.decode("utf-8", errors="replace")
+    return str(reason)
+
+
+def validate_regex_pattern(pattern: str) -> None:
+    """Raise ValueError if RE2 cannot compile the pattern.
+
+    Rule regexes are evaluated with RE2 (linear-time by construction, so
+    operator-supplied patterns cannot trigger catastrophic backtracking).
+    RE2 does not support backreferences or lookaround; patterns using them
+    are rejected here so they never reach match time. The error message is
+    user-facing: both the rule schema and the rule update endpoint surface
+    it verbatim in their 422 responses.
+    """
+    try:
+        re2.compile(pattern, options=_re2_options(case_sensitive=True))
+    except re2.error as exc:
+        raise ValueError(
+            f"Invalid regex pattern: {_re2_error_reason(exc)}. Rule regexes use "
+            "RE2 syntax (https://github.com/google/re2/wiki/Syntax); "
+            "backreferences and lookaround are not supported."
+        ) from exc
 
 
 def match_equals(value: str, pattern: str, case_sensitive: bool = False) -> bool:
@@ -73,39 +76,19 @@ def match_ends_with(value: str, pattern: str, case_sensitive: bool = False) -> b
     return value.endswith(pattern)
 
 
-def _regex_search(pattern: str, value: str, flags: int) -> bool:
-    """Execute regex search (runs in thread for timeout support)."""
-    return bool(re.search(pattern, value, flags))
-
-
 def match_regex(value: str, pattern: str, case_sensitive: bool = False) -> bool:
     """Match if value matches regex pattern.
 
-    Uses a thread-based timeout to protect against ReDoS attacks.
-
-    Raises:
-        RegexTimeoutError: If regex evaluation times out (potential ReDoS)
+    Evaluated with RE2, which matches in linear time by construction, so a
+    crafted pattern cannot trigger catastrophic backtracking (ReDoS). A stored
+    pattern RE2 cannot compile (backreferences, lookaround, plain syntax
+    errors) logs a warning and does not match, never raises.
     """
-    flags = 0 if case_sensitive else re.IGNORECASE
-    settings = get_settings()
-
     try:
-        # Use thread pool with timeout for ReDoS protection
-        executor = _get_regex_executor()
-        future = executor.submit(_regex_search, pattern, value, flags)
-        return future.result(timeout=settings.regex_timeout_seconds)
-    except concurrent.futures.TimeoutError:
-        # Regex took too long - potential ReDoS attack
-        RULES_REGEX_TIMEOUTS.inc()
-        logger.warning(
-            f"SECURITY: Regex evaluation timed out after {settings.regex_timeout_seconds}s. "
-            f"Pattern: {pattern[:100]}... Value length: {len(value)} chars. "
-            "This may indicate a ReDoS attack."
-        )
-        raise RegexTimeoutError(pattern, settings.regex_timeout_seconds) from None
-    except re.error as e:
-        # Invalid regex pattern - log but don't match
-        logger.warning(f"Invalid regex pattern '{pattern[:100]}': {e}")
+        return bool(re2.search(pattern, value, options=_re2_options(case_sensitive)))
+    except re2.error as e:
+        # Invalid or RE2-unsupported pattern - log but don't match
+        logger.warning(f"Invalid regex pattern '{pattern[:100]}': {_re2_error_reason(e)}")
         return False
 
 
