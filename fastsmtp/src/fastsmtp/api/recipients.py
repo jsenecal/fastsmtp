@@ -3,7 +3,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp.auth import Auth, get_domain_with_access
@@ -13,6 +13,20 @@ from fastsmtp.schemas.common import MessageResponse
 from fastsmtp.schemas.recipient import RecipientCreate, RecipientResponse, RecipientUpdate
 
 router = APIRouter(tags=["recipients"])
+
+
+def _conflicting_local_part(local_part: str | None) -> ColumnElement[bool]:
+    """Filter for rows that conflict with creating ``local_part``.
+
+    Mirrors what the database enforces: a soft-deleted catch-all does not
+    block a new one (``ix_recipients_domain_catchall`` only indexes live
+    rows), but a soft-deleted named local part still does, because
+    ``uq_recipient_local_part`` counts tombstones - ignoring them here would
+    only turn the 409 into an IntegrityError at flush.
+    """
+    if local_part:
+        return Recipient.local_part == local_part
+    return and_(Recipient.local_part.is_(None), Recipient.deleted_at.is_(None))
 
 
 @router.get("/domains/{domain_id}/recipients", response_model=list[RecipientResponse])
@@ -58,7 +72,7 @@ async def create_recipient(
     # Check for duplicate
     stmt = select(Recipient).where(
         Recipient.domain_id == domain_id,
-        Recipient.local_part == local_part if local_part else Recipient.local_part.is_(None),
+        _conflicting_local_part(local_part),
     )
     result = await session.execute(stmt)
     if result.scalar_one_or_none():
@@ -147,9 +161,7 @@ async def update_recipient(
             check_stmt = select(Recipient).where(
                 Recipient.domain_id == domain_id,
                 Recipient.id != recipient_id,
-                Recipient.local_part == new_local_part
-                if new_local_part
-                else Recipient.local_part.is_(None),
+                _conflicting_local_part(new_local_part),
             )
             check_result = await session.execute(check_stmt)
             if check_result.scalar_one_or_none():
