@@ -276,3 +276,29 @@ def test_every_server_route_has_a_client_method(openapi: dict[str, Any], route: 
     assert not missing, "server routes no client method reaches: " + ", ".join(
         f"{method.upper()} {template}" for template, method in sorted(missing)
     )
+
+
+#: (HTTP method, path template, field) the client can send as an explicit JSON
+#: null to clear the column. The server schema must keep accepting null there,
+#: or `--option ''` starts failing with a 422.
+CLEARABLE_FIELDS = [
+    ("put", "/api/v1/users/{user_id}", "email"),
+    ("put", "/api/v1/domains/{domain_id}/recipients/{recipient_id}", "local_part"),
+    ("put", "/api/v1/domains/{domain_id}/rules/{rule_id}", "webhook_url_override"),
+]
+
+
+@pytest.mark.parametrize(("http_method", "template", "field"), CLEARABLE_FIELDS)
+def test_clearable_fields_accept_null(
+    openapi: dict[str, Any], http_method: str, template: str, field: str
+) -> None:
+    """Fields the client clears with an explicit null must be nullable server-side."""
+    operation = openapi["paths"][template][http_method]
+    body_schema = _resolve(
+        openapi, operation["requestBody"]["content"]["application/json"]["schema"]
+    )
+    field_schema = _resolve(openapi, body_schema["properties"][field])
+    assert any(entry.get("type") == "null" for entry in field_schema.get("anyOf", [])), (
+        f"{http_method.upper()} {template} no longer accepts null for {field!r}, "
+        f"but the CLI sends one to clear it (schema: {field_schema})"
+    )

@@ -180,6 +180,31 @@ class TestRecipientsCRUD:
         assert data["is_enabled"] is False
 
     @pytest.mark.asyncio
+    async def test_update_recipient_explicit_null_local_part_makes_catch_all(
+        self, auth_client: AsyncClient, test_domain: Domain, test_session: AsyncSession
+    ):
+        """An explicit ``"local_part": null`` clears the column (catch-all).
+
+        The CLI relies on this to implement ``fsmtp recipient update --local ''``.
+        """
+        recipient = Recipient(
+            domain_id=test_domain.id,
+            local_part="nulltest",
+            webhook_url="https://example.com/null",
+            is_enabled=True,
+        )
+        test_session.add(recipient)
+        await test_session.commit()
+        await test_session.refresh(recipient)
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{test_domain.id}/recipients/{recipient.id}",
+            json={"local_part": None},
+        )
+        assert response.status_code == 200
+        assert response.json()["local_part"] is None
+
+    @pytest.mark.asyncio
     async def test_delete_recipient(
         self, auth_client: AsyncClient, test_domain: Domain, test_session: AsyncSession
     ):

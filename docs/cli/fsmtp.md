@@ -2,6 +2,16 @@
 
 The remote CLI connects to a FastSMTP server over HTTPS for remote management. For running the server itself, see the [server CLI](fastsmtp.md).
 
+!!! note "Update conventions"
+
+    Every `update` command sends only the options you name, so an omitted option
+    leaves that setting untouched. Options backed by a *nullable* column go one
+    further: passing an empty string (`--option ''`) clears the stored value —
+    the CLI sends an explicit JSON null. This applies to `users update --email`,
+    `recipient update --local` and `rules rule update --webhook-url`. Nullable
+    boolean flags use `true`/`false`/`inherit` instead — see
+    [Domain Management](#domain-management).
+
 ## Configuration
 
 ```bash
@@ -63,6 +73,9 @@ fsmtp users create alice --email alice@example.com --superuser
 # Rename a user or change their email
 fsmtp users update <user-id> --username bob --email bob@example.com
 
+# Clear a user's email (nullable column: '' sends an explicit null)
+fsmtp users update <user-id> --email ''
+
 # Deactivate an account, or grant/revoke superuser
 fsmtp users update <user-id> --inactive
 fsmtp users update <user-id> --superuser
@@ -75,7 +88,8 @@ fsmtp users delete <user-id>
 !!! note "Options left off are left alone"
 
     `users update` sends only the options you name, so an omitted flag leaves that
-    column untouched. At least one option is required.
+    column untouched, while `--email ''` clears the stored address. At least one
+    option is required.
 
 ## Domain Management
 
@@ -142,6 +156,9 @@ fsmtp recipient create <domain-id> https://n8n.example.com/webhook/email \
 fsmtp recipient update <domain-id> <recipient-id> \
   --webhook https://new-webhook.example.com/email
 
+# Clear the local part to turn a recipient into the domain's catch-all
+fsmtp recipient update <domain-id> <recipient-id> --local ''
+
 # Delete recipient
 fsmtp recipient delete <domain-id> <recipient-id>
 ```
@@ -192,6 +209,9 @@ fsmtp rules rule create <domain-id> <ruleset-id> \
 # Update a rule (rules are addressed by domain, not by ruleset)
 fsmtp rules rule update <domain-id> <rule-id> --action drop
 fsmtp rules rule update <domain-id> <rule-id> --no-preserve-raw
+
+# Remove a rule's webhook override so it falls back to the recipient's URL
+fsmtp rules rule update <domain-id> <rule-id> --webhook-url ''
 
 # Set the evaluation order of a ruleset's rules
 fsmtp rules rule reorder <domain-id> <ruleset-id> <rule-id-1> <rule-id-2>

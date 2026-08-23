@@ -11,6 +11,7 @@ from typing import Annotated
 import typer
 
 from fastsmtp_cli.client import APIError, FastSMTPClient
+from fastsmtp_cli.commands.options import clearable_str
 from fastsmtp_cli.output import (
     print_error,
     print_rule,
@@ -364,7 +365,11 @@ def update_rule(
     ] = None,
     webhook_url: Annotated[
         str | None,
-        typer.Option("--webhook-url", "-w", help="Override the webhook URL for this rule"),
+        typer.Option(
+            "--webhook-url",
+            "-w",
+            help="Override the webhook URL for this rule; pass '' to remove the override",
+        ),
     ] = None,
     tags: Annotated[
         list[str] | None,
@@ -402,7 +407,7 @@ def update_rule(
                 value=value,
                 action=action,
                 case_sensitive=case_sensitive,
-                webhook_url_override=webhook_url,
+                webhook_url_override=clearable_str(webhook_url),
                 add_tags=tags,
                 preserve_raw=preserve_raw,
             )

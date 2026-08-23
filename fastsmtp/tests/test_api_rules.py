@@ -348,6 +348,39 @@ class TestRulesCRUD:
         assert data["action"] == "drop"
 
     @pytest.mark.asyncio
+    async def test_update_rule_explicit_null_clears_webhook_override(
+        self,
+        auth_client: AsyncClient,
+        test_domain_and_ruleset: tuple[Domain, RuleSet],
+        test_session: AsyncSession,
+    ):
+        """An explicit ``"webhook_url_override": null`` clears the override.
+
+        The CLI relies on this to implement
+        ``fsmtp rules rule update --webhook-url ''``.
+        """
+        domain, ruleset = test_domain_and_ruleset
+        rule = Rule(
+            ruleset_id=ruleset.id,
+            order=0,
+            field="from",
+            operator="equals",
+            value="override@test.com",
+            action="forward",
+            webhook_url_override="https://example.com/override",
+        )
+        test_session.add(rule)
+        await test_session.commit()
+        await test_session.refresh(rule)
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{domain.id}/rules/{rule.id}",
+            json={"webhook_url_override": None},
+        )
+        assert response.status_code == 200, response.json()
+        assert response.json()["webhook_url_override"] is None
+
+    @pytest.mark.asyncio
     async def test_delete_rule(
         self,
         auth_client: AsyncClient,
