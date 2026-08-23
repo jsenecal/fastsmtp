@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from fastsmtp_cli.output import (
     console,
+    field,
     format_datetime,
     print_api_key,
     print_api_keys_table,
@@ -30,6 +31,7 @@ from fastsmtp_cli.output import (
     print_users_table,
     print_warning,
     print_whoami,
+    short_id,
     status_style,
     truncate,
 )
@@ -88,6 +90,41 @@ class TestTruncate:
         """Test text at exact max length is not truncated."""
         text = "a" * 50
         assert truncate(text, max_length=50) == text
+
+
+class TestField:
+    """Tests for the field helper (escaped server text with a placeholder)."""
+
+    def test_none_renders_placeholder(self):
+        assert field(None) == "-"
+
+    def test_empty_string_renders_placeholder(self):
+        assert field("") == "-"
+
+    def test_custom_placeholder(self):
+        assert field(None, placeholder="all") == "all"
+
+    def test_plain_text_passes_through(self):
+        assert field("example.com") == "example.com"
+
+    def test_non_string_is_stringified(self):
+        assert field(42) == "42"
+
+    def test_markup_is_escaped(self):
+        assert field("[red]x[/red]") == r"\[red]x\[/red]"
+
+
+class TestShortId:
+    """Tests for the short_id helper (truncated, escaped identifiers)."""
+
+    def test_none_renders_placeholder(self):
+        assert short_id(None) == "-"
+
+    def test_id_is_truncated_to_eight_chars(self):
+        assert short_id("123e4567-e89b-12d3-a456-426614174000") == "123e4567..."
+
+    def test_markup_in_id_is_escaped(self):
+        assert short_id("[/x]bad-id") == r"\[/x]bad-..."
 
 
 class TestStatusStyle:
@@ -855,3 +892,253 @@ class TestServerShapedOutput:
 
         assert "FAILED" in output
         assert "timeout" in output
+
+
+class TestServerTextEscaping:
+    """Server-supplied text must render literally, never parse as rich markup.
+
+    Rich parses plain-string cells as markup, so a bracketed value could crash
+    the command (``MarkupError`` on an unmatched closing tag) or inject styling
+    and disguised links into another admin's terminal. Only the markup the
+    formatters build deliberately (``yes_no``, ``tri_state``, the
+    ``status_style`` wrappers) may parse.
+    """
+
+    # An unmatched closing tag: raises MarkupError if rich parses it.
+    BAD = "ex[/x].com"
+
+    def test_markup_in_username_renders_literally(self, capsys, monkeypatch):
+        """Injected tags must appear as text, not be swallowed as styling."""
+        monkeypatch.setattr(console, "_width", 200)
+        payload = "[bold red on white]PWNED[/bold red on white]"
+        print_users_table(
+            [
+                {
+                    "id": "123e4567-e89b-12d3-a456-426614174000",
+                    "username": payload,
+                    "email": "user@example.com",
+                    "is_superuser": False,
+                    "is_active": True,
+                    "created_at": "2024-01-15T10:00:00Z",
+                }
+            ]
+        )
+        output = " ".join(capsys.readouterr().out.split())
+        assert payload in output
+
+    def test_link_markup_is_not_rendered_as_link(self, capsys, monkeypatch):
+        """A disguised [link=...] must not become a clickable link."""
+        monkeypatch.setattr(console, "_width", 200)
+        payload = "[link=file:///etc/passwd]click[/link]"
+        print_user(
+            {
+                "id": "u1",
+                "username": payload,
+                "email": None,
+                "is_superuser": False,
+                "is_active": True,
+                "created_at": "2024-01-15T10:00:00Z",
+                "updated_at": "2024-01-15T10:00:00Z",
+            }
+        )
+        output = " ".join(capsys.readouterr().out.split())
+        assert payload in output
+
+    def test_domain_printers_survive_malformed_markup(self):
+        domain = {
+            "id": self.BAD,
+            "domain_name": self.BAD,
+            "is_enabled": True,
+            "verify_dkim": None,
+            "verify_spf": None,
+            "reject_dkim_fail": None,
+            "reject_spf_fail": None,
+            "preserve_raw_message": None,
+            "created_at": "2024-01-15T10:00:00Z",
+            "updated_at": "2024-01-15T10:00:00Z",
+        }
+        print_domains_table([domain])
+        print_domain(domain)
+
+    def test_user_printers_survive_malformed_markup(self):
+        user = {
+            "id": self.BAD,
+            "username": self.BAD,
+            "email": self.BAD,
+            "is_superuser": False,
+            "is_active": True,
+            "created_at": "2024-01-15T10:00:00Z",
+            "updated_at": "2024-01-15T10:00:00Z",
+        }
+        print_users_table([user])
+        print_user(user)
+
+    def test_member_printer_survives_malformed_markup(self):
+        print_members_table(
+            [
+                {
+                    "id": "m1",
+                    "user_id": self.BAD,
+                    "username": self.BAD,
+                    "role": self.BAD,
+                    "created_at": "2024-01-15T10:00:00Z",
+                }
+            ]
+        )
+
+    def test_recipient_printers_survive_malformed_markup(self):
+        recipient = {
+            "id": self.BAD,
+            "local_part": self.BAD,
+            "webhook_url": self.BAD,
+            "webhook_headers": {self.BAD: self.BAD},
+            "is_enabled": True,
+            "created_at": "2024-01-15T10:00:00Z",
+        }
+        print_recipients_table([recipient])
+        print_recipient(recipient)
+
+    def test_ruleset_and_rule_printers_survive_malformed_markup(self):
+        rule = {
+            "id": self.BAD,
+            "ruleset_id": self.BAD,
+            "order": 1,
+            "field": self.BAD,
+            "operator": self.BAD,
+            "value": self.BAD,
+            "case_sensitive": False,
+            "action": self.BAD,
+            "webhook_url_override": self.BAD,
+            "add_tags": [self.BAD],
+            "preserve_raw": False,
+            "created_at": "2024-01-15T10:00:00Z",
+        }
+        ruleset = {
+            "id": self.BAD,
+            "name": self.BAD,
+            "priority": 0,
+            "stop_on_match": False,
+            "is_enabled": True,
+            "created_at": "2024-01-15T10:00:00Z",
+            "rules": [rule],
+        }
+        print_rulesets_table([ruleset])
+        print_ruleset(ruleset)
+        print_rules_table([rule])
+        print_rule(rule)
+
+    def test_delivery_log_printers_survive_malformed_markup(self):
+        log = {
+            "id": self.BAD,
+            "message_id": self.BAD,
+            "recipient_id": self.BAD,
+            "webhook_url": self.BAD,
+            "status": self.BAD,
+            "attempts": 1,
+            "last_status_code": 500,
+            "dkim_result": self.BAD,
+            "spf_result": self.BAD,
+            "last_error": self.BAD,
+            "created_at": "2024-01-15T10:00:00Z",
+            "next_retry_at": None,
+        }
+        print_delivery_logs_table([log])
+        print_delivery_log(log)
+
+    def test_api_key_printers_survive_malformed_markup(self):
+        key = {
+            "id": self.BAD,
+            "name": self.BAD,
+            "scopes": [self.BAD],
+            "expires_at": None,
+            "last_used_at": None,
+            "created_at": "2024-01-15T10:00:00Z",
+            "key": self.BAD,
+        }
+        print_api_keys_table([key])
+        print_api_key(key, show_secret=True)
+
+    def test_whoami_and_health_survive_malformed_markup(self):
+        print_whoami(
+            {
+                "user": {
+                    "id": self.BAD,
+                    "username": self.BAD,
+                    "email": self.BAD,
+                    "is_superuser": False,
+                },
+                "domains": [self.BAD],
+                "is_root": False,
+            }
+        )
+        print_health({"status": self.BAD, "version": self.BAD, "instance_id": self.BAD})
+        print_ready({"status": self.BAD, "database": self.BAD})
+
+    def test_profiles_table_survives_malformed_markup(self):
+        from fastsmtp_cli.config import Profile
+
+        profiles = {self.BAD: Profile(url=self.BAD, api_key=self.BAD)}
+        print_profiles_table(profiles, default_profile=self.BAD, show_keys=True)
+
+    def test_status_message_survives_malformed_markup(self):
+        """A server-sent message routed through print_success must not parse."""
+        print_success(self.BAD)
+        print_warning(self.BAD)
+        print_info(self.BAD)
+
+    def test_status_text_inside_style_wrapper_renders_literally(self, capsys, monkeypatch):
+        """The wrapper tags parse; the server status inside them must not."""
+        monkeypatch.setattr(console, "_width", 200)
+        print_delivery_logs_table(
+            [
+                {
+                    "id": "l1",
+                    "message_id": "<m@example.com>",
+                    "recipient_id": None,
+                    "status": "deliv[/x]ered",
+                    "attempts": 1,
+                    "created_at": "2024-01-15T10:00:00Z",
+                }
+            ]
+        )
+        output = " ".join(capsys.readouterr().out.split())
+        assert "deliv[/x]ered" in output
+
+    def test_deliberate_styling_still_parses(self, capsys, monkeypatch):
+        """yes_no / tri_state / status wrappers must keep rendering as markup."""
+        monkeypatch.setattr(console, "_width", 200)
+        print_domain(
+            {
+                "id": "d1",
+                "domain_name": "example.com",
+                "is_enabled": True,
+                "verify_dkim": None,
+                "verify_spf": False,
+                "reject_dkim_fail": None,
+                "reject_spf_fail": None,
+                "preserve_raw_message": None,
+                "created_at": "2024-01-15T10:00:00Z",
+                "updated_at": "2024-01-15T10:00:00Z",
+            }
+        )
+        output = capsys.readouterr().out
+        assert "Yes" in output
+        assert "inherit" in output
+        assert "[green]" not in output
+        assert "[dim]" not in output
+
+    def test_catch_all_placeholder_still_parses(self, capsys, monkeypatch):
+        monkeypatch.setattr(console, "_width", 200)
+        recipient = {
+            "id": "r1",
+            "local_part": None,
+            "webhook_url": "https://hook.example.com",
+            "webhook_headers": {},
+            "is_enabled": True,
+            "created_at": "2024-01-15T10:00:00Z",
+        }
+        print_recipients_table([recipient])
+        print_recipient(recipient)
+        output = capsys.readouterr().out
+        assert "(catch-all)" in output
+        assert "[dim]" not in output
