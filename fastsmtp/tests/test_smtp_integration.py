@@ -460,7 +460,6 @@ class TestSMTPSTARTTLS:
 
         if result.returncode != 0:
             pytest.skip("openssl not available for TLS testing")
-            return None
 
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
