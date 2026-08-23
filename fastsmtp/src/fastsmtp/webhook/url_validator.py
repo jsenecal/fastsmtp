@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 import httpcore
 import httpx
 
+from fastsmtp.net import ip_in_networks
+
 # Private and reserved IP ranges that should be blocked
 BLOCKED_IP_RANGES = [
     # Loopback
@@ -59,12 +61,7 @@ def is_ip_blocked(ip_str: str) -> bool:
     Returns:
         True if the IP is blocked, False otherwise
     """
-    try:
-        ip = ipaddress.ip_address(ip_str)
-        return any(ip in network for network in BLOCKED_IP_RANGES)
-    except ValueError:
-        # Invalid IP address format
-        return False
+    return ip_in_networks(ip_str, BLOCKED_IP_RANGES)
 
 
 def is_host_in_allowlist(host: str, allowed_internal_domains: list[str] | None) -> bool:

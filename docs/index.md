@@ -44,6 +44,7 @@ flowchart LR
 - [Getting Started](getting-started.md) — install and run FastSMTP locally or with Docker
 - [Configuration](configuration.md) — all environment variables
 - [Webhook Payload](webhooks.md) — what your webhook receives
+- [Monitoring](monitoring.md) — Prometheus metrics, health checks, and restricting scrape access
 - [CLI Reference](cli/fastsmtp.md) — server and remote CLI tools
 
 ## License

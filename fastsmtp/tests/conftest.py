@@ -2,7 +2,8 @@
 
 import asyncio
 import os
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, AsyncIterator, Generator
+from contextlib import asynccontextmanager
 
 import pytest
 from testcontainers.community.postgres import PostgresContainer
@@ -144,39 +145,54 @@ async def auth_client(
 SERVER_START_TIMEOUT = 10.0
 
 
-@pytest_asyncio.fixture
-async def server_url(app: FastAPI) -> AsyncGenerator[str, None]:
-    """Serve the test app over real TCP and yield its base URL.
+@asynccontextmanager
+async def serving(app, **uvicorn_kwargs) -> AsyncIterator[str]:
+    """Serve an ASGI app over real TCP and yield its base URL.
 
     Most API tests drive the app in-process through httpx's ASGITransport, which
     awaits the entire app call before returning. Anything that depends on when
     bytes actually reach the client - response/commit ordering, connection reuse -
-    is invisible under that transport and needs a real socket.
+    or on layers ASGITransport does not have, such as uvicorn's proxy-header
+    rewriting, is invisible under that transport and needs a real socket.
 
     The server runs inside the test's own event loop, so handlers share the loop
     the test-database engine was created on. Blocking clients must therefore run
     on a worker thread; see :func:`run_blocking`.
     """
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", **uvicorn_kwargs)
     server = uvicorn.Server(config)
     server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
-    serving = asyncio.create_task(server.serve())
+    serving_task = asyncio.create_task(server.serve())
 
     deadline = asyncio.get_running_loop().time() + SERVER_START_TIMEOUT
     while not server.started:
-        if serving.done():  # pragma: no cover - startup failure
-            serving.result()
+        if serving_task.done():  # pragma: no cover - startup failure
+            serving_task.result()
             raise RuntimeError("uvicorn server exited before starting")
         if asyncio.get_running_loop().time() > deadline:  # pragma: no cover - hung bind
-            serving.cancel()
+            serving_task.cancel()
             raise TimeoutError(f"uvicorn did not start within {SERVER_START_TIMEOUT}s")
         await anyio.sleep(0.02)
 
     port = server.servers[0].sockets[0].getsockname()[1]
-    yield f"http://127.0.0.1:{port}"
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving_task, timeout=SERVER_START_TIMEOUT)
 
-    server.should_exit = True
-    await asyncio.wait_for(serving, timeout=SERVER_START_TIMEOUT)
+
+@pytest_asyncio.fixture
+async def server_url(app: FastAPI) -> AsyncGenerator[str, None]:
+    """Serve the standard test app over real TCP and yield its base URL."""
+    async with serving(app) as url:
+        yield url
+
+
+@pytest.fixture
+def serve_app():
+    """Expose :func:`serving` to tests needing their own app or uvicorn options."""
+    return serving
 
 
 @pytest.fixture

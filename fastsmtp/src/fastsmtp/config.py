@@ -9,6 +9,8 @@ from uuid import uuid4
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from fastsmtp.net import parse_networks
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -140,6 +142,23 @@ class Settings(BaseSettings):
         description="S3 key prefix for preserved raw messages",
     )
 
+    # Metrics endpoint access control
+    metrics_allowed_ips: list[str] = Field(
+        default_factory=list,
+        description="IP addresses or CIDR prefixes allowed to scrape /metrics. "
+        "Empty (default) leaves the endpoint unrestricted. Metrics expose message "
+        "volumes, queue depth and authentication failure rates, so restrict this "
+        "whenever the API port is reachable beyond your monitoring network.",
+    )
+    metrics_trusted_proxies: list[str] = Field(
+        default_factory=list,
+        description="IP addresses or CIDR prefixes of reverse proxies whose "
+        "X-Forwarded-For header may be trusted when checking metrics_allowed_ips. "
+        "Empty (default) means the header is never trusted and the socket peer is "
+        "used. Only list proxies you control: anything listed here can assert an "
+        "arbitrary client address.",
+    )
+
     # Dead Letter Queue
     dlq_webhook_url: str | None = Field(
         default=None,
@@ -256,6 +275,20 @@ class Settings(BaseSettings):
         if not self.s3_secret_key:
             missing.append("s3_secret_key")
         return missing
+
+    @model_validator(mode="after")
+    def validate_metrics_access(self) -> "Settings":
+        """Reject malformed metrics access entries at startup.
+
+        A typo must not be silently skipped: an allowlist that fails open is
+        worse than no allowlist, because the operator believes it is enforced.
+        """
+        for field_name in ("metrics_allowed_ips", "metrics_trusted_proxies"):
+            try:
+                parse_networks(getattr(self, field_name))
+            except ValueError as e:
+                raise ValueError(f"{field_name}: {e}") from e
+        return self
 
     @model_validator(mode="after")
     def validate_s3_config(self) -> "Settings":

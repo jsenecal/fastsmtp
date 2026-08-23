@@ -182,3 +182,47 @@ class TestRawMessagePreservationConfig:
         )
         assert settings.preserve_raw_message is True
         assert settings.preserve_raw_required is True
+
+
+class TestMetricsAccessConfig:
+    """Tests for metrics endpoint access control settings."""
+
+    def _settings(self, **overrides) -> Settings:
+        base = {
+            "database_url": "sqlite+aiosqlite:///:memory:",
+            "root_api_key": "test_key_12345",
+        }
+        base.update(overrides)
+        return Settings(**base)
+
+    def test_defaults_are_unrestricted(self):
+        """Test metrics access is unrestricted by default."""
+        settings = self._settings()
+        assert settings.metrics_allowed_ips == []
+        assert settings.metrics_trusted_proxies == []
+
+    def test_accepts_addresses_and_prefixes(self):
+        """Test the allowlist accepts bare addresses and CIDR prefixes."""
+        settings = self._settings(
+            metrics_allowed_ips=["10.0.0.0/8", "192.0.2.5", "2001:db8::/32"],
+        )
+        assert len(settings.metrics_allowed_ips) == 3
+
+    def test_rejects_malformed_allowlist_entry(self):
+        """Test a malformed allowlist entry is rejected at startup.
+
+        Failing open on a typo would leave metrics exposed while the operator
+        believes they are restricted.
+        """
+        with pytest.raises(ValueError, match="metrics_allowed_ips"):
+            self._settings(metrics_allowed_ips=["10.0.0.0/8", "nonsense"])
+
+    def test_rejects_malformed_trusted_proxy_entry(self):
+        """Test a malformed trusted-proxy entry is rejected at startup."""
+        with pytest.raises(ValueError, match="metrics_trusted_proxies"):
+            self._settings(metrics_trusted_proxies=["not-a-cidr"])
+
+    def test_rejects_prefix_with_host_bits_set(self):
+        """Test a prefix with host bits set is rejected rather than silently widened."""
+        with pytest.raises(ValueError, match="metrics_allowed_ips"):
+            self._settings(metrics_allowed_ips=["10.1.2.3/8"])

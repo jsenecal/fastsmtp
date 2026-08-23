@@ -17,6 +17,7 @@ nav = [
   { "Rule Engine" = "rules.md" },
   { "Webhook Payload" = "webhooks.md" },
   { "API Reference" = "api.md" },
+  { "Monitoring" = "monitoring.md" },
   { "CLI Reference" = [
     { "Server CLI (fastsmtp)" = "cli/fastsmtp.md" },
     { "Remote CLI (fsmtp)" = "cli/fsmtp.md" },
