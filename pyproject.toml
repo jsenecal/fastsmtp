@@ -13,6 +13,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=4.0",
+    "pytest-timeout>=2.4.0",
     "respx>=0.21",
     "ruff>=0.4",
     "testcontainers[postgres]>=4.15",
@@ -63,6 +64,21 @@ testpaths = ["fastsmtp/tests", "fastsmtp-cli/tests"]
 markers = [
     "migrations: runs the Alembic chain against a throwaway database (deselect with -m 'not migrations')",
 ]
+# Turn a silent hang into a stack trace naming the test. The suite drives real
+# servers, sockets and containers, so a hang is a realistic failure mode, and
+# left unbounded it burns the whole GitHub Actions job timeout and reports
+# nothing at all. Deliberately generous: a hang detector, not a slow-test
+# policy. Every test but one finishes in under 5.2s; the exception carries its
+# own marker (see test_match_regex_redos_protection).
+timeout = 120
+# Not the default, and load-bearing. The signal method arms a one-shot SIGALRM
+# for the whole item, so once it has fired in the test body nothing is armed
+# for teardown -- and teardown here shuts down uvicorn and exits the Postgres
+# container, exactly where a wedged run would then hang silently a second time.
+# The thread method exits the process outright after dumping every thread's
+# stack, so the run always ends with a diagnostic, and the all-thread dump is
+# what a deadlock needs to be readable.
+timeout_method = "thread"
 filterwarnings = [
     # A new DeprecationWarning is a signal, not scenery: fail the run instead of
     # letting it scroll past in the warnings summary. Later entries win over
