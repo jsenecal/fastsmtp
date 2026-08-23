@@ -379,8 +379,10 @@ class TestHealthCheckDepth:
         """Test _check_smtp_port returns unavailable when connection refused."""
         from fastsmtp.api.operations import _check_smtp_port
 
-        # Use a port that's almost certainly not listening
-        result = await _check_smtp_port("127.0.0.1", 59999, connect_timeout=1.0)
+        # Port 1 requires root to bind, so nothing can be listening on it --
+        # unlike an ephemeral-range port, which a concurrent test run's SMTP
+        # server could legitimately occupy.
+        result = await _check_smtp_port("127.0.0.1", 1, connect_timeout=1.0)
         assert result == "unavailable"
 
     @pytest.mark.asyncio
