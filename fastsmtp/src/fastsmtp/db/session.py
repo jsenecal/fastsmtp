@@ -8,8 +8,13 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from starlette.requests import Request
 
 from fastsmtp.config import get_settings
+
+#: Attribute the request-scoped session is published under on ``request.state``.
+#: DBSessionMiddleware writes it; get_session reads it. Keep them in step.
+REQUEST_SESSION_ATTR = "db"
 
 # Module-level singletons (lazily initialized)
 _engine: AsyncEngine | None = None
@@ -62,15 +67,21 @@ def async_session() -> AsyncSession:
     return get_async_session_factory()()
 
 
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """Dependency for getting async database sessions."""
-    async with get_async_session_factory()() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
+    """Dependency yielding the request-scoped database session.
+
+    The session is created and committed by DBSessionMiddleware. Committing here
+    instead would happen in this dependency's teardown, which runs after the
+    response has been flushed to the client - losing read-your-own-write for any
+    caller that reads back what it just wrote.
+    """
+    session = getattr(request.state, REQUEST_SESSION_ATTR, None)
+    if session is None:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "No request-scoped database session. DBSessionMiddleware must be "
+            "installed on the application."
+        )
+    yield session
 
 
 async def close_engine() -> None:

@@ -11,7 +11,11 @@ from fastsmtp.api.router import api_router
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.session import close_engine
 from fastsmtp.metrics import MetricsMiddleware
-from fastsmtp.middleware import RateLimitMiddleware, RequestLoggingMiddleware
+from fastsmtp.middleware import (
+    DBSessionMiddleware,
+    RateLimitMiddleware,
+    RequestLoggingMiddleware,
+)
 
 
 @asynccontextmanager
@@ -42,6 +46,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Store settings on app state for access in routes
     app.state.settings = settings
+
+    # Database session middleware. Added first so it is the innermost layer:
+    # it must wrap the routes, and its commit must land before the response is
+    # handed back up the stack.
+    app.add_middleware(DBSessionMiddleware)
 
     # Add request logging middleware
     app.add_middleware(RequestLoggingMiddleware)
