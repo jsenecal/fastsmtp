@@ -35,6 +35,10 @@ class S3RawMessageInfo:
     presigned_url: str | None = None
 
 
+class S3ConfigurationError(Exception):
+    """Raised when S3 storage is asked for without bucket or credentials."""
+
+
 class S3UploadError(Exception):
     """Raised when S3 upload fails."""
 
@@ -64,7 +68,26 @@ class S3Storage:
     """Async S3 storage client for attachments."""
 
     def __init__(self, settings: "Settings"):
+        """Bind to settings that actually carry a bucket and credentials.
+
+        ``validate_s3_config`` only guards the globally-enabled features; raw
+        preservation is also switched on per domain and per rule in the
+        database, so a row can request S3 on a process configured without it.
+        Resolving the three required values here means the rest of the class --
+        and mypy -- can treat them as present.
+        """
+        bucket = settings.s3_bucket
+        access_key = settings.s3_access_key
+        secret_key = settings.s3_secret_key
+        if not (bucket and access_key and secret_key):
+            raise S3ConfigurationError(
+                f"S3 storage requires: {', '.join(settings.missing_s3_settings())}"
+            )
+
         self.settings = settings
+        self.bucket = bucket
+        self._access_key = access_key
+        self._secret_key = secret_key
         self._session = get_session()
 
     def _build_key(self, domain: str, message_id: str, filename: str) -> str:
@@ -93,7 +116,7 @@ class S3Storage:
 
     def _build_url(self, key: str) -> str:
         """Build public URL for S3 object."""
-        bucket = self.settings.s3_bucket
+        bucket = self.bucket
         if self.settings.s3_endpoint_url:
             endpoint = self.settings.s3_endpoint_url.rstrip("/")
             return f"{endpoint}/{bucket}/{key}"
@@ -104,8 +127,8 @@ class S3Storage:
     def _client_kwargs(self) -> dict[str, Any]:
         """Build keyword arguments for creating the S3 client."""
         kwargs: dict[str, Any] = {
-            "aws_access_key_id": self.settings.s3_access_key.get_secret_value(),
-            "aws_secret_access_key": self.settings.s3_secret_key.get_secret_value(),
+            "aws_access_key_id": self._access_key.get_secret_value(),
+            "aws_secret_access_key": self._secret_key.get_secret_value(),
             "region_name": self.settings.s3_region,
         }
         if self.settings.s3_endpoint_url:
@@ -136,7 +159,7 @@ class S3Storage:
             S3UploadError: If upload fails
         """
         key = self._build_key(domain, message_id, filename)
-        bucket = self.settings.s3_bucket
+        bucket = self.bucket
 
         try:
             async with self._session.create_client("s3", **self._client_kwargs()) as client:
@@ -190,7 +213,7 @@ class S3Storage:
             S3UploadError: If upload fails
         """
         key = self._build_raw_key(domain, message_id, received_at)
-        bucket = self.settings.s3_bucket
+        bucket = self.bucket
 
         try:
             async with self._session.create_client("s3", **self._client_kwargs()) as client:

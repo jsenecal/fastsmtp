@@ -21,10 +21,13 @@ def format_datetime(dt: str | datetime | None) -> str:
         return "-"
     if isinstance(dt, str):
         try:
-            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(dt.replace("Z", "+00:00"))
         except ValueError:
+            # Not a timestamp we understand -- show it as the server sent it.
             return dt
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        parsed = dt
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def truncate(text: str | None, max_length: int = 50) -> str:

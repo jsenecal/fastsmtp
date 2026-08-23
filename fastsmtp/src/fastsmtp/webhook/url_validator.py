@@ -199,13 +199,13 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
 
     async def handle_async_request(self, request: httpcore.Request) -> httpcore.Response:
         """Handle request with IP validation at connection time."""
-        host = request.url.host
-        if host is None:
+        # httpcore always stores the host as bytes, and uses b"" for "absent".
+        # Decode once into a str local so every check below -- and every error
+        # message -- works on text rather than on b'example.com'.
+        raw_host = request.url.host
+        if not raw_host:
             raise SSRFError("Request has no host")
-
-        # Decode host if bytes
-        if isinstance(host, bytes):
-            host = host.decode("ascii")
+        host = raw_host.decode("ascii")
 
         # Check if domain is in allowlist (bypass SSRF protection)
         if is_host_in_allowlist(host, self._allowed_domains):
