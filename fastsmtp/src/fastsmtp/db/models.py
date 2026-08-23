@@ -229,7 +229,21 @@ class Recipient(Base, TimestampMixin, SoftDeleteMixin):
     domain: Mapped["Domain"] = relationship(back_populates="recipients")
 
     __table_args__ = (
-        UniqueConstraint("domain_id", "local_part", name="uq_recipient_local_part"),
+        # Partial unique index (not a UniqueConstraint, which cannot take a
+        # predicate): at most one *live* recipient per (domain, local_part).
+        # Soft-deleted rows are excluded so a tombstone does not block
+        # recreating the same local part. NULL local_part rows never conflict
+        # here (SQL NULL semantics); the catch-all case is owned by
+        # ix_recipients_domain_catchall below. The name is kept from the old
+        # constraint so error messages and references stay stable.
+        Index(
+            "uq_recipient_local_part",
+            "domain_id",
+            "local_part",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+            sqlite_where=text("deleted_at IS NULL"),
+        ),
         Index("ix_recipients_domain_local", "domain_id", "local_part"),
         # Partial unique index to prevent multiple catch-all recipients per domain
         # PostgreSQL allows multiple NULLs in unique constraints, so we need this

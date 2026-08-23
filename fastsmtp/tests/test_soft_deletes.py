@@ -324,3 +324,74 @@ class TestCatchallIndexWithSoftDelete:
         with pytest.raises(IntegrityError):
             await test_session.commit()
         await test_session.rollback()
+
+
+class TestNamedLocalPartIndexWithSoftDelete:
+    """The named local-part unique index must not count soft-deleted rows.
+
+    ``uq_recipient_local_part`` exists to allow at most one *live* recipient
+    per (domain, local_part). A tombstoned recipient (deleted_at set) must not
+    block recreating the same local part - deleting sales@domain and creating
+    it again is a routine admin operation. Same defect class as the catch-all
+    index above, one constraint over.
+    """
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_named_recipient_does_not_block_replacement(
+        self, test_session: AsyncSession
+    ):
+        """The same local part can be recreated after soft-deleting the old one."""
+        domain = Domain(domain_name="named-replace.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+
+        old = Recipient(
+            domain_id=domain.id,
+            local_part="sales",
+            webhook_url="https://example.com/old-sales",
+            is_enabled=True,
+        )
+        test_session.add(old)
+        await test_session.commit()
+
+        old.deleted_at = datetime.now(UTC)
+        await test_session.commit()
+
+        replacement = Recipient(
+            domain_id=domain.id,
+            local_part="sales",
+            webhook_url="https://example.com/new-sales",
+            is_enabled=True,
+        )
+        test_session.add(replacement)
+        await test_session.commit()
+
+        await test_session.refresh(replacement)
+        assert replacement.deleted_at is None
+
+    @pytest.mark.asyncio
+    async def test_second_live_named_recipient_still_rejected(self, test_session: AsyncSession):
+        """Two live recipients with the same local part must still violate the index."""
+        domain = Domain(domain_name="named-still-unique.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+
+        first = Recipient(
+            domain_id=domain.id,
+            local_part="sales",
+            webhook_url="https://example.com/first-sales",
+            is_enabled=True,
+        )
+        test_session.add(first)
+        await test_session.commit()
+
+        second = Recipient(
+            domain_id=domain.id,
+            local_part="sales",
+            webhook_url="https://example.com/second-sales",
+            is_enabled=True,
+        )
+        test_session.add(second)
+        with pytest.raises(IntegrityError):
+            await test_session.commit()
+        await test_session.rollback()

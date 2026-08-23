@@ -16,17 +16,15 @@ router = APIRouter(tags=["recipients"])
 
 
 def _conflicting_local_part(local_part: str | None) -> ColumnElement[bool]:
-    """Filter for rows that conflict with creating ``local_part``.
+    """Filter for live rows that conflict with creating ``local_part``.
 
-    Mirrors what the database enforces: a soft-deleted catch-all does not
-    block a new one (``ix_recipients_domain_catchall`` only indexes live
-    rows), but a soft-deleted named local part still does, because
-    ``uq_recipient_local_part`` counts tombstones - ignoring them here would
-    only turn the 409 into an IntegrityError at flush.
+    Mirrors what the database enforces: both unique indexes
+    (``uq_recipient_local_part`` and ``ix_recipients_domain_catchall``) only
+    cover live rows, so a soft-deleted recipient never blocks recreating the
+    same local part or catch-all.
     """
-    if local_part:
-        return Recipient.local_part == local_part
-    return and_(Recipient.local_part.is_(None), Recipient.deleted_at.is_(None))
+    matches = Recipient.local_part == local_part if local_part else Recipient.local_part.is_(None)
+    return and_(matches, Recipient.deleted_at.is_(None))
 
 
 @router.get("/domains/{domain_id}/recipients", response_model=list[RecipientResponse])
