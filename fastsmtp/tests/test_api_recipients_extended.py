@@ -223,3 +223,57 @@ class TestRecipientsUpdateExtended:
         )
         assert response.status_code == 201
         assert response.json()["local_part"] is None
+
+    @pytest.mark.asyncio
+    async def test_create_named_after_soft_delete(
+        self, auth_client: AsyncClient, test_domain: Domain, test_session: AsyncSession
+    ):
+        """A soft-deleted named recipient must not block recreating the local part."""
+        tombstone = Recipient(
+            domain_id=test_domain.id,
+            local_part="sales",
+            webhook_url="https://example.com/old",
+            is_enabled=True,
+            deleted_at=datetime.now(UTC),
+        )
+        test_session.add(tombstone)
+        await test_session.commit()
+
+        response = await auth_client.post(
+            f"/api/v1/domains/{test_domain.id}/recipients",
+            json={
+                "local_part": "sales",
+                "webhook_url": "https://example.com/new",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["local_part"] == "sales"
+
+    @pytest.mark.asyncio
+    async def test_update_to_named_local_part_held_by_tombstone(
+        self, auth_client: AsyncClient, test_domain: Domain, test_session: AsyncSession
+    ):
+        """Updating to a local part held only by a tombstone must succeed."""
+        tombstone = Recipient(
+            domain_id=test_domain.id,
+            local_part="sales",
+            webhook_url="https://example.com/old",
+            is_enabled=True,
+            deleted_at=datetime.now(UTC),
+        )
+        live = Recipient(
+            domain_id=test_domain.id,
+            local_part="support",
+            webhook_url="https://example.com/live",
+            is_enabled=True,
+        )
+        test_session.add_all([tombstone, live])
+        await test_session.commit()
+        await test_session.refresh(live)
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{test_domain.id}/recipients/{live.id}",
+            json={"local_part": "sales"},
+        )
+        assert response.status_code == 200
+        assert response.json()["local_part"] == "sales"

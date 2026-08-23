@@ -35,7 +35,7 @@ class TestAlembicDiscovery:
 
     def test_expected_head_is_the_newest_migration(self):
         """The head comes from the shipped scripts, not a hardcoded string."""
-        assert expected_head_revision() == "006"
+        assert expected_head_revision() == "007"
 
 
 class TestSchemaVerification:
