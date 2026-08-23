@@ -5,7 +5,7 @@ from typing import Annotated
 import typer
 
 from fastsmtp_cli import __version__
-from fastsmtp_cli.commands import auth, config, domains, operations, recipients, rules
+from fastsmtp_cli.commands import auth, config, domains, operations, recipients, rules, users
 from fastsmtp_cli.output import console
 
 app = typer.Typer(
@@ -48,6 +48,7 @@ def main(
 # Register command groups
 app.add_typer(config.app, name="config", help="Manage CLI configuration and profiles")
 app.add_typer(auth.app, name="auth", help="Authentication and API key management")
+app.add_typer(users.app, name="users", help="User management (superuser only)")
 app.add_typer(domains.app, name="domain", help="Domain management")
 app.add_typer(recipients.app, name="recipient", help="Recipient management")
 app.add_typer(rules.app, name="rules", help="RuleSet and rule management")

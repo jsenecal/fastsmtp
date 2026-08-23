@@ -162,7 +162,7 @@ def print_users_table(users: list[dict]) -> None:
         table.add_row(
             str(user.get("id", "-"))[:8] + "...",
             user.get("username", "-"),
-            user.get("email", "-"),
+            user.get("email") or "-",
             yes_no(user.get("is_superuser")),
             yes_no(user.get("is_active")),
             format_datetime(user.get("created_at")),

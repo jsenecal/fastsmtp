@@ -1119,3 +1119,187 @@ class TestOpsErrorPaths:
 
         result = runner.invoke(app, ["ops", "test-webhook", "invalid-url"])
         assert result.exit_code == 1
+
+
+class TestUserCommands:
+    """Tests for user commands."""
+
+    @respx.mock
+    def test_user_list(self, temp_config):
+        """Test users list command."""
+        respx.get("https://api.example.com/api/v1/users").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": str(uuid4()),
+                        "username": "alice",
+                        "email": "alice@example.com",
+                        "is_active": True,
+                        "is_superuser": False,
+                        "created_at": "2026-01-01T00:00:00Z",
+                    }
+                ],
+            )
+        )
+
+        result = runner.invoke(app, ["users", "list"])
+        assert result.exit_code == 0
+        assert "alice" in strip_ansi(result.output)
+
+    @respx.mock
+    def test_user_get(self, temp_config):
+        """Test users get command."""
+        user_id = str(uuid4())
+        respx.get(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": user_id,
+                    "username": "alice",
+                    "email": "alice@example.com",
+                    "is_active": True,
+                    "is_superuser": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-02T00:00:00Z",
+                },
+            )
+        )
+
+        result = runner.invoke(app, ["users", "get", user_id])
+        assert result.exit_code == 0
+        assert "alice" in strip_ansi(result.output)
+
+    @respx.mock
+    def test_user_create(self, temp_config):
+        """Test users create command."""
+        respx.post("https://api.example.com/api/v1/users").mock(
+            return_value=httpx.Response(
+                201,
+                json={
+                    "id": str(uuid4()),
+                    "username": "alice",
+                    "email": "alice@example.com",
+                    "is_active": True,
+                    "is_superuser": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
+        )
+
+        result = runner.invoke(app, ["users", "create", "alice", "--email", "alice@example.com"])
+        assert result.exit_code == 0
+        assert "created" in strip_ansi(result.output)
+
+    @respx.mock
+    def test_user_update(self, temp_config):
+        """Test users update command."""
+        user_id = str(uuid4())
+        respx.put(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": user_id,
+                    "username": "alice",
+                    "email": "alice@example.com",
+                    "is_active": False,
+                    "is_superuser": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
+        )
+
+        result = runner.invoke(app, ["users", "update", user_id, "--inactive"])
+        assert result.exit_code == 0
+
+    @respx.mock
+    def test_user_delete(self, temp_config):
+        """Test users delete command."""
+        user_id = str(uuid4())
+        respx.delete(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json={"message": "User deleted"})
+        )
+
+        result = runner.invoke(app, ["users", "delete", user_id, "--force"])
+        assert result.exit_code == 0
+
+
+class TestUserErrorPaths:
+    """Tests for user command error paths."""
+
+    @respx.mock
+    def test_user_list_empty(self, temp_config):
+        """Test users list when empty."""
+        respx.get("https://api.example.com/api/v1/users").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        result = runner.invoke(app, ["users", "list"])
+        assert result.exit_code == 0
+        assert "No users found" in result.output
+
+    @respx.mock
+    def test_user_list_error(self, temp_config):
+        """Test users list with API error."""
+        respx.get("https://api.example.com/api/v1/users").mock(
+            return_value=httpx.Response(403, json={"detail": "Superuser required"})
+        )
+
+        result = runner.invoke(app, ["users", "list"])
+        assert result.exit_code == 1
+        assert "Superuser required" in result.output
+
+    @respx.mock
+    def test_user_get_error(self, temp_config):
+        """Test users get with API error."""
+        user_id = str(uuid4())
+        respx.get(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(404, json={"detail": "User not found"})
+        )
+
+        result = runner.invoke(app, ["users", "get", user_id])
+        assert result.exit_code == 1
+
+    @respx.mock
+    def test_user_create_error(self, temp_config):
+        """Test users create with API error."""
+        respx.post("https://api.example.com/api/v1/users").mock(
+            return_value=httpx.Response(409, json={"detail": "Username already exists"})
+        )
+
+        result = runner.invoke(app, ["users", "create", "alice"])
+        assert result.exit_code == 1
+
+    def test_user_update_requires_an_option(self, temp_config):
+        """`users update` with nothing to change is refused before any request."""
+        result = runner.invoke(app, ["users", "update", str(uuid4())])
+        assert result.exit_code == 1
+        assert "At least one option" in result.output
+
+    @respx.mock
+    def test_user_update_error(self, temp_config):
+        """Test users update with API error."""
+        user_id = str(uuid4())
+        respx.put(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(404, json={"detail": "User not found"})
+        )
+
+        result = runner.invoke(app, ["users", "update", user_id, "--inactive"])
+        assert result.exit_code == 1
+
+    @respx.mock
+    def test_user_delete_cancelled(self, temp_config):
+        """Test users delete cancelled at the confirmation prompt."""
+        result = runner.invoke(app, ["users", "delete", str(uuid4())], input="n\n")
+        assert result.exit_code == 0
+
+    @respx.mock
+    def test_user_delete_error(self, temp_config):
+        """Test users delete with API error."""
+        user_id = str(uuid4())
+        respx.delete(f"https://api.example.com/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(404, json={"detail": "User not found"})
+        )
+
+        result = runner.invoke(app, ["users", "delete", user_id, "--force"])
+        assert result.exit_code == 1

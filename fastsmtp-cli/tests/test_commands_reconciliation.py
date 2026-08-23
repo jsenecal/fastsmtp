@@ -660,3 +660,140 @@ class TestApiKeyExpiry:
         body = body_of(route)
         assert "expires_days" not in body
         assert body["expires_at"].startswith("20")
+
+
+def user_payload(user_id: str, **overrides) -> dict:
+    """A ``UserResponse``-shaped body."""
+    payload = {
+        "id": user_id,
+        "username": "alice",
+        "email": "alice@example.com",
+        "is_active": True,
+        "is_superuser": False,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.fixture
+def user_id() -> str:
+    return str(uuid4())
+
+
+class TestUserCommands:
+    """`fsmtp users` must send only the fields UserCreate/UserUpdate define.
+
+    The server's schemas carry no ``password`` field - the client used to send
+    one before #47 - and ``UserUpdate`` has no required field, so an update must
+    send exactly the options the caller named and nothing else.
+    """
+
+    @respx.mock
+    def test_create_sends_only_server_fields(self, temp_config, user_id):
+        route = respx.post(f"{BASE}/api/v1/users").mock(
+            return_value=httpx.Response(201, json=user_payload(user_id))
+        )
+
+        result = runner.invoke(
+            app,
+            ["users", "create", "alice", "--email", "alice@example.com", "--superuser"],
+        )
+
+        assert result.exit_code == 0
+        assert body_of(route) == {
+            "username": "alice",
+            "email": "alice@example.com",
+            "is_superuser": True,
+        }
+
+    @respx.mock
+    def test_create_without_email_omits_it(self, temp_config, user_id):
+        route = respx.post(f"{BASE}/api/v1/users").mock(
+            return_value=httpx.Response(201, json=user_payload(user_id, email=None))
+        )
+
+        result = runner.invoke(app, ["users", "create", "alice"])
+
+        assert result.exit_code == 0
+        assert body_of(route) == {"username": "alice", "is_superuser": False}
+
+    @respx.mock
+    def test_update_sends_only_the_named_options(self, temp_config, user_id):
+        route = respx.put(f"{BASE}/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json=user_payload(user_id, is_active=False))
+        )
+
+        result = runner.invoke(app, ["users", "update", user_id, "--inactive"])
+
+        assert result.exit_code == 0
+        assert body_of(route) == {"is_active": False}
+
+    @respx.mock
+    def test_update_sends_every_named_option(self, temp_config, user_id):
+        route = respx.put(f"{BASE}/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json=user_payload(user_id))
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "users",
+                "update",
+                user_id,
+                "--username",
+                "bob",
+                "--email",
+                "bob@example.com",
+                "--active",
+                "--no-superuser",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert body_of(route) == {
+            "username": "bob",
+            "email": "bob@example.com",
+            "is_active": True,
+            "is_superuser": False,
+        }
+
+    @respx.mock
+    def test_no_command_sends_a_password(self, temp_config, user_id):
+        """`password` is not on UserCreate or UserUpdate; never send one."""
+        create = respx.post(f"{BASE}/api/v1/users").mock(
+            return_value=httpx.Response(201, json=user_payload(user_id))
+        )
+        update = respx.put(f"{BASE}/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json=user_payload(user_id))
+        )
+
+        runner.invoke(app, ["users", "create", "alice", "--email", "alice@example.com"])
+        runner.invoke(app, ["users", "update", user_id, "--email", "alice@example.com"])
+
+        assert "password" not in body_of(create)
+        assert "password" not in body_of(update)
+
+    @respx.mock
+    def test_list_uses_the_unpaginated_route(self, temp_config, user_id):
+        """`GET /api/v1/users` declares no query parameters; send none."""
+        route = respx.get(f"{BASE}/api/v1/users").mock(
+            return_value=httpx.Response(200, json=[user_payload(user_id)])
+        )
+
+        result = runner.invoke(app, ["users", "list"])
+
+        assert result.exit_code == 0
+        assert route.calls[0].request.url.params == httpx.QueryParams()
+
+    @respx.mock
+    def test_delete_uses_the_user_route(self, temp_config, user_id):
+        route = respx.delete(f"{BASE}/api/v1/users/{user_id}").mock(
+            return_value=httpx.Response(200, json={"message": "User deleted"})
+        )
+
+        result = runner.invoke(app, ["users", "delete", user_id, "--force"])
+
+        assert result.exit_code == 0
+        assert route.called
