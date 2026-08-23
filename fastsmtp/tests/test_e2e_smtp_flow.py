@@ -10,6 +10,7 @@ mocking. These tests focus on SMTP protocol behavior.
 """
 
 import asyncio
+from collections.abc import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosmtplib
@@ -26,15 +27,15 @@ class TestSMTPProtocolE2E:
     """End-to-end tests for SMTP protocol behavior."""
 
     @pytest.fixture
-    def smtp_settings(self) -> Settings:
+    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
         """Create settings for SMTP testing."""
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_e2e_key_12345",
             secret_key="test-e2e-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12570,  # Unique port
-            smtp_tls_port=14680,
+            smtp_port=unused_tcp_port_factory(),
+            smtp_tls_port=unused_tcp_port_factory(),
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
             smtp_max_message_size=1024 * 1024,
@@ -198,15 +199,15 @@ class TestSMTPServerWithMockedDatabase:
     """Tests that verify SMTP handling with mocked database lookups."""
 
     @pytest.fixture
-    def smtp_settings(self) -> Settings:
+    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
         """Create settings for SMTP testing."""
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_mock_key_12345",
             secret_key="test-mock-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12571,  # Unique port
-            smtp_tls_port=14681,
+            smtp_port=unused_tcp_port_factory(),
+            smtp_tls_port=unused_tcp_port_factory(),
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
             smtp_max_message_size=1024 * 1024,
@@ -437,15 +438,17 @@ class TestSMTPServerWithRealDatabase:
     """
 
     @pytest.fixture
-    def smtp_settings(self, postgres_url: str) -> Settings:
+    def smtp_settings(
+        self, postgres_url: str, unused_tcp_port_factory: Callable[[], int]
+    ) -> Settings:
         """Create settings for SMTP testing with real PostgreSQL."""
         return Settings(
             database_url=postgres_url,
             root_api_key="test_real_db_key_12345",
             secret_key="test-real-db-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12572,  # Unique port for this test class
-            smtp_tls_port=14682,
+            smtp_port=unused_tcp_port_factory(),
+            smtp_tls_port=unused_tcp_port_factory(),
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
             smtp_max_message_size=1024 * 1024,

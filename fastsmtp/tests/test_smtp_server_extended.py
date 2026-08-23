@@ -1,5 +1,6 @@
 """Extended tests for SMTP server module to improve coverage."""
 
+from collections.abc import Callable
 from email.message import EmailMessage
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -270,15 +271,15 @@ class TestSMTPServer:
     """Tests for SMTPServer class."""
 
     @pytest.fixture
-    def test_settings(self):
+    def test_settings(self, unused_tcp_port_factory: Callable[[], int]):
         """Create test settings."""
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_key_12345",
             secret_key="test-secret",
             smtp_host="127.0.0.1",
-            smtp_port=10025,
-            smtp_tls_port=10465,
+            smtp_port=unused_tcp_port_factory(),
+            smtp_tls_port=unused_tcp_port_factory(),
         )
 
     def test_smtp_server_init(self, test_settings):

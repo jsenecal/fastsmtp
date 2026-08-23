@@ -3,6 +3,7 @@
 Tests the complete email flow: SMTP -> parse -> database delivery queue.
 """
 
+from collections.abc import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosmtplib
@@ -20,15 +21,15 @@ class TestSMTPIntegration:
     """Integration tests for SMTP server."""
 
     @pytest.fixture
-    def smtp_settings(self) -> Settings:
-        """Create settings for integration testing with unique ports."""
+    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
+        """Create settings for integration testing with ephemeral ports."""
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_key_12345",
             secret_key="test-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12525,  # High port to avoid conflicts
-            smtp_tls_port=14650,
+            smtp_port=unused_tcp_port_factory(),
+            smtp_tls_port=unused_tcp_port_factory(),
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
             smtp_max_message_size=1024 * 1024,  # 1MB for testing
@@ -122,14 +123,14 @@ class TestMailFromAuthParam:
     """
 
     @pytest.fixture
-    def smtp_settings(self) -> Settings:
+    def smtp_settings(self, unused_tcp_port_factory: Callable[[], int]) -> Settings:
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_key_12345",
             secret_key="test-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12526,  # Unique port to avoid conflicts
-            smtp_tls_port=14651,
+            smtp_port=unused_tcp_port_factory(),
+            smtp_tls_port=unused_tcp_port_factory(),
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
         )
@@ -390,14 +391,14 @@ class TestSMTPLargeMessageHandling:
     """Tests for large message size limits."""
 
     @pytest.mark.asyncio
-    async def test_smtp_server_advertises_size_limit(self):
+    async def test_smtp_server_advertises_size_limit(self, unused_tcp_port: int):
         """Test that SMTP server advertises SIZE limit in EHLO."""
         settings = Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_key_12345",
             secret_key="test-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12529,
+            smtp_port=unused_tcp_port,
             smtp_max_message_size=5 * 1024 * 1024,  # 5MB
             smtp_verify_dkim=False,
             smtp_verify_spf=False,
@@ -428,7 +429,7 @@ class TestSMTPSTARTTLS:
     """Tests for STARTTLS functionality."""
 
     @pytest.fixture
-    def tls_settings(self, tmp_path) -> Settings | None:
+    def tls_settings(self, tmp_path, unused_tcp_port_factory: Callable[[], int]) -> Settings | None:
         """Create settings with TLS configured."""
         from subprocess import run
 
@@ -466,8 +467,8 @@ class TestSMTPSTARTTLS:
             root_api_key="test_key_12345",
             secret_key="test-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12527,
-            smtp_tls_port=14651,
+            smtp_port=unused_tcp_port_factory(),
+            smtp_tls_port=unused_tcp_port_factory(),
             smtp_tls_cert=cert_path,
             smtp_tls_key=key_path,
             smtp_verify_dkim=False,
@@ -599,14 +600,14 @@ class TestSMTPAuthSettings:
     """Tests for SMTP authentication rejection settings."""
 
     @pytest.fixture
-    def strict_auth_settings(self) -> Settings:
+    def strict_auth_settings(self, unused_tcp_port: int) -> Settings:
         """Create settings that reject on auth failure."""
         return Settings(
             database_url="sqlite+aiosqlite:///:memory:",
             root_api_key="test_key_12345",
             secret_key="test-secret-key",
             smtp_host="127.0.0.1",
-            smtp_port=12528,
+            smtp_port=unused_tcp_port,
             smtp_verify_dkim=True,
             smtp_verify_spf=True,
             smtp_reject_dkim_fail=True,
