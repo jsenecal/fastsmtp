@@ -168,15 +168,15 @@ class TestSendWebhook:
 
         with patch("fastsmtp.webhook.dispatcher.validate_webhook_url") as mock_validate:
             await send_webhook(
-                url="https://n8n.metrooptic.com/hook",
+                url="https://n8n.internal.example.com/hook",
                 payload={"test": "data"},
                 client=mock_client,
-                allowed_internal_domains=["n8n.metrooptic.com"],
+                allowed_internal_domains=["n8n.internal.example.com"],
             )
 
         mock_validate.assert_called_once()
         call_kwargs = mock_validate.call_args.kwargs
-        assert call_kwargs["allowed_internal_domains"] == ["n8n.metrooptic.com"]
+        assert call_kwargs["allowed_internal_domains"] == ["n8n.internal.example.com"]
 
     @pytest.mark.asyncio
     async def test_allowlist_threaded_into_auto_created_client(self):
@@ -197,14 +197,14 @@ class TestSendWebhook:
             ) as mock_create,
         ):
             await send_webhook(
-                url="https://n8n.metrooptic.com/hook",
+                url="https://n8n.internal.example.com/hook",
                 payload={"test": "data"},
-                allowed_internal_domains=["n8n.metrooptic.com"],
+                allowed_internal_domains=["n8n.internal.example.com"],
             )
 
         mock_create.assert_called_once()
         call_kwargs = mock_create.call_args.kwargs
-        assert call_kwargs["allowed_internal_domains"] == ["n8n.metrooptic.com"]
+        assert call_kwargs["allowed_internal_domains"] == ["n8n.internal.example.com"]
         # The auto-created client must be closed when send_webhook owns it.
         auto_client.aclose.assert_awaited_once()
 
