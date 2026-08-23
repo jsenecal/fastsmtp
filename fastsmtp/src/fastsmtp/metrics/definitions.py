@@ -62,6 +62,12 @@ RULES_REGEX_TIMEOUTS = Counter(
     "Number of regex evaluations that timed out (potential ReDoS)",
 )
 
+# Metrics endpoint access control
+METRICS_SCRAPES_DENIED = Counter(
+    "fastsmtp_metrics_scrapes_denied_total",
+    "Metrics scrapes refused because the client was not in metrics_allowed_ips",
+)
+
 # SMTP rate limiting metrics
 SMTP_RATE_LIMITED = Counter(
     "fastsmtp_smtp_rate_limited_total",

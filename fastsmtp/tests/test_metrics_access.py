@@ -11,6 +11,20 @@ from fastsmtp.config import Settings
 from fastsmtp.metrics.access import client_address_for_metrics, require_metrics_access
 
 
+@pytest.fixture(autouse=True)
+def reset_denial_throttle():
+    """Reset the module-global denial throttle between tests.
+
+    Shared mutable state leaking across tests is how a previous bug in this
+    repo hid: it changes behaviour silently rather than failing loudly.
+    """
+    from fastsmtp.metrics import access
+
+    access._denial_log = access._DenialLogThrottle()
+    yield
+    access._denial_log = access._DenialLogThrottle()
+
+
 def with_settings(request: "FakeRequest", settings: Settings) -> "FakeRequest":
     """Attach settings to a fake request the way create_app attaches them."""
     request.app.state.settings = settings
@@ -290,3 +304,188 @@ class TestForgedPeerAddress:
         )
 
         assert status == 200
+
+
+class TestDenialLogThrottle:
+    """Denied scrapes must not let an unauthenticated client drive log volume.
+
+    /metrics needs no credential and is excluded from rate limiting, so one
+    WARNING per denial is an amplification any client can trigger at will.
+    """
+
+    def _throttle(self, **kwargs):
+        from fastsmtp.metrics.access import _DenialLogThrottle
+
+        return _DenialLogThrottle(**kwargs)
+
+    def test_first_denial_is_logged_immediately(self):
+        """Test the first denial produces a message naming the address.
+
+        An operator tailing logs during an incident must see something at once.
+        """
+        throttle = self._throttle(window_seconds=60.0)
+
+        message = throttle.record("203.0.113.9", now=1000.0)
+
+        assert message is not None
+        assert "203.0.113.9" in message
+
+    def test_further_denials_in_the_window_are_suppressed(self):
+        """Test repeat denials inside the window produce nothing to log."""
+        throttle = self._throttle(window_seconds=60.0)
+        throttle.record("203.0.113.9", now=1000.0)
+
+        assert throttle.record("203.0.113.9", now=1001.0) is None
+        assert throttle.record("203.0.113.10", now=1030.0) is None
+
+    def test_next_window_reports_what_was_suppressed(self):
+        """Test the count and distinct addresses suppressed are reported."""
+        throttle = self._throttle(window_seconds=60.0)
+        throttle.record("203.0.113.9", now=1000.0)
+        throttle.record("203.0.113.9", now=1001.0)
+        throttle.record("203.0.113.10", now=1002.0)
+
+        message = throttle.record("203.0.113.11", now=1061.0)
+
+        assert message is not None
+        assert "203.0.113.11" in message
+        assert "suppressed 2 further denials" in message
+
+    def test_reports_the_real_interval_not_the_nominal_window(self):
+        """Test the roll-up names how long ago the burst actually was.
+
+        A window only closes when the next denial arrives, which can be hours
+        later. Saying "in the previous 60s" would make an operator page for an
+        event that finished long ago.
+        """
+        throttle = self._throttle(window_seconds=60.0)
+        throttle.record("203.0.113.9", now=1000.0)
+        throttle.record("203.0.113.9", now=1001.0)
+
+        message = throttle.record("203.0.113.9", now=1000.0 + 7200.0)
+
+        assert message is not None
+        assert "7200s" in message, f"expected the real elapsed interval, got: {message}"
+        assert "60s" not in message
+
+    def test_quiet_window_reports_no_suppression(self):
+        """Test a window with nothing suppressed does not mention suppression."""
+        throttle = self._throttle(window_seconds=60.0)
+        throttle.record("203.0.113.9", now=1000.0)
+
+        message = throttle.record("203.0.113.9", now=1061.0)
+
+        assert message is not None
+        assert "suppress" not in message.lower()
+
+    def test_tracked_addresses_are_capped(self):
+        """Test address rotation cannot grow the throttle's state without limit.
+
+        An attacker cycling source addresses would otherwise turn a memory bound
+        into a different amplification.
+        """
+        throttle = self._throttle(window_seconds=60.0, max_tracked_addresses=4)
+        throttle.record("10.0.0.0", now=1000.0)
+        for i in range(1, 50):
+            throttle.record(f"10.0.0.{i}", now=1000.0 + i * 0.1)
+
+        assert len(throttle._addresses) <= 4
+
+        message = throttle.record("10.0.1.1", now=1100.0)
+        assert message is not None
+        assert "4+" in message, "a capped count must not be reported as exact"
+
+    def test_concurrent_denials_still_log_once(self):
+        """Test the throttle holds when denials arrive on multiple threads.
+
+        require_metrics_access is a sync FastAPI dependency, so FastAPI runs it
+        in a threadpool: concurrent scrapes hit this from real threads, not the
+        event loop.
+
+        This passes on GIL builds whether or not the state is locked - CPython
+        happens to make these updates atomic, which no amount of switch-interval
+        tuning could be made to break. It pins the contract for free-threaded
+        builds, where that accident does not hold.
+        """
+        import threading
+
+        throttle = self._throttle(window_seconds=60.0)
+        workers = 16
+        barrier = threading.Barrier(workers)
+        results: list[str | None] = []
+        results_lock = threading.Lock()
+
+        def worker() -> None:
+            barrier.wait()
+            message = throttle.record("203.0.113.9", now=1000.0)
+            with results_lock:
+                results.append(message)
+
+        threads = [threading.Thread(target=worker) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        logged = [m for m in results if m is not None]
+        assert len(logged) == 1, f"expected 1 log line, got {len(logged)}"
+        assert throttle._suppressed == workers - 1, "suppressed count must not lose updates"
+
+    def test_window_resets_after_reporting(self):
+        """Test each window starts clean rather than accumulating forever."""
+        throttle = self._throttle(window_seconds=60.0)
+        throttle.record("203.0.113.9", now=1000.0)
+        throttle.record("203.0.113.9", now=1001.0)
+        throttle.record("203.0.113.9", now=1061.0)
+
+        message = throttle.record("203.0.113.9", now=1122.0)
+
+        assert message is not None
+        assert "suppress" not in message.lower()
+
+
+class TestDenialCounter:
+    """Denials stay alertable at fixed cost even while logging is throttled."""
+
+    def test_counter_increments_for_every_denial_including_suppressed(self):
+        """Test the counter is not throttled along with the log."""
+        from fastsmtp.metrics.definitions import METRICS_SCRAPES_DENIED
+
+        settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
+        before = METRICS_SCRAPES_DENIED._value.get()
+
+        for _ in range(5):
+            with pytest.raises(HTTPException):
+                require_metrics_access(with_settings(FakeRequest("203.0.113.9"), settings))
+
+        assert METRICS_SCRAPES_DENIED._value.get() - before == 5
+
+    def test_counter_unchanged_for_allowed_scrapes(self):
+        """Test permitted scrapes do not increment the denial counter."""
+        from fastsmtp.metrics.definitions import METRICS_SCRAPES_DENIED
+
+        settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
+        before = METRICS_SCRAPES_DENIED._value.get()
+
+        require_metrics_access(with_settings(FakeRequest("10.1.2.3"), settings))
+
+        assert METRICS_SCRAPES_DENIED._value.get() == before
+
+
+class TestDenialLoggingIsWired:
+    """The throttle must actually be used by require_metrics_access."""
+
+    def test_repeated_denials_log_once(self, caplog) -> None:
+        """Test a burst of denials produces a single WARNING, not one each."""
+        import logging
+
+        settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
+
+        with caplog.at_level(logging.WARNING, logger="fastsmtp.metrics.access"):
+            for _ in range(10):
+                with pytest.raises(HTTPException):
+                    require_metrics_access(with_settings(FakeRequest("203.0.113.9"), settings))
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, f"expected 1 throttled warning, got {len(warnings)}"
+        assert "203.0.113.9" in warnings[0].getMessage()
