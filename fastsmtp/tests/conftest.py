@@ -2,7 +2,8 @@
 
 import asyncio
 import os
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, AsyncIterator, Generator
+from contextlib import asynccontextmanager
 
 import pytest
 from testcontainers.community.postgres import PostgresContainer
@@ -12,11 +13,12 @@ os.environ.setdefault("FASTSMTP_ROOT_API_KEY", "test_root_api_key_12345")
 os.environ.setdefault("FASTSMTP_SECRET_KEY", "test-secret-key-for-testing")
 os.environ.setdefault("FASTSMTP_DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
+import anyio
 import pytest_asyncio
+import uvicorn
 from fastapi import FastAPI
 from fastsmtp.config import Settings, clear_settings_cache, get_settings
 from fastsmtp.db.models import Base
-from fastsmtp.db.session import get_session
 from fastsmtp.main import create_app
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -105,12 +107,11 @@ async def app(test_settings: Settings, test_engine) -> AsyncGenerator[FastAPI, N
         expire_on_commit=False,
     )
 
-    async def override_get_session() -> AsyncGenerator[AsyncSession, None]:
-        async with session_factory() as session:
-            yield session
-            await session.commit()
-
-    application.dependency_overrides[get_session] = override_get_session
+    # DBSessionMiddleware creates and commits the request's session, so tests
+    # swap the factory rather than overriding the dependency. Overriding
+    # get_session would reintroduce a teardown commit and with it the
+    # read-your-own-write race - see test_api_read_after_write.py.
+    application.state.session_factory = session_factory
     application.dependency_overrides[get_settings] = lambda: test_settings
 
     yield application
@@ -139,6 +140,74 @@ async def auth_client(
         headers={"X-API-Key": test_settings.root_api_key.get_secret_value()},
     ) as ac:
         yield ac
+
+
+SERVER_START_TIMEOUT = 10.0
+
+
+@asynccontextmanager
+async def serving(app, **uvicorn_kwargs) -> AsyncIterator[str]:
+    """Serve an ASGI app over real TCP and yield its base URL.
+
+    Most API tests drive the app in-process through httpx's ASGITransport, which
+    awaits the entire app call before returning. Anything that depends on when
+    bytes actually reach the client - response/commit ordering, connection reuse -
+    or on layers ASGITransport does not have, such as uvicorn's proxy-header
+    rewriting, is invisible under that transport and needs a real socket.
+
+    The server runs inside the test's own event loop, so handlers share the loop
+    the test-database engine was created on. Blocking clients must therefore run
+    on a worker thread; see :func:`run_blocking`.
+    """
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", **uvicorn_kwargs)
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+    serving_task = asyncio.create_task(server.serve())
+
+    deadline = asyncio.get_running_loop().time() + SERVER_START_TIMEOUT
+    while not server.started:
+        if serving_task.done():  # pragma: no cover - startup failure
+            serving_task.result()
+            raise RuntimeError("uvicorn server exited before starting")
+        if asyncio.get_running_loop().time() > deadline:  # pragma: no cover - hung bind
+            serving_task.cancel()
+            raise TimeoutError(f"uvicorn did not start within {SERVER_START_TIMEOUT}s")
+        await anyio.sleep(0.02)
+
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving_task, timeout=SERVER_START_TIMEOUT)
+
+
+@pytest_asyncio.fixture
+async def server_url(app: FastAPI) -> AsyncGenerator[str, None]:
+    """Serve the standard test app over real TCP and yield its base URL."""
+    async with serving(app) as url:
+        yield url
+
+
+@pytest.fixture
+def serve_app():
+    """Expose :func:`serving` to tests needing their own app or uvicorn options."""
+    return serving
+
+
+@pytest.fixture
+def run_blocking():
+    """Return a helper running a blocking client body off the serving loop.
+
+    The app is served in the test's own event loop, so a synchronous HTTP client
+    would deadlock it. Exposed as a fixture rather than a module-level function
+    because the tests directory is not an importable package.
+    """
+
+    async def run(body):
+        return await anyio.to_thread.run_sync(body)
+
+    return run
 
 
 @pytest.fixture

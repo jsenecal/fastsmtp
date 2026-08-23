@@ -7,6 +7,10 @@ on:
         description: 'Git ref to checkout'
         required: false
         type: string
+    secrets:
+      CODECOV_TOKEN:
+        description: 'Codecov upload token'
+        required: false
 
 env:
   PYTHON_VERSION: "3.12"
@@ -16,12 +20,12 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
@@ -42,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: fastsmtp
           POSTGRES_PASSWORD: fastsmtp
@@ -56,12 +60,12 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 

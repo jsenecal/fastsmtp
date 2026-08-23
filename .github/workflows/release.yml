@@ -44,7 +44,7 @@ jobs:
     outputs:
       ci-passed: ${{ steps.check.outputs.passed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.ref }}
 
@@ -77,6 +77,8 @@ jobs:
     uses: ./.github/workflows/test.yml
     with:
       ref: ${{ needs.prepare.outputs.ref }}
+    # Reusable workflows do not inherit secrets from the caller
+    secrets: inherit
 
   build-and-push:
     name: Build and Push Docker Image
@@ -88,7 +90,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.ref }}
 

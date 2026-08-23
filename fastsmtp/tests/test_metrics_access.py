@@ -231,47 +231,22 @@ class TestForgedPeerAddress:
     so an allowlist reading request.client.host would be checking a forged value.
 
     ASGITransport has no such layer, so these must run over real TCP.
-
-    The server setup below is local because it needs custom uvicorn options.
-    PR #58 extracts a shared serving() helper into conftest; once that lands
-    this should take its uvicorn kwargs through it rather than keep a copy.
     """
 
-    async def _scrape_over_tcp(self, settings, headers, **uvicorn_kwargs) -> int:
-        import asyncio
-
-        import anyio
+    async def _scrape_over_tcp(
+        self, serve_app, run_blocking, settings, headers, **uvicorn_kwargs
+    ) -> int:
         import httpx
-        import uvicorn
         from fastsmtp.main import create_app
 
         app = create_app(settings)
 
-        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error", **uvicorn_kwargs)
-        server = uvicorn.Server(config)
-        server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
-        serving = asyncio.create_task(server.serve())
-        deadline = asyncio.get_running_loop().time() + 10.0
-        while not server.started:
-            if serving.done():  # pragma: no cover - startup failure
-                serving.result()
-                raise RuntimeError("uvicorn server exited before starting")
-            if asyncio.get_running_loop().time() > deadline:  # pragma: no cover
-                serving.cancel()
-                raise TimeoutError("uvicorn did not start within 10s")
-            await anyio.sleep(0.02)
-        port = server.servers[0].sockets[0].getsockname()[1]
+        async with serve_app(app, **uvicorn_kwargs) as base_url:
 
-        def call() -> int:
-            return httpx.get(
-                f"http://127.0.0.1:{port}/metrics", headers=headers, timeout=10.0
-            ).status_code
+            def call() -> int:
+                return httpx.get(f"{base_url}/metrics", headers=headers, timeout=10.0).status_code
 
-        try:
-            return await anyio.to_thread.run_sync(call)
-        finally:
-            server.should_exit = True
-            await asyncio.wait_for(serving, timeout=10)
+            return await run_blocking(call)
 
     async def test_serve_disables_uvicorn_proxy_headers(self) -> None:
         """Test the server's own uvicorn config leaves peer rewriting off.
@@ -290,11 +265,15 @@ class TestForgedPeerAddress:
             "rewrites the peer address from an attacker-controlled header"
         )
 
-    async def test_forged_forwarded_for_cannot_bypass_over_real_tcp(self) -> None:
+    async def test_forged_forwarded_for_cannot_bypass_over_real_tcp(
+        self, serve_app, run_blocking
+    ) -> None:
         """Test a forged header does not grant access when uvicorn rewrites peers."""
         settings = make_settings(metrics_allowed_ips=["10.0.0.0/8"])
 
         status = await self._scrape_over_tcp(
+            serve_app,
+            run_blocking,
             settings,
             headers={"X-Forwarded-For": "10.1.2.3"},
             proxy_headers=False,
@@ -302,10 +281,12 @@ class TestForgedPeerAddress:
 
         assert status == 403
 
-    async def test_allowlist_still_works_over_real_tcp(self) -> None:
+    async def test_allowlist_still_works_over_real_tcp(self, serve_app, run_blocking) -> None:
         """Test a genuinely allowed peer is still served over TCP."""
         settings = make_settings(metrics_allowed_ips=["127.0.0.0/8"])
 
-        status = await self._scrape_over_tcp(settings, headers={}, proxy_headers=False)
+        status = await self._scrape_over_tcp(
+            serve_app, run_blocking, settings, headers={}, proxy_headers=False
+        )
 
         assert status == 200
