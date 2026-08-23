@@ -156,6 +156,58 @@ class TestSendWebhook:
         assert call_kwargs["headers"]["X-Custom"] == "value"
         assert call_kwargs["headers"]["Content-Type"] == "application/json"
 
+    @pytest.mark.asyncio
+    async def test_allowlist_threaded_into_validator(self):
+        """send_webhook forwards allowed_internal_domains to validate_webhook_url."""
+        mock_response = AsyncMock()
+        mock_response.is_success = True
+        mock_response.status_code = 200
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with patch("fastsmtp.webhook.dispatcher.validate_webhook_url") as mock_validate:
+            await send_webhook(
+                url="https://n8n.internal.example.com/hook",
+                payload={"test": "data"},
+                client=mock_client,
+                allowed_internal_domains=["n8n.internal.example.com"],
+            )
+
+        mock_validate.assert_called_once()
+        call_kwargs = mock_validate.call_args.kwargs
+        assert call_kwargs["allowed_internal_domains"] == ["n8n.internal.example.com"]
+
+    @pytest.mark.asyncio
+    async def test_allowlist_threaded_into_auto_created_client(self):
+        """When no client is supplied, the auto-created SSRF-safe client gets the allowlist."""
+        mock_response = AsyncMock()
+        mock_response.is_success = True
+        mock_response.status_code = 200
+
+        auto_client = AsyncMock(spec=httpx.AsyncClient)
+        auto_client.post = AsyncMock(return_value=mock_response)
+        auto_client.aclose = AsyncMock()
+
+        with (
+            patch("fastsmtp.webhook.dispatcher.validate_webhook_url"),
+            patch(
+                "fastsmtp.webhook.dispatcher.create_ssrf_safe_client",
+                return_value=auto_client,
+            ) as mock_create,
+        ):
+            await send_webhook(
+                url="https://n8n.internal.example.com/hook",
+                payload={"test": "data"},
+                allowed_internal_domains=["n8n.internal.example.com"],
+            )
+
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["allowed_internal_domains"] == ["n8n.internal.example.com"]
+        # The auto-created client must be closed when send_webhook owns it.
+        auto_client.aclose.assert_awaited_once()
+
 
 class TestWorkerHttpClientLifecycle:
     """Tests for WebhookWorker HTTP client management."""

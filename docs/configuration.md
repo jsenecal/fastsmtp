@@ -62,6 +62,19 @@ cannot be compared and is allowed with a warning.
 | `FASTSMTP_WEBHOOK_RETRY_BASE_DELAY` | `1.0` | Base delay for exponential backoff |
 | `FASTSMTP_WEBHOOK_MAX_INLINE_ATTACHMENT_SIZE` | `10485760` | Max attachment size (bytes) for inline storage |
 | `FASTSMTP_WEBHOOK_MAX_INLINE_PAYLOAD_SIZE` | `52428800` | Max total payload size (bytes) for inline storage |
+| `FASTSMTP_WEBHOOK_ALLOWED_INTERNAL_DOMAINS` | *(empty)* | Hostnames (and their subdomains) allowed to bypass SSRF protection |
+
+```bash
+export FASTSMTP_WEBHOOK_ALLOWED_INTERNAL_DOMAINS='["n8n.svc.cluster.local"]'
+```
+
+An allowlisted entry bypasses **both** the private/internal IP-range check and the
+blocked-hostname set (localhost, metadata aliases): FastSMTP trusts whatever IP the DNS
+chain returns at connect time. Use it only for hostnames whose DNS infrastructure you
+control. Because matching includes subdomains, a dangling DNS record under an allowlisted
+parent is a takeover risk — prefer the most specific hostname. Entries are normalized
+before matching: surrounding whitespace and a leading dot are stripped, case is ignored,
+and empty entries are dropped.
 
 ## Attachment Storage (S3)
 

@@ -249,6 +249,22 @@ class TestAllowedInternalDomains:
             assert ok is True
             assert err is None
 
+    def test_entry_with_leading_dot_matches(self):
+        """Entries written with a leading dot (".example.com") are accepted."""
+        assert is_host_in_allowlist("api.example.com", [".example.com"]) is True
+        assert is_host_in_allowlist("example.com", [".example.com"]) is True
+
+    def test_entry_with_whitespace_matches(self):
+        """Entries with surrounding whitespace are tolerated."""
+        assert is_host_in_allowlist("api.example.com", ["  example.com  "]) is True
+        assert is_host_in_allowlist("example.com", ["\texample.com\n"]) is True
+
+    def test_empty_or_whitespace_only_entry_does_not_match(self):
+        """Empty or whitespace-only entries do not silently match every host."""
+        assert is_host_in_allowlist("anything.com", [""]) is False
+        assert is_host_in_allowlist("anything.com", ["   "]) is False
+        assert is_host_in_allowlist("anything.com", ["."]) is False
+
 
 class TestIsUrlSafe:
     """Tests for is_url_safe helper function."""

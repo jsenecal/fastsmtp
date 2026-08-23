@@ -83,8 +83,12 @@ class Settings(BaseSettings):
     )
     webhook_allowed_internal_domains: list[str] = Field(
         default_factory=list,
-        description="Domains allowed to bypass SSRF protection (e.g., internal services). "
-        "Use sparingly and only for trusted internal services.",
+        description="Hostnames (and their subdomains) allowed to bypass SSRF protection. "
+        "Bypasses BOTH the private/internal IP-range check AND the blocked-hostname set "
+        "(localhost, metadata aliases). For an allowlisted entry, FastSMTP trusts whatever "
+        "IP the DNS chain returns at connect time, so use only for hostnames whose DNS "
+        "infrastructure you control. Subdomain matching makes dangling DNS records under "
+        "an allowlisted parent a takeover risk; prefer the most specific hostname.",
     )
 
     # Attachment Storage

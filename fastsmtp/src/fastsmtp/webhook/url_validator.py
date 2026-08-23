@@ -64,19 +64,40 @@ def is_ip_blocked(ip_str: str) -> bool:
     return ip_in_networks(ip_str, BLOCKED_IP_RANGES)
 
 
+def _normalize_allowlist(entries: list[str] | None) -> list[str]:
+    """Lowercase, strip surrounding whitespace and a leading dot, drop empties.
+
+    Tolerates common config typos like ".example.com" or "  example.com  ".
+    """
+    if not entries:
+        return []
+    out = []
+    for entry in entries:
+        normalized = entry.strip().lstrip(".").lower()
+        if normalized:
+            out.append(normalized)
+    return out
+
+
+def _host_matches_normalized(host: str, normalized_allowlist: list[str]) -> bool:
+    """Match a host against a pre-normalized allowlist. For hot paths."""
+    if not normalized_allowlist:
+        return False
+    host_lower = host.lower()
+    for allowed in normalized_allowlist:
+        if host_lower == allowed or host_lower.endswith("." + allowed):
+            return True
+    return False
+
+
 def is_host_in_allowlist(host: str, allowed_internal_domains: list[str] | None) -> bool:
     """Check if a host matches an entry in the internal-domains allowlist.
 
     A host matches if it equals an allowed entry exactly or is a subdomain of it.
+    Allowlist entries are normalized (lowercased, whitespace and leading-dot
+    stripped), so ".example.com" and " example.com " both match `api.example.com`.
     """
-    if not allowed_internal_domains:
-        return False
-    host_lower = host.lower()
-    for allowed in allowed_internal_domains:
-        allowed_lower = allowed.lower()
-        if host_lower == allowed_lower or host_lower.endswith("." + allowed_lower):
-            return True
-    return False
+    return _host_matches_normalized(host, _normalize_allowlist(allowed_internal_domains))
 
 
 def validate_webhook_url(
@@ -195,7 +216,7 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._allowed_domains = list(allowed_internal_domains or [])
+        self._allowed_domains = _normalize_allowlist(allowed_internal_domains)
 
     async def handle_async_request(self, request: httpcore.Request) -> httpcore.Response:
         """Handle request with IP validation at connection time."""
@@ -207,8 +228,9 @@ class SSRFSafeAsyncConnectionPool(httpcore.AsyncConnectionPool):
             raise SSRFError("Request has no host")
         host = raw_host.decode("ascii")
 
-        # Check if domain is in allowlist (bypass SSRF protection)
-        if is_host_in_allowlist(host, self._allowed_domains):
+        # Check if domain is in allowlist (bypass SSRF protection). The list
+        # was normalized in __init__, so use the fast path.
+        if _host_matches_normalized(host, self._allowed_domains):
             return await super().handle_async_request(request)
 
         # Check blocked hostnames
