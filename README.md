@@ -953,17 +953,18 @@ fsmtp ops log retry <log-id>
 The rule engine allows conditional processing of emails based on various attributes.
 
 ### Rule Fields
-- `from`, `to`, `cc`, `subject`, `body`
+- `from`, `to`, `subject`, `body`
 - `header:<name>` (e.g., `header:X-Priority`)
-- `has_attachments`, `attachment_count`
+- `has_attachment`
 - `dkim_result`, `spf_result`
 
 ### Rule Operators
-- `equals`, `not_equals`
-- `contains`, `not_contains`
+- `equals`
+- `contains`
 - `starts_with`, `ends_with`
-- `matches` (regex)
-- `greater_than`, `less_than` (for numeric fields)
+- `regex` — [RE2 syntax](https://github.com/google/re2/wiki/Syntax), linear-time by
+  construction (no ReDoS); backreferences and lookaround are not supported
+- `exists`
 
 ### Rule Actions
 - `tag` - Add a tag to the email

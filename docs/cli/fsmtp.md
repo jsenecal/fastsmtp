@@ -223,7 +223,9 @@ fsmtp rules rule delete <domain-id> <rule-id>
 Valid fields are `from`, `to`, `subject`, `body`, `has_attachment`, `dkim_result`,
 `spf_result`, or `header:X-Custom-Header`. Valid operators are `equals`, `contains`,
 `regex`, `starts_with`, `ends_with` and `exists`. Valid actions are `forward`, `drop`,
-`tag` and `quarantine`.
+`tag` and `quarantine`. `regex` patterns use
+[RE2 syntax](https://github.com/google/re2/wiki/Syntax) (no backreferences or
+lookaround); the server rejects patterns RE2 cannot compile.
 
 ## Operations
 

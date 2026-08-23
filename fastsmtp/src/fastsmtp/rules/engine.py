@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, Rule, RuleSet
-from fastsmtp.rules.conditions import RegexTimeoutError, evaluate_condition
+from fastsmtp.rules.conditions import evaluate_condition
 from fastsmtp.smtp.validation import EmailAuthResult
 
 logger = logging.getLogger(__name__)
@@ -121,8 +121,7 @@ def evaluate_rule(
         settings: Application settings
 
     Returns:
-        True if the rule matches. Also returns True if regex evaluation times out
-        (fail-safe: treat timeout as a match to prevent rule bypass).
+        True if the rule matches
     """
     field_value = extract_field_value(rule.field, message, payload, auth_result, settings)
 
@@ -130,22 +129,12 @@ def evaluate_rule(
         logger.debug(f"Rule {rule.id}: field '{rule.field}' not found")
         return False
 
-    try:
-        result = evaluate_condition(
-            operator=rule.operator,
-            value=field_value,
-            pattern=rule.value,
-            case_sensitive=rule.case_sensitive,
-        )
-    except RegexTimeoutError:
-        # Fail-safe: treat regex timeout as a match to prevent rule bypass.
-        # If a rule was designed to block spam/malware and it times out,
-        # we should assume it would have matched rather than let the email through.
-        logger.warning(
-            f"Rule {rule.id} regex timed out - treating as match (fail-safe). "
-            f"Field: {rule.field}, Pattern: {rule.value[:50]}..."
-        )
-        return True
+    result = evaluate_condition(
+        operator=rule.operator,
+        value=field_value,
+        pattern=rule.value,
+        case_sensitive=rule.case_sensitive,
+    )
 
     if result:
         logger.debug(f"Rule {rule.id} matched: {rule.field} {rule.operator} '{rule.value}'")
