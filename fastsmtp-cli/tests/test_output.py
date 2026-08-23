@@ -221,6 +221,24 @@ class TestUsersOutput:
         }
         print_user(user)
 
+    def test_users_render_a_null_email_as_a_dash(self, capsys):
+        """`UserResponse.email` is nullable - both views must show a placeholder."""
+        user = {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "username": "testuser",
+            "email": None,
+            "is_superuser": False,
+            "is_active": True,
+            "created_at": "2024-01-15T10:00:00Z",
+            "updated_at": "2024-01-16T10:00:00Z",
+        }
+
+        print_users_table([user])
+        assert "testuser │ - │" in " ".join(capsys.readouterr().out.split())
+
+        print_user(user)
+        assert "Email - " in " ".join(capsys.readouterr().out.split())
+
 
 class TestAPIKeysOutput:
     """Tests for API keys output formatting."""

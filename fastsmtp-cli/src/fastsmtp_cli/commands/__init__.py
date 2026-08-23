@@ -1,6 +1,6 @@
 """CLI commands module."""
 
-from fastsmtp_cli.commands import auth, config, domains, operations, recipients, rules
+from fastsmtp_cli.commands import auth, config, domains, operations, recipients, rules, users
 
 __all__ = [
     "auth",
@@ -9,4 +9,5 @@ __all__ = [
     "operations",
     "recipients",
     "rules",
+    "users",
 ]

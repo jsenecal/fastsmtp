@@ -42,6 +42,41 @@ fsmtp auth rotate-key <key-id>
 fsmtp auth delete-key <key-id>
 ```
 
+## User Management
+
+Every command in this group requires a superuser API key. Accounts have no password —
+they authenticate with API keys — so no command here takes one.
+
+```bash
+# List all users
+fsmtp users list
+
+# Get user details
+fsmtp users get <user-id>
+
+# Create a user (only the username is required)
+fsmtp users create alice --email alice@example.com
+
+# Create a superuser
+fsmtp users create alice --email alice@example.com --superuser
+
+# Rename a user or change their email
+fsmtp users update <user-id> --username bob --email bob@example.com
+
+# Deactivate an account, or grant/revoke superuser
+fsmtp users update <user-id> --inactive
+fsmtp users update <user-id> --superuser
+fsmtp users update <user-id> --no-superuser
+
+# Delete a user (prompts; --force skips the prompt)
+fsmtp users delete <user-id>
+```
+
+!!! note "Options left off are left alone"
+
+    `users update` sends only the options you name, so an omitted flag leaves that
+    column untouched. At least one option is required.
+
 ## Domain Management
 
 Domains carry three-valued flags: `true` and `false` pin the setting for the domain,
