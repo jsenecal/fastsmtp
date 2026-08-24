@@ -215,7 +215,7 @@ def domains_named(db: Db, domain_name: str) -> list[Domain]:
 
 class TestMutationsGoThroughService:
     def test_cli_never_writes_tombstones_or_hard_deletes_itself(self):
-        """Spec §8: no ``session.delete()`` and no ``deleted_at =`` in cli.py."""
+        """Spec section 8: no ``session.delete()`` and no ``deleted_at =`` in cli.py."""
         source = Path(inspect.getsourcefile(cli)).read_text()
         offenders = [
             line.strip()
@@ -962,7 +962,7 @@ class TestCleanupWorkerStartupLine:
         )
 
     def test_serve_gates_the_line_on_the_worker_not_the_delivery_log_flag(self):
-        """The console line must follow ``CleanupWorker.enabled`` (spec §7.2)."""
+        """The console line must follow ``CleanupWorker.enabled`` (spec section 7.2)."""
         source = inspect.getsource(cli.serve)
         assert "cleanup_worker.enabled" in source
         assert "settings.delivery_log_cleanup_enabled" not in source
