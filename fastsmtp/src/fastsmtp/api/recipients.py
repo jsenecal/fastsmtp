@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import ColumnElement, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastsmtp.api.validation import flush_or_http_conflict
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.db.models import Recipient
 from fastsmtp.db.session import get_session
@@ -25,6 +26,14 @@ def _conflicting_local_part(local_part: str | None) -> ColumnElement[bool]:
     """
     matches = Recipient.local_part == local_part if local_part else Recipient.local_part.is_(None)
     return and_(matches, Recipient.deleted_at.is_(None))
+
+
+def _duplicate_conflict(local_part: str | None) -> HTTPException:
+    pattern = local_part or "catch-all (*)"
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"Recipient '{pattern}' already exists for this domain",
+    )
 
 
 @router.get("/domains/{domain_id}/recipients", response_model=list[RecipientResponse])
@@ -74,11 +83,7 @@ async def create_recipient(
     )
     result = await session.execute(stmt)
     if result.scalar_one_or_none():
-        pattern = local_part or "catch-all (*)"
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Recipient '{pattern}' already exists for this domain",
-        )
+        raise _duplicate_conflict(local_part)
 
     recipient = Recipient(
         domain_id=domain_id,
@@ -87,7 +92,7 @@ async def create_recipient(
         webhook_headers=data.webhook_headers,
     )
     session.add(recipient)
-    await session.flush()
+    await flush_or_http_conflict(session, _duplicate_conflict(local_part))
     await session.refresh(recipient)
 
     return RecipientResponse.model_validate(recipient)
@@ -163,11 +168,7 @@ async def update_recipient(
             )
             check_result = await session.execute(check_stmt)
             if check_result.scalar_one_or_none():
-                pattern = new_local_part or "catch-all (*)"
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Recipient '{pattern}' already exists for this domain",
-                )
+                raise _duplicate_conflict(new_local_part)
 
     # Handle webhook_url conversion
     if "webhook_url" in update_data and update_data["webhook_url"]:
@@ -176,7 +177,7 @@ async def update_recipient(
     for field, value in update_data.items():
         setattr(recipient, field, value)
 
-    await session.flush()
+    await flush_or_http_conflict(session, _duplicate_conflict(recipient.local_part))
     await session.refresh(recipient)
 
     return RecipientResponse.model_validate(recipient)

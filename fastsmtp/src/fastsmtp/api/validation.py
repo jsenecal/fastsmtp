@@ -1,9 +1,46 @@
 """Shared request validation helpers for the API."""
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp.config import Settings
 from fastsmtp.rules.conditions import validate_regex_pattern
+
+
+def is_unique_violation(exc: IntegrityError) -> bool:
+    """True when an IntegrityError is a unique-constraint violation.
+
+    Checked structurally, not by matching driver prose: PostgreSQL reports
+    SQLSTATE 23505 (asyncpg puts it on the wrapped exception's cause), and
+    SQLite has no SQLSTATE but a stable message prefix. Foreign-key failures
+    (23503 / "FOREIGN KEY constraint failed") return False.
+    """
+    orig = exc.orig
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        code = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
+        if code:
+            return code == "23505"
+    return "UNIQUE constraint failed" in str(orig)
+
+
+async def flush_or_http_conflict(session: AsyncSession, conflict: HTTPException) -> None:
+    """Flush, translating a lost unique-constraint race into ``conflict``.
+
+    Duplicate pre-checks in the API are check-then-flush, so two concurrent
+    writes can both pass and the loser hits a unique index here; the index is
+    the deliberate backstop, this keeps the status code honest. The caller
+    owns the guarantee that ``conflict`` describes the only unique constraint
+    this flush can plausibly violate. Other integrity failures (foreign keys)
+    propagate unchanged.
+    """
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if not is_unique_violation(exc):
+            raise
+        await session.rollback()
+        raise conflict from exc
 
 
 def require_s3_for_preservation(settings: Settings) -> None:
