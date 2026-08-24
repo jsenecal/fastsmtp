@@ -2,8 +2,9 @@
 
 Docs, README, CLI help strings and output, and code comments are read in
 terminals, diffs, and rendered pages that do not all agree on encodings or
-fonts. The repo rule is therefore that no ``.py`` or ``.md`` file under the
-two ``src`` trees, ``docs/`` or ``README.md`` carries a byte above 0x7F:
+fonts. The repo rule is therefore that no ``.py``, ``.md`` or workflow YAML
+file under the two ``src`` trees, ``docs/``, ``README.md``, the Alembic tree
+or ``.github/`` carries a byte above 0x7F:
 dashes are ``-``, ellipses are ``...``, arrows are ``->``, quotes are
 straight, and diagrams are drawn with ``+ - |``.
 
@@ -23,9 +24,11 @@ SCANNED_ROOTS = (
     "fastsmtp-cli/src",
     "docs",
     "README.md",
+    "fastsmtp/alembic",
+    ".github",
 )
 
-SCANNED_SUFFIXES = {".py", ".md"}
+SCANNED_SUFFIXES = {".py", ".md", ".yml", ".yaml"}
 
 #: Directory names skipped wherever they appear under a root. No scanned root
 #: holds one today; this keeps an in-package ``tests/`` directory, should one
