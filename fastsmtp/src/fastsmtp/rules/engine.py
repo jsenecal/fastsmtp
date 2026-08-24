@@ -146,13 +146,24 @@ def evaluate_rule(
 
 async def evaluate_rules(
     session: AsyncSession,
-    domain_id: uuid.UUID,
+    domain: Domain,
     message: Message,
     payload: dict,
     auth_result: EmailAuthResult | None = None,
     settings: Settings | None = None,
 ) -> RuleEvaluationResult:
-    """Evaluate all rules for a domain against an email.
+    """Evaluate all rules of ``domain`` against an email.
+
+    ``domain`` is the row the caller has already resolved and accepted the
+    message for (``lookup_recipient`` on the SMTP path). The engine evaluates
+    its rules as they stand and does not re-decide whether the domain is live:
+    liveness is decided once per message, by the lookup. Under READ COMMITTED
+    a second check here could see a tombstone committed after the lookup, find
+    no rulesets, and let a message the lookup already accepted through with
+    its drop/quarantine rules skipped - enqueued untagged, delivered the moment
+    the domain is restored. A tombstoned domain's rules stay dormant because
+    every path that resolves a domain filters ``Domain.live()``, so nothing
+    hands a tombstone in here.
 
     Rules are evaluated in order:
     1. RuleSets are ordered by priority (highest first)
@@ -161,7 +172,7 @@ async def evaluate_rules(
 
     Args:
         session: Database session
-        domain_id: Domain ID
+        domain: The domain the message was accepted for
         message: Parsed email message
         payload: Extracted email payload
         auth_result: Email authentication result
@@ -173,18 +184,13 @@ async def evaluate_rules(
     settings = settings or get_settings()
     result = RuleEvaluationResult()
 
-    # Get all enabled rulesets for this domain, ordered by priority. A
-    # tombstoned domain's rulesets are dormant: the SMTP path never gets here
-    # for one (lookup_recipient rejects it first), but a rule can carry a
-    # webhook_url_override, so no caller may see them while the domain is dead.
+    # Get all enabled rulesets for this domain, ordered by priority
     stmt = (
         select(RuleSet)
-        .join(RuleSet.domain)
         .options(selectinload(RuleSet.rules))
         .where(
-            RuleSet.domain_id == domain_id,
+            RuleSet.domain_id == domain.id,
             RuleSet.is_enabled.is_(True),
-            Domain.live(),
         )
         .order_by(RuleSet.priority.desc())
     )
@@ -259,8 +265,7 @@ async def get_domain_auth_settings(
         Tuple of (verify_dkim, verify_spf, reject_dkim_fail, reject_spf_fail)
         Values are None if not overridden at domain level
     """
-    # A tombstoned domain reads as absent so every override falls back to global
-    stmt = select(Domain).where(Domain.id == domain_id, Domain.live())
+    stmt = select(Domain).where(Domain.id == domain_id)
     result = await session.execute(stmt)
     domain = result.scalar_one_or_none()
 

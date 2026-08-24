@@ -386,10 +386,13 @@ class FastSMTPHandler:
                     logger.warning(f"Message {message_id}: skipping recipient {rcpt_to}: {error}")
                     continue
 
-                # Evaluate rules for this domain
+                # Evaluate the rules of the domain the lookup just accepted the
+                # message for. That lookup is the one liveness decision for
+                # this recipient; the engine takes the row rather than the id
+                # so it cannot make a second, possibly different, one.
                 rule_result = await evaluate_rules(
                     session=db_session,
-                    domain_id=domain.id,
+                    domain=domain,
                     message=message,
                     payload=base_payload,
                     auth_result=auth_result,

@@ -1,8 +1,7 @@
 """Tests for raw MIME message preservation."""
 
 from datetime import UTC, datetime
-from email import message_from_bytes
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -10,10 +9,23 @@ from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Domain, Recipient, Rule, RuleSet
 from fastsmtp.smtp.server import FastSMTPHandler
-from fastsmtp.smtp.validation import EmailAuthResult
 from fastsmtp.storage.raw_message import RawMessagePreserver, should_preserve_raw
 from fastsmtp.storage.s3 import S3RawMessageInfo, S3Storage, S3UploadError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+def _handler(settings: Settings, s3: S3Storage | None) -> FastSMTPHandler:
+    """Build a handler whose S3 client is the given (mock) storage."""
+    handler = FastSMTPHandler(settings)
+    handler._s3_storage = s3
+    return handler
+
+
+def _envelope(*rcpt_tos: str) -> Envelope:
+    """An envelope as it stands after MAIL FROM and the given RCPT TOs."""
+    envelope = Envelope()
+    envelope.mail_from = "sender@external.com"
+    envelope.rcpt_tos = list(rcpt_tos)
+    return envelope
 
 
 def make_settings(**overrides) -> Settings:
@@ -243,11 +255,8 @@ class TestHandlerRawPreservation:
         assert handler._s3_storage is None
 
     @pytest_asyncio.fixture
-    async def preserving_domain(self, test_engine):
+    async def preserving_domain(self, session_factory):
         """Create a domain that preserves raw messages, with a catch-all recipient."""
-        session_factory = async_sessionmaker(
-            test_engine, class_=AsyncSession, expire_on_commit=False
-        )
         async with session_factory() as session:
             domain = Domain(
                 domain_name="archive.example.com",
@@ -268,11 +277,8 @@ class TestHandlerRawPreservation:
         return domain
 
     @pytest_asyncio.fixture
-    async def plain_domain(self, test_engine):
+    async def plain_domain(self, session_factory):
         """Create a domain that does not preserve raw messages."""
-        session_factory = async_sessionmaker(
-            test_engine, class_=AsyncSession, expire_on_commit=False
-        )
         async with session_factory() as session:
             domain = Domain(
                 domain_name="plain.example.com",
@@ -292,54 +298,6 @@ class TestHandlerRawPreservation:
             await session.commit()
         return domain
 
-    async def _run_handler(self, test_engine, settings, rcpt_tos, mock_s3):
-        """Run the handler against the test database and return queued payloads."""
-        session_factory = async_sessionmaker(
-            test_engine, class_=AsyncSession, expire_on_commit=False
-        )
-
-        raw = (
-            b"From: sender@external.com\r\n"
-            b"To: " + rcpt_tos[0].encode() + b"\r\n"
-            b"Subject: Quarterly invoice\r\n"
-            b"Message-ID: <archive-me@external.com>\r\n\r\n"
-            b"Body text\r\n"
-        )
-        envelope = Envelope()
-        envelope.mail_from = "sender@external.com"
-        envelope.rcpt_tos = list(rcpt_tos)
-        envelope.content = raw
-
-        handler = FastSMTPHandler(settings)
-        handler._s3_storage = mock_s3
-
-        payloads = []
-
-        async def capture(**kwargs):
-            payloads.append(kwargs["payload"])
-
-        with (
-            patch("fastsmtp.smtp.server.async_session", session_factory),
-            patch("fastsmtp.webhook.queue.enqueue_delivery", side_effect=capture),
-        ):
-            await handler._process_and_persist_message(
-                envelope=envelope,
-                message=message_from_bytes(raw),
-                message_id="<archive-me@external.com>",
-                auth_result=EmailAuthResult(
-                    dkim_result="none",
-                    dkim_domain=None,
-                    dkim_selector=None,
-                    spf_result="none",
-                    spf_domain=None,
-                    client_ip="203.0.113.10",
-                ),
-                client_ip="203.0.113.10",
-                raw_content=raw,
-            )
-
-        return payloads, raw
-
     @pytest.fixture
     def mock_s3(self):
         """Mock S3 storage that succeeds."""
@@ -354,61 +312,50 @@ class TestHandlerRawPreservation:
 
     @pytest.mark.asyncio
     async def test_preserving_domain_adds_raw_message_to_payload(
-        self, test_engine, test_settings, preserving_domain, mock_s3
+        self, test_settings, preserving_domain, mock_s3, run_smtp_handler
     ):
         """Test payloads for a preserving domain carry the archive location."""
-        payloads, raw = await self._run_handler(
-            test_engine,
-            test_settings,
-            ["user@archive.example.com"],
-            mock_s3,
+        run = await run_smtp_handler(
+            _handler(test_settings, mock_s3), _envelope("user@archive.example.com")
         )
 
-        assert len(payloads) == 1
-        assert payloads[0]["raw_message"]["storage"] == "s3"
-        assert payloads[0]["raw_message"]["bucket"] == "test-bucket"
+        assert len(run.payloads) == 1
+        assert run.payloads[0]["raw_message"]["storage"] == "s3"
+        assert run.payloads[0]["raw_message"]["bucket"] == "test-bucket"
         mock_s3.upload_raw_message.assert_awaited_once()
-        assert mock_s3.upload_raw_message.await_args.kwargs["content"] == raw
+        assert mock_s3.upload_raw_message.await_args.kwargs["content"] == run.raw
 
     @pytest.mark.asyncio
     async def test_non_preserving_domain_has_no_raw_message(
-        self, test_engine, test_settings, plain_domain, mock_s3
+        self, test_settings, plain_domain, mock_s3, run_smtp_handler
     ):
         """Test payloads for a non-preserving domain are unchanged."""
-        payloads, _ = await self._run_handler(
-            test_engine,
-            test_settings,
-            ["user@plain.example.com"],
-            mock_s3,
+        run = await run_smtp_handler(
+            _handler(test_settings, mock_s3), _envelope("user@plain.example.com")
         )
 
-        assert len(payloads) == 1
-        assert "raw_message" not in payloads[0]
+        assert len(run.payloads) == 1
+        assert "raw_message" not in run.payloads[0]
         mock_s3.upload_raw_message.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_single_upload_across_multiple_recipients(
-        self, test_engine, test_settings, preserving_domain, plain_domain, mock_s3
+        self, test_settings, preserving_domain, plain_domain, mock_s3, run_smtp_handler
     ):
         """Test one message archived once even with several matching recipients."""
-        payloads, _ = await self._run_handler(
-            test_engine,
-            test_settings,
-            ["a@archive.example.com", "b@archive.example.com", "c@plain.example.com"],
-            mock_s3,
+        run = await run_smtp_handler(
+            _handler(test_settings, mock_s3),
+            _envelope("a@archive.example.com", "b@archive.example.com", "c@plain.example.com"),
         )
 
-        assert len(payloads) == 3
+        assert len(run.payloads) == 3
         mock_s3.upload_raw_message.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_dropped_message_is_still_archived(
-        self, test_engine, test_settings, preserving_domain, mock_s3
+        self, test_settings, preserving_domain, mock_s3, session_factory, run_smtp_handler
     ):
         """Test a rule that drops the message still preserves the raw MIME first."""
-        session_factory = async_sessionmaker(
-            test_engine, class_=AsyncSession, expire_on_commit=False
-        )
         async with session_factory() as session:
             ruleset = RuleSet(
                 domain_id=preserving_domain.id,
@@ -431,19 +378,18 @@ class TestHandlerRawPreservation:
             )
             await session.commit()
 
-        payloads, _ = await self._run_handler(
-            test_engine,
-            test_settings,
-            ["user@archive.example.com"],
-            mock_s3,
+        run = await run_smtp_handler(
+            _handler(test_settings, mock_s3),
+            _envelope("user@archive.example.com"),
+            subject="Quarterly invoice",
         )
 
-        assert payloads == []
+        assert run.payloads == []
         mock_s3.upload_raw_message.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_required_preservation_failure_propagates(
-        self, test_engine, test_settings, preserving_domain
+        self, test_settings, preserving_domain, run_smtp_handler
     ):
         """Test a required-archive failure aborts the transaction so the sender retries."""
         settings = test_settings.model_copy(
@@ -456,9 +402,6 @@ class TestHandlerRawPreservation:
         storage.upload_raw_message.side_effect = S3UploadError("boom", "key")
 
         with pytest.raises(S3UploadError):
-            await self._run_handler(
-                test_engine,
-                settings,
-                ["user@archive.example.com"],
-                storage,
+            await run_smtp_handler(
+                _handler(settings, storage), _envelope("user@archive.example.com")
             )
