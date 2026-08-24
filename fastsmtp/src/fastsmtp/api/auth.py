@@ -3,14 +3,15 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
+from fastsmtp.api.validation import IncludeDeleted
 from fastsmtp.auth import Auth, generate_api_key
 from fastsmtp.config import Settings, get_settings
-from fastsmtp.db.models import APIKey, DomainMember
+from fastsmtp.db.models import APIKey, Domain, DomainMember
 from fastsmtp.db.session import get_session
+from fastsmtp.db.soft_delete import soft_delete_api_key
 from fastsmtp.schemas import (
     APIKeyCreate,
     APIKeyCreateResponse,
@@ -23,23 +24,46 @@ from fastsmtp.schemas import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+async def _own_live_key(
+    session: AsyncSession, auth: Auth, key_id: uuid.UUID, *criteria: ColumnElement[bool]
+) -> APIKey:
+    """Load one of the caller's keys that is not tombstoned, or 404.
+
+    A tombstone answers the same 404 as an id that never existed.
+    """
+    stmt = select(APIKey).where(
+        APIKey.id == key_id,
+        APIKey.user_id == auth.user.id,
+        APIKey.live(),
+        *criteria,
+    )
+    result = await session.execute(stmt)
+    api_key = result.scalar_one_or_none()
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found",
+        )
+    return api_key
+
+
 @router.get("/me", response_model=WhoamiResponse)
 async def whoami(
     auth: Auth,
     session: AsyncSession = Depends(get_session),
 ) -> WhoamiResponse:
     """Get current user information."""
-    # Get domain names for the user
+    # Get domain names for the user; memberships in tombstoned domains are
+    # hidden until the domain is restored.
     domains: list[str] = []
     if not auth.is_root:
         stmt = (
-            select(DomainMember)
-            .options(selectinload(DomainMember.domain))
-            .where(DomainMember.user_id == auth.user.id)
+            select(Domain.domain_name)
+            .join(Domain.members)
+            .where(DomainMember.user_id == auth.user.id, Domain.live())
         )
         result = await session.execute(stmt)
-        memberships = result.scalars().all()
-        domains = [m.domain.domain_name for m in memberships]
+        domains = list(result.scalars().all())
 
     return WhoamiResponse(
         user=UserResponse.model_validate(auth.user),
@@ -52,15 +76,23 @@ async def whoami(
 async def list_keys(
     auth: Auth,
     session: AsyncSession = Depends(get_session),
+    include_deleted: IncludeDeleted = False,
 ) -> list[APIKeyResponse]:
-    """List all API keys for the current user."""
+    """List the current user's API keys.
+
+    By default only keys that can still authenticate. ``include_deleted``
+    also lists tombstoned keys and keys retired before soft delete existed
+    (``is_active`` false, no tombstone); the caller can only ever see their
+    own keys, so no further role gate applies.
+    """
     if auth.is_root:
         return []
 
-    stmt = select(APIKey).where(
-        APIKey.user_id == auth.user.id,
-        APIKey.is_active == True,  # noqa: E712
-    )
+    stmt = select(APIKey).where(APIKey.user_id == auth.user.id)
+    if not include_deleted:
+        # is_active stays alongside live(): keys retired by a pre-0.5 server
+        # carry is_active=False with deleted_at NULL and must stay hidden.
+        stmt = stmt.where(APIKey.is_active == True, APIKey.live())  # noqa: E712
     result = await session.execute(stmt)
     keys = result.scalars().all()
     return [APIKeyResponse.model_validate(k) for k in keys]
@@ -115,25 +147,18 @@ async def delete_key(
     auth: Auth,
     session: AsyncSession = Depends(get_session),
 ) -> MessageResponse:
-    """Delete an API key."""
+    """Delete an API key.
+
+    The key is tombstoned and deactivated; there is no restore for keys, so a
+    second delete of the same id answers 404 like any other unknown key.
+    """
     if auth.is_root:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Root user has no API keys to delete",
         )
 
-    stmt = select(APIKey).where(
-        APIKey.id == key_id,
-        APIKey.user_id == auth.user.id,
-    )
-    result = await session.execute(stmt)
-    api_key = result.scalar_one_or_none()
-
-    if not api_key:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="API key not found",
-        )
+    api_key = await _own_live_key(session, auth, key_id)
 
     # Don't allow deleting the current key
     if auth.api_key and api_key.id == auth.api_key.id:
@@ -142,7 +167,7 @@ async def delete_key(
             detail="Cannot delete the currently active API key",
         )
 
-    api_key.is_active = False
+    await soft_delete_api_key(session, api_key)
     return MessageResponse(message="API key deleted")
 
 
@@ -153,29 +178,21 @@ async def rotate_key(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> APIKeyCreateResponse:
-    """Rotate an API key (deactivate old, create new with same settings)."""
+    """Rotate an API key (retire the old one, create a new one with the same settings)."""
     if auth.is_root:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Root user has no API keys to rotate",
         )
 
-    stmt = select(APIKey).where(
-        APIKey.id == key_id,
-        APIKey.user_id == auth.user.id,
+    old_key = await _own_live_key(
+        session,
+        auth,
+        key_id,
         APIKey.is_active == True,  # noqa: E712
     )
-    result = await session.execute(stmt)
-    old_key = result.scalar_one_or_none()
 
-    if not old_key:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="API key not found",
-        )
-
-    # Deactivate old key
-    old_key.is_active = False
+    await soft_delete_api_key(session, old_key)
 
     # Create new key with same settings
     full_key, key_prefix, key_hash, key_salt = generate_api_key()
