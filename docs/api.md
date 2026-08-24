@@ -104,7 +104,7 @@ The `status` filter and the `status` field use the vocabulary listed under
     `DELETE` on a user, API key, domain or recipient no longer removes the row. It
     **soft-deletes** it: the row is stamped with a `deleted_at` timestamp, disappears
     from every list and lookup, stops authenticating, receiving mail and delivering
-    webhooks, and can be brought back with `POST …/restore`. Permanent removal is a
+    webhooks, and can be brought back with `POST .../restore`. Permanent removal is a
     separate, superuser-only step (`?purge=true`) that only works on a row that is
     already deleted.
 
@@ -126,7 +126,7 @@ created while the old one is deleted.
 The delete cascades to what depends on the row, stamping the children with the same
 timestamp as the parent:
 
-| Deleting a… | Also… |
+| Deleting a... | Also... |
 |---|---|
 | **user** | deletes and **revokes** every API key the user still has. Memberships are kept, hidden while the user is deleted, and return with the user |
 | **API key** | sets `is_active=false` as well; the key never authenticates again. A second `DELETE` answers `404 API key not found` |
@@ -149,7 +149,7 @@ The flag requires the role that may delete the resource:
 | `GET /auth/keys` | anyone, for their own keys. Also lists keys retired before v0.5.0, which have `is_active=false` and no `deleted_at` |
 | `GET /domains` | superuser sees every deleted domain; a regular user sees deleted domains only where they are **owner** |
 | `GET /domains/{id}` | owner or superuser |
-| `GET /domains/{id}/recipients`, `GET …/recipients/{rid}` | admin or superuser while the domain is live. On a **deleted** domain the domain itself is resolved with the flag, so only its owners and superusers get through (the recipients of a deleted domain can be audited before restoring it); an admin gets `404` there |
+| `GET /domains/{id}/recipients`, `GET .../recipients/{rid}` | admin or superuser while the domain is live. On a **deleted** domain the domain itself is resolved with the flag, so only its owners and superusers get through (the recipients of a deleted domain can be audited before restoring it); an admin gets `404` there |
 | `GET /domains/{id}/delivery-log` | owner or superuser |
 
 Without the flag a deleted id is `404` with the ordinary "not found" detail. With it,
@@ -164,20 +164,20 @@ else); one whose domain was purged (`domain_id` is `null`) by superusers only.
 
 ### Restore
 
-- `POST /users/{id}/restore` — superuser
-- `POST /domains/{id}/restore` — owner or superuser
-- `POST /domains/{id}/recipients/{rid}/restore` — admin or superuser, and the domain must be live (`404` otherwise: restore the domain first)
+- `POST /users/{id}/restore` - superuser
+- `POST /domains/{id}/restore` - owner or superuser
+- `POST /domains/{id}/recipients/{rid}/restore` - admin or superuser, and the domain must be live (`404` otherwise: restore the domain first)
 
 Each returns `200` with the restored resource. Restoring a row that is not deleted answers
 `409` (`"User is not deleted"`, `"Domain is not deleted"`, `"Recipient is not deleted"`).
 If the name was re-taken by a live row in the meantime the restore answers `409` with the
-same detail the create route uses — `"Username already exists"`,
-`"Domain already exists"`, `"Recipient 'sales' already exists for this domain"` — so
+same detail the create route uses - `"Username already exists"`,
+`"Domain already exists"`, `"Recipient 'sales' already exists for this domain"` - so
 delete or rename the new row first.
 
 Restore brings back exactly what the delete took, and nothing more:
 
-- **Users** come back with their memberships. **API keys are not restored** — revoking a
+- **Users** come back with their memberships. **API keys are not restored** - revoking a
   credential is one-way. Create new keys.
 - **Domains** come back with the recipients that were deleted *with* them (same
   timestamp). A recipient deleted on its own earlier keeps its own tombstone.
@@ -189,7 +189,7 @@ Restore brings back exactly what the delete took, and nothing more:
 
 ### Purge
 
-`DELETE …?purge=true` on a user, domain or recipient removes the row permanently. It is
+`DELETE ...?purge=true` on a user, domain or recipient removes the row permanently. It is
 **superuser only** and only works on a row that is **already deleted**: on a live row it
 answers `409` (`"User must be deleted before it can be purged"`, and likewise for domains
 and recipients). Because deletion already cancelled every queued delivery, a purge can

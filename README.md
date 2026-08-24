@@ -330,9 +330,9 @@ archives by age.
 
 Preservation is decided per recipient, from three sources in order:
 
-1. A matching rule with `preserve_raw: true` — always enables it, independent of the
+1. A matching rule with `preserve_raw: true` - always enables it, independent of the
    rule's action, so a rule can archive a message and still drop it.
-2. The domain's `preserve_raw_message` — `true` or `false` overrides the global default.
+2. The domain's `preserve_raw_message` - `true` or `false` overrides the global default.
 3. The global `FASTSMTP_PRESERVE_RAW_MESSAGE` setting, used when the domain leaves it unset.
 
 A message is uploaded at most once no matter how many recipients ask for it. When it is
@@ -418,7 +418,7 @@ curl -H "X-API-Key: your-api-key" https://fastsmtp.example.com/api/v1/domains
 
 ### Endpoints
 
-Routes marked `?include_deleted` and `?purge` take those boolean query parameters —
+Routes marked `?include_deleted` and `?purge` take those boolean query parameters  - 
 see [Deletion, restore and purge](docs/api.md#deletion-restore-and-purge).
 
 #### Operations
@@ -480,7 +480,7 @@ see [Deletion, restore and purge](docs/api.md#deletion-restore-and-purge).
 - `POST /delivery-log/{id}/retry` - Retry a failed, exhausted or cancelled delivery
 
 Since v0.5.0, `DELETE` on a user, API key, domain or recipient is a **soft delete**,
-reversible with `POST …/restore`; `?purge=true` is the permanent removal. Who may pass
+reversible with `POST .../restore`; `?purge=true` is the permanent removal. Who may pass
 each flag, what a delete cascades to and how restore behaves are specified once, in
 [docs/api.md](docs/api.md#deletion-restore-and-purge).
 
@@ -858,8 +858,8 @@ fsmtp auth delete-key <key-id>
 
 #### User Management
 
-Every command in this group requires a superuser API key. Accounts have no password —
-they authenticate with API keys — so no command here takes one. `users update` sends only
+Every command in this group requires a superuser API key. Accounts have no password  - 
+they authenticate with API keys - so no command here takes one. `users update` sends only
 the options you name; an omitted flag leaves that column untouched, while `--email ''`
 clears the stored address (the CLI sends an explicit JSON null).
 
@@ -1089,7 +1089,7 @@ The rule engine allows conditional processing of emails based on various attribu
 - `equals`
 - `contains`
 - `starts_with`, `ends_with`
-- `regex` — [RE2 syntax](https://github.com/google/re2/wiki/Syntax), linear-time by
+- `regex` - [RE2 syntax](https://github.com/google/re2/wiki/Syntax), linear-time by
   construction (no ReDoS); backreferences and lookaround are not supported
 - `exists`
 

@@ -52,7 +52,7 @@ fastsmtp db revision -m "Add new table"
 
 Users and domains are addressed **by name**. Every command resolves the *live* entry of
 that name; a deleted entry never gets in the way, so a name can be reused right after a
-delete. The two commands that address deleted entries — `restore` and `delete --purge` —
+delete. The two commands that address deleted entries - `restore` and `delete --purge`  - 
 take `--id <uuid>` when several deleted entries share the name (the command lists their
 ids and refuses to guess). `--id` is refused on a plain `delete`, which always addresses
 the live entry.

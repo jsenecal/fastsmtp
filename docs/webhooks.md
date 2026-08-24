@@ -251,7 +251,7 @@ recipient or domain, and `last_error` records why (`Recipient deleted` / `Domain
 deleted`). A cancelled delivery is not sent: a delivery claimed by a worker just before
 the delete is caught by the worker itself and cancelled instead of being posted, and it
 never reaches the DLQ. The one bounded exception is a request that was already on the
-wire when the delete committed — it completes that single attempt, but `cancelled` is
+wire when the delete committed - it completes that single attempt, but `cancelled` is
 sticky, so the outcome cannot overwrite it with `failed` or `delivered` and nothing is
 retried.
 

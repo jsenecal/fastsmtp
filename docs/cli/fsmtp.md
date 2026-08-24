@@ -6,10 +6,10 @@ The remote CLI connects to a FastSMTP server over HTTPS for remote management. F
 
     Every `update` command sends only the options you name, so an omitted option
     leaves that setting untouched. Options backed by a *nullable* column go one
-    further: passing an empty string (`--option ''`) clears the stored value —
+    further: passing an empty string (`--option ''`) clears the stored value  - 
     the CLI sends an explicit JSON null. This applies to `users update --email`,
     `recipient update --local` and `rules rule update --webhook-url`. Nullable
-    boolean flags use `true`/`false`/`inherit` instead — see
+    boolean flags use `true`/`false`/`inherit` instead - see
     [Domain Management](#domain-management).
 
 !!! note "Deletes are recoverable"
@@ -73,8 +73,8 @@ fsmtp auth delete-key <key-id>
 
 ## User Management
 
-Every command in this group requires a superuser API key. Accounts have no password —
-they authenticate with API keys — so no command here takes one.
+Every command in this group requires a superuser API key. Accounts have no password  - 
+they authenticate with API keys - so no command here takes one.
 
 ```bash
 # List all users

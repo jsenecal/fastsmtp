@@ -72,13 +72,13 @@ with `fastsmtp serve` when **either** job is enabled.
 | `FASTSMTP_SOFT_DELETE_RETENTION_DAYS` | - | Days a deleted user, API key, domain or recipient stays restorable before it is purged. Unset (the default) never purges automatically |
 
 `DELETE` on a user, API key, domain or recipient is a **soft delete**: the row is
-stamped, hidden and restorable — see
+stamped, hidden and restorable - see
 [Deletion, restore and purge](api.md#deletion-restore-and-purge). The soft-delete job
 permanently removes rows whose stamp is older than
 `FASTSMTP_SOFT_DELETE_RETENTION_DAYS`, running the same cascade as a manual purge: a
 user takes its API keys and memberships, a domain its recipients, rulesets, rules and
 members, and delivery-log rows survive with their `domain_id` / `recipient_id` cleared.
-Each row is purged on its own clock — a recipient deleted before its domain goes first,
+Each row is purged on its own clock - a recipient deleted before its domain goes first,
 even if the domain is later restored.
 
 Leaving the setting unset is deliberate: the first upgrade to v0.5.0 must not silently
@@ -114,7 +114,7 @@ An allowlisted entry bypasses **both** the private/internal IP-range check and t
 blocked-hostname set (localhost, metadata aliases): FastSMTP trusts whatever IP the DNS
 chain returns at connect time. Use it only for hostnames whose DNS infrastructure you
 control. Because matching includes subdomains, a dangling DNS record under an allowlisted
-parent is a takeover risk — prefer the most specific hostname. Entries are normalized
+parent is a takeover risk - prefer the most specific hostname. Entries are normalized
 before matching: surrounding whitespace and a leading dot are stripped, case is ignored,
 and empty entries are dropped.
 
@@ -174,9 +174,9 @@ archives by age.
 
 Preservation is decided per recipient, from three sources in order:
 
-1. A matching rule with `preserve_raw: true` — always enables it, independent of the
+1. A matching rule with `preserve_raw: true` - always enables it, independent of the
    rule's action, so a rule can archive a message and still drop it.
-2. The domain's `preserve_raw_message` — `true` or `false` overrides the global default.
+2. The domain's `preserve_raw_message` - `true` or `false` overrides the global default.
 3. The global `FASTSMTP_PRESERVE_RAW_MESSAGE` setting, used when the domain leaves it unset.
 
 A message is uploaded at most once no matter how many recipients ask for it. When it is

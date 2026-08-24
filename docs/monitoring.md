@@ -8,7 +8,7 @@ curl http://localhost:8000/metrics
 ```
 
 The endpoint is served at the root, not under `/api/v1`, and is deliberately
-absent from the OpenAPI schema — Prometheus text output is not a JSON API.
+absent from the OpenAPI schema - Prometheus text output is not a JSON API.
 
 !!! warning "The endpoint is unauthenticated"
 
@@ -27,14 +27,14 @@ absent from the OpenAPI schema — Prometheus text output is not a JSON API.
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
 | `fastsmtp_requests_total` | Counter | `method`, `endpoint`, `status_code` | HTTP requests served |
-| `fastsmtp_request_duration_seconds` | Histogram | `method`, `endpoint` | Request latency (buckets 5ms–10s) |
+| `fastsmtp_request_duration_seconds` | Histogram | `method`, `endpoint` | Request latency (buckets 5ms-10s) |
 
 ### SMTP intake
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
 | `fastsmtp_smtp_messages_total` | Counter | `result` = `accepted`/`rejected`/`dropped` | Messages received. `dropped` means accepted then discarded by rules |
-| `fastsmtp_smtp_message_size_bytes` | Histogram | — | Message size (buckets 1KB–10MB) |
+| `fastsmtp_smtp_message_size_bytes` | Histogram | - | Message size (buckets 1KB-10MB) |
 | `fastsmtp_smtp_rate_limited_total` | Counter | `type` = `connection`/`message`/`recipient` | SMTP requests refused by rate limiting |
 
 ### Webhook delivery
@@ -42,12 +42,12 @@ absent from the OpenAPI schema — Prometheus text output is not a JSON API.
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
 | `fastsmtp_webhook_deliveries_total` | Counter | `status` = `delivered`/`failed`/`exhausted`/`cancelled` | Delivery attempts. `exhausted` means retries ran out and the delivery went to the DLQ; `cancelled` means the worker picked up a delivery whose recipient or domain had been deleted and dropped it without sending (no HTTP call, no DLQ) |
-| `fastsmtp_webhook_delivery_duration_seconds` | Histogram | — | Delivery latency (buckets 100ms–30s) |
+| `fastsmtp_webhook_delivery_duration_seconds` | Histogram | - | Delivery latency (buckets 100ms-30s) |
 | `fastsmtp_queue_depth` | Gauge | `status` = `pending`/`failed` | Deliveries waiting in the queue. Cancelled deliveries are terminal and not counted |
 
 `cancelled` is a non-delivery, not a failure: a dashboard or alert built on
 `status!="delivered"` will count it. Deliveries cancelled at delete time, before any
-worker touched them, do not increment the counter at all — only those a worker had
+worker touched them, do not increment the counter at all - only those a worker had
 already claimed do. See [Delivery statuses](webhooks.md#delivery-statuses).
 
 ### Email authentication
@@ -60,7 +60,7 @@ already claimed do. See [Delivery statuses](webhooks.md#delivery-statuses).
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `fastsmtp_metrics_scrapes_denied_total` | Counter | — | Scrapes refused because the client was not in `FASTSMTP_METRICS_ALLOWED_IPS` |
+| `fastsmtp_metrics_scrapes_denied_total` | Counter | - | Scrapes refused because the client was not in `FASTSMTP_METRICS_ALLOWED_IPS` |
 
 Only meaningful once an allowlist is configured. It has no source-address label:
 that would be unbounded cardinality, and the address appears in the log line
@@ -81,7 +81,7 @@ export FASTSMTP_METRICS_ALLOWED_IPS='["10.0.0.0/8","192.0.2.5","2001:db8::/32"]'
 ```
 
 A refused scrape gets `403` and no metric data. Malformed entries are rejected at
-startup rather than skipped — an allowlist that silently drops a typo is worse
+startup rather than skipped - an allowlist that silently drops a typo is worse
 than none, because it looks enforced while standing open.
 
 Refusals are logged at WARNING, but **throttled**: the first denial in each
@@ -104,7 +104,7 @@ export FASTSMTP_METRICS_ALLOWED_IPS='["10.20.0.0/16"]'
 ```
 
 `X-Forwarded-For` is attacker-controlled, so it is consulted **only** when the
-peer is a listed proxy, and the chain is read from the right — discarding trusted
+peer is a listed proxy, and the chain is read from the right - discarding trusted
 hops and taking the first untrusted entry. The leftmost entry is whatever the
 original caller chose to send and is never used.
 
@@ -115,8 +115,8 @@ care: a trusted proxy can claim any client address.
 !!! danger "Running your own ASGI server"
 
     FastSMTP resolves `X-Forwarded-For` itself, so `fastsmtp serve` starts uvicorn
-    with `proxy_headers=False`. If you run the app yourself — `uvicorn
-    fastsmtp.main:app`, gunicorn with a uvicorn worker, or any wrapper — **you
+    with `proxy_headers=False`. If you run the app yourself - `uvicorn
+    fastsmtp.main:app`, gunicorn with a uvicorn worker, or any wrapper - **you
     must disable proxy headers there too**.
 
     uvicorn enables them by default and rewrites the peer address from the
@@ -127,7 +127,7 @@ care: a trusted proxy can claim any client address.
     uvicorn fastsmtp.main:app --no-proxy-headers
     ```
 
-    This matters most with `FORWARDED_ALLOW_IPS=*`, a common container setting —
+    This matters most with `FORWARDED_ALLOW_IPS=*`, a common container setting  - 
     but uvicorn's default of `127.0.0.1` is also bypassable by anything sharing
     the host, such as another container on the same network namespace.
 
@@ -135,7 +135,7 @@ care: a trusted proxy can claim any client address.
 
 The allowlist needs a peer address. When the app is served over a Unix domain
 socket behind nginx, there is none, so every scrape is refused once
-`FASTSMTP_METRICS_ALLOWED_IPS` is set — `metrics_trusted_proxies` cannot help,
+`FASTSMTP_METRICS_ALLOWED_IPS` is set - `metrics_trusted_proxies` cannot help,
 because there is no peer to match against it.
 
 Restrict scraping in nginx instead, and leave `FASTSMTP_METRICS_ALLOWED_IPS`
