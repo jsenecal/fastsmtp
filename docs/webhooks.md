@@ -232,3 +232,32 @@ For example:
 ```
 raw/yourdomain.com/2026/03/07/abc123@sender.com.eml
 ```
+
+## Delivery statuses
+
+Every delivery attempt is recorded in the delivery log (`fsmtp ops log list`,
+`GET /domains/{id}/delivery-log`). The `status` field moves through these values:
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Queued; the worker will send it at `next_retry_at` |
+| `delivered` | The webhook answered with a success status |
+| `failed` | The last attempt failed and a retry is scheduled (exponential backoff) |
+| `exhausted` | Every retry failed; the payload was sent to the DLQ webhook, if one is configured. Terminal |
+| `cancelled` | The recipient or its domain was deleted while the delivery was still `pending` or `failed`. Terminal |
+
+A delete cancels queued deliveries immediately, in the same transaction that hides the
+recipient or domain, and `last_error` records why (`Recipient deleted` / `Domain
+deleted`). A cancelled delivery is not sent: a delivery claimed by a worker just before
+the delete is caught by the worker itself and cancelled instead of being posted, and it
+never reaches the DLQ. The one bounded exception is a request that was already on the
+wire when the delete committed — it completes that single attempt, but `cancelled` is
+sticky, so the outcome cannot overwrite it with `failed` or `delivered` and nothing is
+retried.
+
+Restoring the recipient or domain does **not** re-queue anything. Each cancelled
+delivery is re-armed explicitly with `POST /delivery-log/{id}/retry`
+(`fsmtp ops log retry <log-id>`), which answers `409` while the recipient or domain is
+still deleted. `cancelled` is counted in
+[`fastsmtp_webhook_deliveries_total`](monitoring.md#webhook-delivery) but not in
+`fastsmtp_queue_depth`, so cancelling drops the backlog at once.

@@ -50,24 +50,42 @@ fastsmtp db revision -m "Add new table"
 
 ## User Management
 
+Users and domains are addressed **by name**. Every command resolves the *live* entry of
+that name; a deleted entry never gets in the way, so a name can be reused right after a
+delete. The two commands that address deleted entries — `restore` and `delete --purge` —
+take `--id <uuid>` when several deleted entries share the name (the command lists their
+ids and refuses to guess). `--id` is refused on a plain `delete`, which always addresses
+the live entry.
+
 ```bash
-# Create a new user
-fastsmtp user create alice alice@example.com
+# Create a new user (only the username is required)
+fastsmtp user create alice --email alice@example.com
 
 # List all users
 fastsmtp user list
 
-# Grant superuser privileges
-fastsmtp user set-superuser alice
+# Include deleted (restorable) users, with a Deleted column
+fastsmtp user list --include-deleted
 
-# Revoke superuser privileges
-fastsmtp user set-superuser alice --revoke
+# Grant or revoke superuser privileges
+fastsmtp user set-superuser alice --enable
+fastsmtp user set-superuser alice --disable
 
-# Generate API key for user
+# Generate API key for user (refused for a deleted user)
 fastsmtp user generate-key alice
 
-# Delete a user
+# Delete a user (prompts; -f skips the prompt). Soft: the user's API keys are
+# revoked for good, memberships come back on restore
 fastsmtp user delete alice
+
+# Restore a deleted user. Keys revoked at deletion are not restored
+fastsmtp user restore alice
+fastsmtp user restore alice --id 3f1c...   # when several deleted users are named alice
+
+# Permanently remove an already-deleted user with their keys and memberships.
+# Refused on a live user: delete it first, then --purge
+fastsmtp user delete alice --purge
+fastsmtp user delete alice --purge --id 3f1c...
 ```
 
 ## Domain Management
@@ -79,17 +97,34 @@ fastsmtp domain create example.com
 # List all domains
 fastsmtp domain list
 
-# Add a member to domain
+# Include deleted (restorable) domains, with a Deleted column
+fastsmtp domain list --include-deleted
+
+# Add a member to domain (refused for a deleted user)
 fastsmtp domain add-member example.com alice --role owner
 fastsmtp domain add-member example.com bob --role admin
 fastsmtp domain add-member example.com charlie --role member
 
-# Remove member from domain
+# Remove member from domain (memberships have no soft delete; this is permanent).
+# Unlike add-member this also reaches a deleted user, so a membership can be
+# taken away without restoring the account first
 fastsmtp domain remove-member example.com charlie
 
-# Delete a domain
+# Delete a domain (prompts; -f skips the prompt). Soft: its recipients are deleted
+# with it and their queued deliveries cancelled; rulesets and members are kept
 fastsmtp domain delete example.com
+
+# Restore a deleted domain and the recipients deleted with it
+fastsmtp domain restore example.com
+fastsmtp domain restore example.com --id 9a2e...
+
+# Permanently remove an already-deleted domain with its recipients, rulesets and
+# members. Delivery history is kept with its domain link cleared
+fastsmtp domain delete example.com --purge
 ```
+
+Restoring a name that a live entry has since taken fails with
+`Domain 'example.com' already exists; rename or purge it first`.
 
 ## Maintenance
 
@@ -103,9 +138,25 @@ fastsmtp cleanup --dry-run
 # Override retention period
 fastsmtp cleanup --older-than 30d
 
+# Permanently remove users, API keys, domains and recipients deleted longer ago
+# than FASTSMTP_SOFT_DELETE_RETENTION_DAYS
+fastsmtp purge-deleted
+
+# Preview: "Would purge 3 soft-deleted rows older than ... (recipients=1, ...)"
+fastsmtp purge-deleted --dry-run
+
+# Override the retention period (also the only way to run it when none is configured)
+fastsmtp purge-deleted --older-than 30d
+
 # Show current configuration
 fastsmtp show-config
 
 # Show version
 fastsmtp version
 ```
+
+`purge-deleted` is the manual form of the retention job described in
+[Retention](../configuration.md#retention). Without `FASTSMTP_SOFT_DELETE_RETENTION_DAYS`
+and without `--older-than` it exits with
+`No retention configured. Set FASTSMTP_SOFT_DELETE_RETENTION_DAYS or pass --older-than.`
+`cleanup` stays delivery-log only.

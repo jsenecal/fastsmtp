@@ -12,6 +12,22 @@ The remote CLI connects to a FastSMTP server over HTTPS for remote management. F
     boolean flags use `true`/`false`/`inherit` instead — see
     [Domain Management](#domain-management).
 
+!!! note "Deletes are recoverable"
+
+    `users delete`, `domain delete` and `recipient delete` are **soft**: the entry
+    disappears from every list and lookup but can be brought back with the matching
+    `restore` command, which the CLI names after each delete
+    (`Restore with: fsmtp domain restore <id>`). `--include-deleted` shows deleted
+    entries in `list`, `get`, `auth keys` and `ops log list`, with a red `Deleted`
+    column or row. `delete --purge` is the permanent removal: superuser only, it works
+    only on an entry that is already deleted, asks its own confirmation
+    (`Permanently delete domain X? This cannot be undone.`) and reports `Domain X
+    purged`. Run it on a live entry and the server answers
+    `409 Domain must be deleted before it can be purged`. API keys are the
+    exception: `auth delete-key` cannot be undone. See
+    [Deletion, restore and purge](../api.md#deletion-restore-and-purge) for what each
+    delete cascades to.
+
 ## Configuration
 
 ```bash
@@ -42,13 +58,16 @@ fsmtp auth whoami
 # List your API keys
 fsmtp auth keys
 
+# Include deleted keys, and keys retired before v0.5.0
+fsmtp auth keys --include-deleted
+
 # Create a new API key (optionally expiring after N days)
 fsmtp auth create-key "CI/CD" --expires 90
 
-# Rotate an API key
+# Rotate an API key (the old key is deleted)
 fsmtp auth rotate-key <key-id>
 
-# Delete an API key
+# Delete an API key. Deleted keys cannot be restored; create or rotate instead
 fsmtp auth delete-key <key-id>
 ```
 
@@ -61,8 +80,12 @@ they authenticate with API keys — so no command here takes one.
 # List all users
 fsmtp users list
 
-# Get user details
+# Include deleted (restorable) users
+fsmtp users list --include-deleted
+
+# Get user details (a deleted user is 404 without --include-deleted)
 fsmtp users get <user-id>
+fsmtp users get <user-id> --include-deleted
 
 # Create a user (only the username is required)
 fsmtp users create alice --email alice@example.com
@@ -81,8 +104,15 @@ fsmtp users update <user-id> --inactive
 fsmtp users update <user-id> --superuser
 fsmtp users update <user-id> --no-superuser
 
-# Delete a user (prompts; --force skips the prompt)
+# Delete a user (prompts; --force skips the prompt). Soft: the user's API keys
+# are revoked for good, memberships come back on restore
 fsmtp users delete <user-id>
+
+# Restore a deleted user. Keys revoked at deletion are not restored; create new ones
+fsmtp users restore <user-id>
+
+# Permanently remove an already-deleted user with their keys and memberships (superuser)
+fsmtp users delete <user-id> --purge
 ```
 
 !!! note "Options left off are left alone"
@@ -101,8 +131,12 @@ off entirely leaves the setting untouched.
 # List domains you have access to
 fsmtp domain list
 
-# Get domain details
+# Include deleted domains (all of them for a superuser, those you own otherwise)
+fsmtp domain list --include-deleted
+
+# Get domain details (a deleted domain is 404 without --include-deleted; owner only)
 fsmtp domain get <domain-id>
+fsmtp domain get <domain-id> --include-deleted
 
 # Create a new domain
 fsmtp domain create example.com
@@ -117,8 +151,16 @@ fsmtp domain update <domain-id> --verify-dkim true --reject-dkim-fail false
 # Stop overriding the server-wide raw-preservation default
 fsmtp domain update <domain-id> --preserve-raw-message inherit
 
-# Delete a domain
+# Delete a domain (owner). Soft: its recipients are deleted with it and their
+# queued deliveries cancelled; rulesets and members come back on restore
 fsmtp domain delete <domain-id>
+
+# Restore a deleted domain and the recipients deleted with it (owner)
+fsmtp domain restore <domain-id>
+
+# Permanently remove an already-deleted domain with its recipients, rulesets and
+# members (superuser). Delivery history is kept with its domain link cleared
+fsmtp domain delete <domain-id> --purge
 
 # Manage domain members
 fsmtp domain member list <domain-id>
@@ -141,8 +183,12 @@ Recipients live under a domain, so every command takes the domain ID first.
 # List recipients for a domain
 fsmtp recipient list <domain-id>
 
-# Get recipient details
+# Include deleted recipients (admin). Works on a deleted domain too, for its owners
+fsmtp recipient list <domain-id> --include-deleted
+
+# Get recipient details (a deleted recipient is 404 without --include-deleted)
 fsmtp recipient get <domain-id> <recipient-id>
+fsmtp recipient get <domain-id> <recipient-id> --include-deleted
 
 # Create a recipient with webhook (omit --local for a catch-all)
 fsmtp recipient create <domain-id> https://n8n.example.com/webhook/email --local support
@@ -159,8 +205,15 @@ fsmtp recipient update <domain-id> <recipient-id> \
 # Clear the local part to turn a recipient into the domain's catch-all
 fsmtp recipient update <domain-id> <recipient-id> --local ''
 
-# Delete recipient
+# Delete recipient. Soft: its pending and failed deliveries are cancelled
 fsmtp recipient delete <domain-id> <recipient-id>
+
+# Restore a deleted recipient (the domain must be live; restore it first otherwise)
+fsmtp recipient restore <domain-id> <recipient-id>
+
+# Permanently remove an already-deleted recipient (superuser). Its delivery
+# history is kept with the recipient link cleared
+fsmtp recipient delete <domain-id> <recipient-id> --purge
 ```
 
 ## Rule Management
@@ -243,9 +296,18 @@ fsmtp ops test-webhook https://webhook.site/xxx
 fsmtp ops log list <domain-id>
 fsmtp ops log list <domain-id> --status failed --limit 50
 
+# Deliveries cancelled because their recipient or domain was deleted
+fsmtp ops log list <domain-id> --status cancelled
+
+# Read the history of a deleted domain (owner or superuser)
+fsmtp ops log list <domain-id> --include-deleted
+
 # Get delivery log details
 fsmtp ops log get <log-id>
 
-# Retry a failed delivery
+# Retry a failed, exhausted or cancelled delivery. A cancelled one is accepted
+# only once its recipient and domain are live again (409 otherwise)
 fsmtp ops log retry <log-id>
 ```
+
+See [Delivery statuses](../webhooks.md#delivery-statuses) for the status vocabulary.

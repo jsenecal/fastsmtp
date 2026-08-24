@@ -56,6 +56,44 @@ A database *ahead* of the build is allowed, so a rolling deploy that migrates be
 old pods are gone does not take them down. A database with no `alembic_version` table
 cannot be compared and is allowed with a warning.
 
+## Retention
+
+Two background jobs remove old rows. Both run on the same cleanup worker, which starts
+with `fastsmtp serve` when **either** job is enabled.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_DELIVERY_LOG_RETENTION_DAYS` | `90` | Delivery-log rows older than this are deleted |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_ENABLED` | `true` | Run the delivery-log job in the cleanup worker |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_INTERVAL_HOURS` | `24` | How often the worker runs both jobs |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_BATCH_SIZE` | `1000` | Delivery-log rows deleted per statement |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_MAX_PER_RUN` | `100000` | Delivery-log rows deleted per run at most; the rest wait for the next run |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_BATCH_DELAY_MS` | `100` | Pause between delivery-log batches, to spread database load |
+| `FASTSMTP_SOFT_DELETE_RETENTION_DAYS` | - | Days a deleted user, API key, domain or recipient stays restorable before it is purged. Unset (the default) never purges automatically |
+
+`DELETE` on a user, API key, domain or recipient is a **soft delete**: the row is
+stamped, hidden and restorable — see
+[Deletion, restore and purge](api.md#deletion-restore-and-purge). The soft-delete job
+permanently removes rows whose stamp is older than
+`FASTSMTP_SOFT_DELETE_RETENTION_DAYS`, running the same cascade as a manual purge: a
+user takes its API keys and memberships, a domain its recipients, rulesets, rules and
+members, and delivery-log rows survive with their `domain_id` / `recipient_id` cleared.
+Each row is purged on its own clock — a recipient deleted before its domain goes first,
+even if the domain is later restored.
+
+Leaving the setting unset is deliberate: the first upgrade to v0.5.0 must not silently
+schedule the destruction of everything that gets deleted afterwards. Set it once you have
+decided how long a mistaken delete should stay reversible, e.g. `30`. The manual
+equivalent is `fastsmtp purge-deleted`, which accepts `--dry-run` and an
+`--older-than 30d` override.
+
+```bash
+export FASTSMTP_SOFT_DELETE_RETENTION_DAYS=30
+```
+
+The two jobs are independent: a failure in one is logged and does not skip the other,
+and `FASTSMTP_DELIVERY_LOG_CLEANUP_ENABLED=false` with a soft-delete retention set still
+starts the worker for the purge alone.
 
 ## Webhooks
 

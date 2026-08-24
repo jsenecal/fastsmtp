@@ -41,9 +41,14 @@ absent from the OpenAPI schema — Prometheus text output is not a JSON API.
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `fastsmtp_webhook_deliveries_total` | Counter | `status` = `delivered`/`failed`/`exhausted` | Delivery attempts. `exhausted` means retries ran out and the delivery went to the DLQ |
+| `fastsmtp_webhook_deliveries_total` | Counter | `status` = `delivered`/`failed`/`exhausted`/`cancelled` | Delivery attempts. `exhausted` means retries ran out and the delivery went to the DLQ; `cancelled` means the worker picked up a delivery whose recipient or domain had been deleted and dropped it without sending (no HTTP call, no DLQ) |
 | `fastsmtp_webhook_delivery_duration_seconds` | Histogram | — | Delivery latency (buckets 100ms–30s) |
-| `fastsmtp_queue_depth` | Gauge | `status` = `pending`/`failed` | Deliveries waiting in the queue |
+| `fastsmtp_queue_depth` | Gauge | `status` = `pending`/`failed` | Deliveries waiting in the queue. Cancelled deliveries are terminal and not counted |
+
+`cancelled` is a non-delivery, not a failure: a dashboard or alert built on
+`status!="delivered"` will count it. Deliveries cancelled at delete time, before any
+worker touched them, do not increment the counter at all — only those a worker had
+already claimed do. See [Delivery statuses](webhooks.md#delivery-statuses).
 
 ### Email authentication
 
@@ -155,9 +160,9 @@ Add `metrics_path` only if you front the service with a path prefix; the default
 # Message intake by outcome
 sum by (result) (rate(fastsmtp_smtp_messages_total[5m]))
 
-# Webhook failure ratio
-sum(rate(fastsmtp_webhook_deliveries_total{status!="delivered"}[5m]))
-  / sum(rate(fastsmtp_webhook_deliveries_total[5m]))
+# Webhook failure ratio (excludes cancelled: those were never attempted)
+sum(rate(fastsmtp_webhook_deliveries_total{status=~"failed|exhausted"}[5m]))
+  / sum(rate(fastsmtp_webhook_deliveries_total{status!="cancelled"}[5m]))
 
 # Queue backlog - rising means delivery is not keeping up with intake
 fastsmtp_queue_depth{status="pending"}
