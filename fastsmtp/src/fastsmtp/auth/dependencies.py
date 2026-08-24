@@ -21,6 +21,7 @@ from fastsmtp.auth.keys import (
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import APIKey, Domain, DomainMember, User
 from fastsmtp.db.session import get_session
+from fastsmtp.db.soft_delete import visible
 
 # Domain role hierarchy
 ROLE_HIERARCHY = {"owner": 3, "admin": 2, "member": 1}
@@ -168,11 +169,13 @@ async def get_auth_context(
     # Look up the API key in the database by prefix
     # We use prefix lookup because salted keys can't be looked up by hash directly
     # Note: Multiple keys could theoretically have the same prefix, so we check all
+    # A tombstoned key is never a candidate: it falls through to the dummy-hash
+    # branch below and gets the same "Invalid API key" as a key that never existed.
     key_prefix = x_api_key[:12] if len(x_api_key) >= 12 else x_api_key
     stmt = (
         select(APIKey)
         .options(selectinload(APIKey.user).selectinload(User.domain_memberships))
-        .where(APIKey.key_prefix == key_prefix)
+        .where(APIKey.key_prefix == key_prefix, APIKey.live())
     )
     result = await session.execute(stmt)
     api_keys = result.scalars().all()
@@ -226,7 +229,10 @@ async def get_auth_context(
             detail="API key has expired",
         )
 
-    if not api_key.user.is_active:
+    # Deleting a user tombstones and deactivates their keys, so a live key on a
+    # tombstoned user only exists through a direct database edit. Same detail
+    # as an inactive account: the response must not say which one it is.
+    if not api_key.user.is_active or api_key.user.is_deleted:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account is inactive",
@@ -252,6 +258,8 @@ async def get_domain_with_access(
     auth: Auth,
     session: AsyncSession = Depends(get_session),
     required_role: str = "member",
+    *,
+    include_deleted: bool = False,
 ) -> Domain:
     """Get a domain and verify the user has access to it.
 
@@ -260,6 +268,12 @@ async def get_domain_with_access(
         auth: Authentication context
         session: Database session
         required_role: Minimum role required (member, admin, or owner)
+        include_deleted: Also resolve a soft-deleted domain. A tombstone is
+            only ever returned to a superuser or an owner; everyone else gets
+            the same 404 as for an id that does not exist, so the flag is not
+            an existence oracle. Routers that expose it must still raise
+            ``required_role`` up front so an insufficient role gets 403
+            whether or not a tombstone exists.
 
     Returns:
         The domain if the user has access
@@ -267,7 +281,11 @@ async def get_domain_with_access(
     Raises:
         HTTPException: If domain not found or access denied
     """
-    stmt = select(Domain).options(selectinload(Domain.members)).where(Domain.id == domain_id)
+    stmt = (
+        select(Domain)
+        .options(selectinload(Domain.members))
+        .where(Domain.id == domain_id, visible(Domain, include_deleted))
+    )
     result = await session.execute(stmt)
     domain = result.scalar_one_or_none()
 
@@ -286,6 +304,14 @@ async def get_domain_with_access(
         (m for m in domain.members if m.user_id == auth.user.id),
         None,
     )
+
+    # A tombstone (only loadable with include_deleted) is invisible below the
+    # delete role: non-members and non-owner members get 404, not 403.
+    if domain.is_deleted and (membership is None or membership.role != "owner"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Domain not found",
+        )
 
     if not membership:
         raise HTTPException(

@@ -33,6 +33,21 @@ def mock_scalars_result(api_keys: list) -> MagicMock:
     return mock_result
 
 
+def create_mock_user(*, is_active: bool = True, is_deleted: bool = False) -> MagicMock:
+    """Create a mock user row.
+
+    ``is_deleted`` must be set explicitly: a bare ``MagicMock`` attribute is
+    truthy, which the tombstone check would read as "deleted".
+    """
+    mock_user = MagicMock(spec=User)
+    mock_user.id = uuid.uuid4()
+    mock_user.is_active = is_active
+    mock_user.is_deleted = is_deleted
+    mock_user.is_superuser = False
+    mock_user.domain_memberships = []
+    return mock_user
+
+
 class TestMissingAPIKey:
     """Tests for missing API key header."""
 
@@ -118,10 +133,7 @@ class TestInvalidAPIKey:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Create a mock user
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.is_active = True
+        mock_user = create_mock_user()
 
         # Create mock API key with salted hash (different key)
         _, _, correct_hash, correct_salt = generate_api_key()
@@ -154,10 +166,7 @@ class TestInvalidAPIKey:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Create a mock user
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.is_active = True
+        mock_user = create_mock_user()
 
         # Create mock API key with legacy (unsalted) hash
         correct_key, _, _, _ = generate_api_key()
@@ -196,10 +205,7 @@ class TestInactiveAPIKey:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Create a mock user
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.is_active = True
+        mock_user = create_mock_user()
 
         # Generate a valid key and its hash
         full_key, key_prefix, key_hash, key_salt = generate_api_key()
@@ -234,10 +240,7 @@ class TestExpiredAPIKey:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Create a mock user
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.is_active = True
+        mock_user = create_mock_user()
 
         # Generate a valid key and its hash
         full_key, key_prefix, key_hash, key_salt = generate_api_key()
@@ -268,12 +271,7 @@ class TestExpiredAPIKey:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Create a mock user
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.is_active = True
-        mock_user.is_superuser = False
-        mock_user.domain_memberships = []
+        mock_user = create_mock_user()
 
         # Generate a valid key and its hash
         full_key, key_prefix, key_hash, key_salt = generate_api_key()
@@ -306,12 +304,7 @@ class TestExpiredAPIKey:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Create a mock user
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.is_active = True
-        mock_user.is_superuser = False
-        mock_user.domain_memberships = []
+        mock_user = create_mock_user()
 
         # Generate a valid key and its hash
         full_key, key_prefix, key_hash, key_salt = generate_api_key()
@@ -348,10 +341,7 @@ class TestInactiveUser:
         mock_session = AsyncMock(spec=AsyncSession)
         mock_settings = create_mock_settings()
 
-        # Create a mock inactive user
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.is_active = False  # User is inactive!
+        mock_user = create_mock_user(is_active=False)
 
         # Generate a valid key and its hash
         full_key, key_prefix, key_hash, key_salt = generate_api_key()
@@ -375,6 +365,67 @@ class TestInactiveUser:
 
         assert exc_info.value.status_code == 401
         assert "User account is inactive" in exc_info.value.detail
+
+
+class TestTombstones:
+    """Soft-deleted keys and users cannot authenticate (spec S1, S2)."""
+
+    @pytest.mark.asyncio
+    async def test_key_lookup_excludes_tombstoned_keys(self):
+        """The prefix lookup filters ``deleted_at IS NULL``.
+
+        A tombstoned key is then never a candidate, so it lands on the
+        constant-time dummy-hash branch with the uniform "Invalid API key".
+        """
+        mock_session = AsyncMock(spec=AsyncSession)
+        mock_settings = create_mock_settings()
+        mock_session.execute.return_value = mock_scalars_result([])
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_auth_context(
+                x_api_key="fsmtp_tombstoned_key_123456",
+                session=mock_session,
+                settings=mock_settings,
+            )
+
+        assert exc_info.value.status_code == 401
+        assert "Invalid API key" in exc_info.value.detail
+        lookup = mock_session.execute.call_args.args[0]
+        assert "api_keys.deleted_at IS NULL" in str(lookup)
+
+    @pytest.mark.asyncio
+    async def test_live_key_of_tombstoned_user_returns_401(self):
+        """A key that escaped the delete cascade is still rejected by the user check.
+
+        Same detail as an inactive account so the response is not an oracle
+        for whether the user was deactivated or deleted.
+        """
+        mock_session = AsyncMock(spec=AsyncSession)
+        mock_settings = create_mock_settings()
+
+        mock_user = create_mock_user(is_deleted=True)
+
+        full_key, key_prefix, key_hash, key_salt = generate_api_key()
+
+        mock_api_key = MagicMock(spec=APIKey)
+        mock_api_key.key_hash = key_hash
+        mock_api_key.key_salt = key_salt
+        mock_api_key.is_salted = True
+        mock_api_key.is_active = True
+        mock_api_key.expires_at = None
+        mock_api_key.user = mock_user
+
+        mock_session.execute.return_value = mock_scalars_result([mock_api_key])
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_auth_context(
+                x_api_key=full_key,
+                session=mock_session,
+                settings=mock_settings,
+            )
+
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.detail == "User account is inactive"
 
 
 class TestRootAPIKey:
