@@ -134,6 +134,10 @@ async def restore_domain(session: AsyncSession, domain: Domain) -> int:
     name index (see module docstring).
     """
     stamp = domain.deleted_at
+    if stamp is None:
+        # Callers gate on require_tombstoned, but ``deleted_at == None`` would
+        # compile to IS NULL and match every live recipient.
+        return 0
     restored = await _bulk_update(
         session,
         update(Recipient)

@@ -332,6 +332,22 @@ class TestSoftDeleteApiKey:
 
 class TestRestoreDomain:
     @pytest.mark.asyncio
+    async def test_live_domain_is_a_no_op(self, test_session: AsyncSession):
+        """A caller that forgets require_tombstoned must not "restore" live rows.
+
+        ``Recipient.deleted_at == None`` compiles to ``IS NULL``, so without a
+        guard a live domain would match every live recipient and report them
+        as restored.
+        """
+        domain = await make_domain(test_session, "live.com")
+        await make_recipient(test_session, domain, "sales")
+        await make_recipient(test_session, domain, "ops")
+
+        restored = await restore_domain(test_session, domain)
+
+        assert restored == 0
+
+    @pytest.mark.asyncio
     async def test_restores_recipients_stamped_with_the_domain(self, test_session: AsyncSession):
         domain = await make_domain(test_session, "restore.com")
         sales = await make_recipient(test_session, domain, "sales")
