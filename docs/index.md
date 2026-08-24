@@ -14,7 +14,8 @@ A TLS-capable, async SMTP server that receives emails and forwards them to webho
 - **Rate Limiting**: Configurable limits for both API and SMTP (per-IP connection/message limits)
 - **Security**: Webhook header encryption at rest, SSRF protection for webhook URLs
 - **Queue Backpressure**: Configurable limits to prevent unbounded queue growth
-- **Automatic Cleanup**: Background worker for delivery log retention management
+- **Soft Delete**: Deleted users, API keys, domains and recipients are restorable; delivery history survives, permanent removal is a separate superuser step or an optional retention job
+- **Automatic Cleanup**: Background worker for delivery-log and soft-delete retention
 - **Horizontal Scaling**: Stateless design with database-backed task distribution
 
 ## Architecture

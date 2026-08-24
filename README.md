@@ -843,7 +843,8 @@ fsmtp auth whoami
 # List your API keys
 fsmtp auth keys
 
-# Include deleted keys, and keys retired before v0.5.0
+# Also show deleted and retired keys (keys cannot be restored). Keys retired before
+# v0.5.0 carry no deletion time and show as "retired" in the Deleted column
 fsmtp auth keys --include-deleted
 
 # Create a new API key (optionally expiring after N days)
@@ -864,9 +865,12 @@ the options you name; an omitted flag leaves that column untouched, while `--ema
 clears the stored address (the CLI sends an explicit JSON null).
 
 Deletes are soft across `users`, `domain` and `recipient`: the entry is hidden and
-restorable with the matching `restore` command, `--include-deleted` shows deleted entries
-in `list`/`get`, and `delete --purge` (superuser) permanently removes an entry that is
-already deleted.
+restorable with the matching `restore` command, which each delete prints
+(`Restore with: fsmtp domain restore <id>`); `--include-deleted` shows deleted entries
+in `list`/`get` with a `Deleted` column, and `delete --purge` (superuser) permanently
+removes an entry that is already deleted, after its own
+`Permanently delete domain <id>? This cannot be undone.` prompt. API keys cannot be
+restored. See [Remote CLI](docs/cli/fsmtp.md) for the full output of each command.
 
 ```bash
 # List all users
@@ -875,7 +879,7 @@ fsmtp users list
 # Include deleted (restorable) users
 fsmtp users list --include-deleted
 
-# Get user details (a deleted user is 404 without --include-deleted)
+# Get user details (a deleted user is not found without --include-deleted)
 fsmtp users get <user-id>
 fsmtp users get <user-id> --include-deleted
 
@@ -899,7 +903,7 @@ fsmtp users update <user-id> --no-superuser
 # Delete a user (prompts; --force skips the prompt). Soft: API keys are revoked for good
 fsmtp users delete <user-id>
 
-# Restore a deleted user (keys are not restored; create new ones)
+# Restore a deleted user. API keys revoked at deletion are not restored; create new keys
 fsmtp users restore <user-id>
 
 # Permanently remove an already-deleted user (superuser)
@@ -919,7 +923,7 @@ fsmtp domain list
 # Include deleted domains (all for a superuser, those you own otherwise)
 fsmtp domain list --include-deleted
 
-# Get domain details (a deleted domain is 404 without --include-deleted; owner only)
+# Get domain details (a deleted domain is not found without --include-deleted; owner only)
 fsmtp domain get <domain-id>
 fsmtp domain get <domain-id> --include-deleted
 
@@ -966,7 +970,7 @@ fsmtp recipient list <domain-id>
 # Include deleted recipients (admin)
 fsmtp recipient list <domain-id> --include-deleted
 
-# Get recipient details (a deleted recipient is 404 without --include-deleted)
+# Get recipient details (a deleted recipient is not found without --include-deleted)
 fsmtp recipient get <domain-id> <recipient-id>
 fsmtp recipient get <domain-id> <recipient-id> --include-deleted
 
@@ -985,7 +989,7 @@ fsmtp recipient update <domain-id> <recipient-id> \
 # Delete recipient (soft; its pending and failed deliveries are cancelled)
 fsmtp recipient delete <domain-id> <recipient-id>
 
-# Restore a deleted recipient (its domain must be live)
+# Restore a deleted recipient (the domain itself must not be deleted)
 fsmtp recipient restore <domain-id> <recipient-id>
 
 # Permanently remove an already-deleted recipient (superuser)
@@ -1065,7 +1069,8 @@ fsmtp ops log list <domain-id> --status failed --limit 50
 # Deliveries cancelled because their recipient or domain was deleted
 fsmtp ops log list <domain-id> --status cancelled
 
-# Read the history of a deleted domain (owner or superuser)
+# Read the history of a deleted domain (owner or superuser); this does not list
+# deleted log rows
 fsmtp ops log list <domain-id> --include-deleted
 
 # Get delivery log details
