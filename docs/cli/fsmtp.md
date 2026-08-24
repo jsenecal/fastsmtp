@@ -322,7 +322,10 @@ fsmtp ops log list <domain-id> --include-deleted
 fsmtp ops log get <log-id>
 
 # Retry a failed, exhausted or cancelled delivery. A cancelled one is accepted
-# only once its recipient and domain are live again (409 otherwise)
+# only once its recipient and domain are live again. 409 details: "Domain is
+# deleted; restore it before retrying", "Recipient is deleted; restore it
+# before retrying", or "Delivery is no longer retryable" (the status changed
+# under the request, or the recipient was purged - nothing left to send as)
 fsmtp ops log retry <log-id>
 ```
 

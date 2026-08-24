@@ -6,16 +6,15 @@ import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select, text
+from sqlalchemy import ColumnElement, exists, func, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from fastsmtp import __version__
 from fastsmtp.api.validation import IncludeDeleted
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.enums import DeliveryStatus
-from fastsmtp.db.models import DeliveryLog, Domain
+from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.db.session import get_session
 from fastsmtp.schemas import (
     DeliveryLogDetailResponse,
@@ -27,9 +26,16 @@ from fastsmtp.schemas import (
     TestWebhookRequest,
     TestWebhookResponse,
 )
-from fastsmtp.webhook import retry_delivery, send_webhook
+from fastsmtp.webhook import RetryOutcome, retry_delivery, send_webhook
+from fastsmtp.webhook.queue import RETRYABLE_STATUSES
 
 router = APIRouter(tags=["operations"])
+
+# The three 409 details of POST /delivery-log/{id}/retry (documented in
+# docs/api.md, docs/webhooks.md and docs/cli/fsmtp.md).
+RETRY_DOMAIN_DELETED = "Domain is deleted; restore it before retrying"
+RETRY_RECIPIENT_DELETED = "Recipient is deleted; restore it before retrying"
+RETRY_NO_LONGER_RETRYABLE = "Delivery is no longer retryable"
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -124,15 +130,6 @@ async def ready_check(
 
 # Delivery Log endpoints
 
-# Statuses the retry endpoint re-arms. ``cancelled`` (recipient or domain was
-# soft-deleted with the delivery queued) is retryable only once both are live
-# again; the endpoint checks that after the status.
-_RETRYABLE_STATUSES = (
-    DeliveryStatus.FAILED,
-    DeliveryStatus.EXHAUSTED,
-    DeliveryStatus.CANCELLED,
-)
-
 
 async def _get_delivery_log_with_access(
     session: AsyncSession,
@@ -140,7 +137,6 @@ async def _get_delivery_log_with_access(
     auth: Auth,
     *,
     required_role: str,
-    with_recipient: bool = False,
 ) -> tuple[DeliveryLog, Domain | None]:
     """Load a delivery log and check the caller's access to its domain.
 
@@ -149,12 +145,9 @@ async def _get_delivery_log_with_access(
     member gets the helper's 404, the same as for a domain that never existed.
     Rows orphaned by a purge (``domain_id`` NULL) are superuser-only, as they
     were for a hard delete. Returns the domain (possibly tombstoned) so
-    callers can refuse mutations on it; ``with_recipient`` eager-loads the
-    recipient (``lazy="raise"``) for callers that check its tombstone too.
+    callers can refuse mutations on it.
     """
     stmt = select(DeliveryLog).where(DeliveryLog.id == log_id)
-    if with_recipient:
-        stmt = stmt.options(selectinload(DeliveryLog.recipient))
     result = await session.execute(stmt)
     log = result.scalar_one_or_none()
 
@@ -181,6 +174,47 @@ async def _get_delivery_log_with_access(
 
     auth.require_scope("logs:read")
     return log, domain
+
+
+def _live_now(
+    model: type[Domain] | type[Recipient], row_id: uuid.UUID | None
+) -> ColumnElement[bool]:
+    """Whether the row is live, read fresh (bypassing the identity map).
+
+    A row that is gone is not live: it was purged since this request loaded
+    it, which is the one thing ``session.refresh`` cannot survive. No row to
+    check (an orphaned delivery) counts as live - nothing there blocks a
+    retry.
+    """
+    if row_id is None:
+        return true()
+    return exists().where(model.id == row_id, model.live())
+
+
+async def _retry_refused_detail(
+    session: AsyncSession, domain: Domain | None, recipient_id: uuid.UUID | None
+) -> str:
+    """Why the guarded retry UPDATE matched nothing.
+
+    The documented case - the domain the request loaded is still tombstoned -
+    is answered from that object without a read. Otherwise the rows this
+    request loaded may predate the tombstone that blocked the statement, so
+    both are read fresh in one statement. When neither is tombstoned the
+    delivery left the retryable statuses under us (a concurrent retry, the
+    worker delivering it) or is cancelled with its recipient purged.
+    """
+    if domain is not None and domain.is_deleted:
+        return RETRY_DOMAIN_DELETED
+    domain_id = domain.id if domain is not None else None
+    live = await session.execute(
+        select(_live_now(Domain, domain_id), _live_now(Recipient, recipient_id))
+    )
+    domain_live, recipient_live = live.one()
+    if not domain_live:
+        return RETRY_DOMAIN_DELETED
+    if not recipient_live:
+        return RETRY_RECIPIENT_DELETED
+    return RETRY_NO_LONGER_RETRYABLE
 
 
 @router.get("/domains/{domain_id}/delivery-log", response_model=list[DeliveryLogResponse])
@@ -248,35 +282,30 @@ async def retry_delivery_endpoint(
     """Retry a failed, exhausted or cancelled delivery.
 
     A cancelled delivery is re-armed only once the recipient and domain it
-    was cancelled for are live again; until then the answer is 409 and the
-    operator restores them first.
+    was cancelled for are live again, and only while its recipient row still
+    exists; until then the answer is 409 and the operator restores them
+    first. That decision is the queue's guarded UPDATE, not a check made
+    earlier in the request, so a delete that lands mid-request still blocks
+    the retry. A row removed mid-request answers 404 as it would have before.
     """
-    log, domain = await _get_delivery_log_with_access(
-        session, log_id, auth, required_role="admin", with_recipient=True
-    )
+    log, domain = await _get_delivery_log_with_access(session, log_id, auth, required_role="admin")
 
-    if log.status not in _RETRYABLE_STATUSES:
+    if log.status not in RETRYABLE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot retry delivery with status '{log.status}'",
         )
 
-    if domain is not None and domain.is_deleted:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Domain is deleted; restore it before retrying",
-        )
-    if log.recipient is not None and log.recipient.is_deleted:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Recipient is deleted; restore it before retrying",
-        )
-
-    updated = await retry_delivery(session, log_id)
-    if not updated:
+    outcome = await retry_delivery(session, log_id)
+    if outcome is RetryOutcome.NOT_FOUND:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Delivery log not found",
+        )
+    if outcome is RetryOutcome.REFUSED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=await _retry_refused_detail(session, domain, log.recipient_id),
         )
 
     return MessageResponse(message=f"Delivery {log_id} queued for retry")

@@ -35,6 +35,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp import __version__
 from fastsmtp.config import Settings, get_settings
+from fastsmtp.db.integrity import is_unique_violation, live_value_taken
 from fastsmtp.db.models import Domain, SoftDeleteMixin, User
 
 app = typer.Typer(
@@ -448,9 +449,6 @@ async def _commit_or_conflict(session: AsyncSession, message: str) -> None:
     concurrent create, or a restore of the tombstoned namesake) hits the
     partial unique index (migration 008) here instead.
     """
-    # Imported here: fastsmtp.api loads every router and FastAPI (see module docstring).
-    from fastsmtp.api.validation import is_unique_violation
-
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -502,7 +500,7 @@ def user_create(
     async def create():
         async with async_session() as session:
             conflict = f"User '{username}' already exists"
-            if await _live_user(session, username):
+            if await live_value_taken(session, User, User.username, username):
                 raise _fail(conflict)
 
             user = User(username=username, email=email, is_superuser=superuser)
@@ -624,7 +622,7 @@ def user_restore(
     async def restore():
         async with async_session() as session:
             user = await _tombstone(session, User, User.username, username, id_option, "user")
-            if await _live_user(session, username):
+            if await live_value_taken(session, User, User.username, username):
                 raise _fail(conflict)
 
             await soft_delete.restore_user(session, user)
@@ -715,7 +713,7 @@ def domain_create(
     async def create():
         async with async_session() as session:
             conflict = f"Domain '{domain_name}' already exists"
-            if await _live_domain(session, domain_name):
+            if await live_value_taken(session, Domain, Domain.domain_name, domain_name):
                 raise _fail(conflict)
 
             domain = Domain(domain_name=domain_name)
@@ -842,7 +840,7 @@ def domain_restore(
             domain = await _tombstone(
                 session, Domain, Domain.domain_name, domain_name, id_option, "domain"
             )
-            if await _live_domain(session, domain_name):
+            if await live_value_taken(session, Domain, Domain.domain_name, domain_name):
                 raise _fail(conflict)
 
             recipients = await soft_delete.restore_domain(session, domain)

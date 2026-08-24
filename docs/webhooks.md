@@ -258,6 +258,10 @@ retried.
 Restoring the recipient or domain does **not** re-queue anything. Each cancelled
 delivery is re-armed explicitly with `POST /delivery-log/{id}/retry`
 (`fsmtp ops log retry <log-id>`), which answers `409` while the recipient or domain is
-still deleted. `cancelled` is counted in
+still deleted (`Domain is deleted; restore it before retrying` / `Recipient is deleted;
+restore it before retrying`), and `409` `Delivery is no longer retryable` when the
+delivery left the retryable statuses under the request or its recipient was purged: a
+cancelled delivery with no recipient row has no authentication headers to send with, so
+it stays cancelled. `cancelled` is counted in
 [`fastsmtp_webhook_deliveries_total`](monitoring.md#webhook-delivery) but not in
 `fastsmtp_queue_depth`, so cancelling drops the backlog at once.

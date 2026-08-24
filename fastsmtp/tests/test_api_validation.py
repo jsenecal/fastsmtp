@@ -6,10 +6,13 @@ from typing import get_args
 import pytest
 from fastapi import HTTPException
 from fastapi.params import Query
-from fastsmtp.api.validation import IncludeDeleted, Purge, is_unique_violation, require_tombstoned
-from fastsmtp.db.models import Domain
+from fastsmtp.api import validation
+from fastsmtp.api.validation import IncludeDeleted, Purge, require_tombstoned
+from fastsmtp.db.integrity import is_unique_violation, live_value_taken
+from fastsmtp.db.models import Domain, User
 from pydantic_core import PydanticUndefined
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _integrity_error(orig: BaseException) -> IntegrityError:
@@ -54,6 +57,68 @@ class TestIsUniqueViolation:
     def test_sqlite_foreign_key_violation(self):
         orig = Exception("FOREIGN KEY constraint failed")
         assert is_unique_violation(_integrity_error(orig)) is False
+
+    def test_api_validation_re_exports_the_db_predicate(self):
+        """The predicate is a DBAPI concern and lives with the database layer,
+        where the server CLI can import it without loading FastAPI; the API
+        module keeps the name for its existing importers."""
+        assert validation.is_unique_violation is is_unique_violation
+
+
+class TestLiveValueTaken:
+    """One duplicate pre-check for every partial unique index over live rows.
+
+    Mirrors what migration 008 enforces for ``users.username`` and
+    ``domains.domain_name``: a tombstone never blocks its name. The check is
+    check-then-flush; the index is the backstop, translated by
+    ``flush_or_http_conflict``.
+    """
+
+    def test_api_validation_re_exports_the_db_predicate(self):
+        """The routers and the server CLI must run the same query, so the
+        predicate lives in the database layer and the API module re-exports it."""
+        assert validation.live_value_taken is live_value_taken
+
+    @pytest.mark.asyncio
+    async def test_live_row_takes_the_name(self, test_session: AsyncSession):
+        test_session.add(User(username="taken", is_active=True))
+        await test_session.flush()
+
+        assert await live_value_taken(test_session, User, User.username, "taken") is True
+        assert await live_value_taken(test_session, User, User.username, "free") is False
+
+    @pytest.mark.asyncio
+    async def test_tombstone_does_not_take_the_name(self, test_session: AsyncSession):
+        test_session.add(User(username="gone", is_active=True, deleted_at=datetime.now(UTC)))
+        await test_session.flush()
+
+        assert await live_value_taken(test_session, User, User.username, "gone") is False
+
+    @pytest.mark.asyncio
+    async def test_exclude_id_ignores_the_row_being_updated(self, test_session: AsyncSession):
+        me = User(username="myself", is_active=True)
+        test_session.add(me)
+        await test_session.flush()
+
+        assert await live_value_taken(test_session, User, User.username, "myself") is True
+        assert (
+            await live_value_taken(test_session, User, User.username, "myself", exclude_id=me.id)
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_works_on_any_soft_deletable_name_column(self, test_session: AsyncSession):
+        test_session.add(Domain(domain_name="live.example"))
+        test_session.add(Domain(domain_name="dead.example", deleted_at=datetime.now(UTC)))
+        await test_session.flush()
+
+        assert (
+            await live_value_taken(test_session, Domain, Domain.domain_name, "live.example") is True
+        )
+        assert (
+            await live_value_taken(test_session, Domain, Domain.domain_name, "dead.example")
+            is False
+        )
 
 
 class TestRequireTombstoned:

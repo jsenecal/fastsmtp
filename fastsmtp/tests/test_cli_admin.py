@@ -63,6 +63,24 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub("", text)
 
 
+async def name_is_free(
+    session: AsyncSession,
+    model: type[User] | type[Domain],
+    column: object,
+    value: str,
+    *,
+    exclude_id: uuid.UUID | None = None,
+) -> bool:
+    """Stand-in for ``live_value_taken`` that sees no conflict: the race's loser.
+
+    The lost-race tests patch this over ``cli.live_value_taken`` so the
+    pre-check misses and the partial unique index has to be the backstop.
+    Patching anything else leaves the real pre-check in place and the test
+    passes without exercising ``_commit_or_conflict`` at all.
+    """
+    return False
+
+
 class Db:
     """Run a coroutine against a fresh session in its own loop and commit."""
 
@@ -247,10 +265,7 @@ class TestUserLookupsResolveTheLiveRow:
         """The pre-check misses (patched: the loser's stale read); the index must not leak."""
         seed_user(db, "alice")
 
-        async def miss(session: AsyncSession, username: str) -> None:
-            return None
-
-        monkeypatch.setattr(cli, "_live_user", miss)
+        monkeypatch.setattr(cli, "live_value_taken", name_is_free)
         code, out = run("user", "create", "alice")
         assert code == 1
         assert "User 'alice' already exists" in out
@@ -509,10 +524,7 @@ class TestUserRestore:
         seed_user(db, "alice", deleted_at=OLDER)
         seed_user(db, "alice")
 
-        async def miss(session: AsyncSession, username: str) -> None:
-            return None
-
-        monkeypatch.setattr(cli, "_live_user", miss)
+        monkeypatch.setattr(cli, "live_value_taken", name_is_free)
         code, out = run("user", "restore", "alice")
         assert code == 1
         assert "User 'alice' already exists; rename or purge it first" in out
@@ -595,10 +607,7 @@ class TestDomainLookupsResolveTheLiveRow:
     def test_create_lost_race_reports_the_same_conflict(self, run, db, monkeypatch):
         seed_domain(db, "example.com")
 
-        async def miss(session: AsyncSession, domain_name: str) -> None:
-            return None
-
-        monkeypatch.setattr(cli, "_live_domain", miss)
+        monkeypatch.setattr(cli, "live_value_taken", name_is_free)
         code, out = run("domain", "create", "example.com")
         assert code == 1
         assert "Domain 'example.com' already exists" in out
@@ -801,10 +810,7 @@ class TestDomainRestore:
         seed_domain(db, "example.com", deleted_at=OLDER)
         seed_domain(db, "example.com")
 
-        async def miss(session: AsyncSession, domain_name: str) -> None:
-            return None
-
-        monkeypatch.setattr(cli, "_live_domain", miss)
+        monkeypatch.setattr(cli, "live_value_taken", name_is_free)
         code, out = run("domain", "restore", "example.com")
         assert code == 1
         assert "Domain 'example.com' already exists; rename or purge it first" in out

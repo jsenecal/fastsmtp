@@ -12,13 +12,18 @@ from fastsmtp.auth import generate_api_key
 from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import APIKey, DeliveryLog, Domain, DomainMember, Recipient, User
 from fastsmtp.db.soft_delete import (
+    purge_recipient,
     restore_domain,
     restore_recipient,
     soft_delete_domain,
     soft_delete_recipient,
 )
+from fastsmtp.webhook.queue import RETRYABLE_STATUSES
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+NO_LONGER_RETRYABLE = "Delivery is no longer retryable"
 
 
 class TestDeliveryLogsExtended:
@@ -735,6 +740,25 @@ class TestRetryWithTombstones:
         assert log.status == DeliveryStatus.PENDING
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", RETRYABLE_STATUSES, ids=lambda s: s.value)
+    async def test_retry_accepts_every_retryable_status(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+        status: DeliveryStatus,
+    ):
+        """The endpoint's 400 and the queue's UPDATE filter on the same tuple."""
+        domain, recipient, _ = cancelled_delivery
+        log = await make_log(test_session, domain, status, recipient)
+        await test_session.commit()
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{log.id}/retry")
+        assert response.status_code == 200
+        await test_session.refresh(log)
+        assert log.status == DeliveryStatus.PENDING
+
+    @pytest.mark.asyncio
     async def test_wrong_status_is_still_400_under_a_tombstone(
         self,
         auth_client: AsyncClient,
@@ -749,6 +773,168 @@ class TestRetryWithTombstones:
 
         response = await auth_client.post(f"/api/v1/delivery-log/{delivered.id}/retry")
         assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_retry_refused_when_the_recipient_is_tombstoned_under_the_request(
+        self,
+        auth_client: AsyncClient,
+        session_factory: async_sessionmaker[AsyncSession],
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The 409 comes from the guarded UPDATE, not from a check that ran
+        earlier in the request: the recipient is live when the endpoint loads
+        it and tombstoned by another transaction before the retry statement.
+        The wrapper stands in for that other transaction's timing."""
+        import fastsmtp.api.operations as operations_api
+
+        domain, recipient, _ = cancelled_delivery
+        failed = await make_log(test_session, domain, DeliveryStatus.FAILED, recipient)
+        await test_session.commit()
+        real_retry = operations_api.retry_delivery
+
+        async def tombstone_then_retry(session: AsyncSession, delivery_id: uuid.UUID):
+            async with session_factory() as other:
+                await soft_delete_recipient(other, await other.get_one(Recipient, recipient.id))
+                await other.commit()
+            return await real_retry(session, delivery_id)
+
+        monkeypatch.setattr(operations_api, "retry_delivery", tombstone_then_retry)
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{failed.id}/retry")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Recipient is deleted; restore it before retrying"
+        await test_session.refresh(failed)
+        assert (
+            failed.status == DeliveryStatus.CANCELLED
+        )  # the delete cancelled it; retry did not re-arm
+
+    @pytest.mark.asyncio
+    async def test_retry_refused_when_the_recipient_is_purged_under_the_request(
+        self,
+        auth_client: AsyncClient,
+        session_factory: async_sessionmaker[AsyncSession],
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The 409's reason is read fresh, and a row that is gone counts as
+        deleted. Another transaction tombstones the recipient before the
+        guarded UPDATE (so it matches nothing) and purges it before the
+        endpoint asks why. A ``session.refresh`` of the recipient this request
+        loaded would raise on the missing row and turn the 409 into a 500.
+
+        Afterwards the delivery is ``cancelled`` with ``recipient_id`` NULL,
+        and a second retry must be refused too: re-arming it would post the
+        snapshot URL without the purged recipient's authentication headers."""
+        import fastsmtp.api.operations as operations_api
+
+        domain, recipient, _ = cancelled_delivery
+        failed = await make_log(test_session, domain, DeliveryStatus.FAILED, recipient)
+        await test_session.commit()
+        real_retry = operations_api.retry_delivery
+
+        async def tombstone_retry_then_purge(session: AsyncSession, delivery_id: uuid.UUID):
+            async with session_factory() as other:
+                victim = await other.get_one(Recipient, recipient.id)
+                await soft_delete_recipient(other, victim)
+                await other.commit()
+                result = await real_retry(session, delivery_id)
+                # The purge must follow the UPDATE: its ON DELETE SET NULL
+                # touches the delivery row, so had the guarded UPDATE wrongly
+                # matched (and locked) that row, the purge would wait on the
+                # request's open transaction, which is itself waiting here.
+                # A bounded lock wait turns that regression into a failure
+                # instead of a hang that only pytest-timeout ends.
+                await other.execute(text("SET lock_timeout = '5s'"))
+                await purge_recipient(other, victim)
+                await other.commit()
+            return result
+
+        monkeypatch.setattr(operations_api, "retry_delivery", tombstone_retry_then_purge)
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{failed.id}/retry")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Recipient is deleted; restore it before retrying"
+        await test_session.refresh(failed)
+        assert failed.status == DeliveryStatus.CANCELLED
+        assert failed.recipient_id is None  # the purge nulled the FK; history kept
+
+        monkeypatch.setattr(operations_api, "retry_delivery", real_retry)
+        again = await auth_client.post(f"/api/v1/delivery-log/{failed.id}/retry")
+        assert again.status_code == 409
+        assert again.json()["detail"] == NO_LONGER_RETRYABLE
+        await test_session.refresh(failed)
+        assert failed.status == DeliveryStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_retry_refused_when_the_status_changed_under_the_request(
+        self,
+        auth_client: AsyncClient,
+        session_factory: async_sessionmaker[AsyncSession],
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The third 409: neither row is tombstoned, the delivery simply left
+        the retryable statuses between the load and the UPDATE (a concurrent
+        retry, or the worker delivering it)."""
+        import fastsmtp.api.operations as operations_api
+
+        domain, recipient, _ = cancelled_delivery
+        failed = await make_log(test_session, domain, DeliveryStatus.FAILED, recipient)
+        await test_session.commit()
+        real_retry = operations_api.retry_delivery
+
+        async def deliver_then_retry(session: AsyncSession, delivery_id: uuid.UUID):
+            async with session_factory() as other:
+                await other.execute(
+                    update(DeliveryLog)
+                    .where(DeliveryLog.id == delivery_id)
+                    .values(status=DeliveryStatus.DELIVERED)
+                )
+                await other.commit()
+            return await real_retry(session, delivery_id)
+
+        monkeypatch.setattr(operations_api, "retry_delivery", deliver_then_retry)
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{failed.id}/retry")
+        assert response.status_code == 409
+        assert response.json()["detail"] == NO_LONGER_RETRYABLE
+        await test_session.refresh(failed)
+        assert failed.status == DeliveryStatus.DELIVERED
+
+    @pytest.mark.asyncio
+    async def test_retry_of_a_log_hard_deleted_under_the_request_is_404(
+        self,
+        auth_client: AsyncClient,
+        session_factory: async_sessionmaker[AsyncSession],
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A row that vanished (the delivery-log cleanup job) is not a
+        conflict: the answer stays the 404 the endpoint gave before the
+        guarded UPDATE took over the decision."""
+        import fastsmtp.api.operations as operations_api
+
+        domain, recipient, _ = cancelled_delivery
+        failed = await make_log(test_session, domain, DeliveryStatus.FAILED, recipient)
+        await test_session.commit()
+        real_retry = operations_api.retry_delivery
+
+        async def delete_then_retry(session: AsyncSession, delivery_id: uuid.UUID):
+            async with session_factory() as other:
+                await other.execute(delete(DeliveryLog).where(DeliveryLog.id == delivery_id))
+                await other.commit()
+            return await real_retry(session, delivery_id)
+
+        monkeypatch.setattr(operations_api, "retry_delivery", delete_then_retry)
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{failed.id}/retry")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Delivery log not found"
 
     @pytest.mark.asyncio
     async def test_retry_on_tombstoned_domain_is_invisible_below_owner(

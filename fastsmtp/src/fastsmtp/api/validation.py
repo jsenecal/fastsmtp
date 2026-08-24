@@ -7,6 +7,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp.config import Settings
+
+# Re-exported (the redundant alias is the explicit re-export form): the
+# uniqueness pre-check and the violation predicate live with the database
+# layer so the server CLI shares them without loading FastAPI; importers of
+# this module keep the names.
+from fastsmtp.db.integrity import is_unique_violation as is_unique_violation
+from fastsmtp.db.integrity import live_value_taken as live_value_taken
 from fastsmtp.db.models import SoftDeleteMixin
 from fastsmtp.rules.conditions import validate_regex_pattern
 
@@ -41,22 +48,6 @@ def require_tombstoned(obj: SoftDeleteMixin, detail: str) -> None:
     """
     if obj.deleted_at is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
-
-
-def is_unique_violation(exc: IntegrityError) -> bool:
-    """True when an IntegrityError is a unique-constraint violation.
-
-    Checked structurally, not by matching driver prose: PostgreSQL reports
-    SQLSTATE 23505 (asyncpg puts it on the wrapped exception's cause), and
-    SQLite has no SQLSTATE but a stable message prefix. Foreign-key failures
-    (23503 / "FOREIGN KEY constraint failed") return False.
-    """
-    orig = exc.orig
-    for candidate in (orig, getattr(orig, "__cause__", None)):
-        code = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
-        if code:
-            return code == "23505"
-    return "UNIQUE constraint failed" in str(orig)
 
 
 async def flush_or_http_conflict(session: AsyncSession, conflict: HTTPException) -> None:

@@ -528,6 +528,56 @@ class TestPurge:
         assert await test_session.get(Domain, domain.id) is not None
 
 
+class TestBulkUpdatesKeepChildrenReadable:
+    """The cascades' bulk UPDATEs must assign ``updated_at`` themselves.
+
+    They synchronize by "fetch", which applies the SET's literal values to the
+    matched objects already in the session and *expires* every column the
+    database computed instead - ``updated_at`` through its ``onupdate`` unless
+    the SET names it. An expired attribute read from async code raises
+    ``MissingGreenlet``, so a child the caller still holds would blow up on
+    its next read.
+    """
+
+    @pytest.mark.asyncio
+    async def test_soft_delete_domain_leaves_recipient_updated_at_loaded(
+        self, test_session: AsyncSession
+    ):
+        domain = await make_domain(test_session, "readable.com")
+        recipient = await make_recipient(test_session, domain, "sales")
+        await test_session.refresh(recipient)
+
+        await soft_delete_domain(test_session, domain)
+
+        assert recipient.updated_at == domain.deleted_at
+
+    @pytest.mark.asyncio
+    async def test_soft_delete_user_leaves_key_updated_at_loaded(self, test_session: AsyncSession):
+        user = await make_user(test_session, "readable")
+        key = await make_api_key(test_session, user, "k")
+        await test_session.refresh(key)
+
+        await soft_delete_user(test_session, user)
+
+        assert key.updated_at == user.deleted_at
+
+    @pytest.mark.asyncio
+    async def test_restore_domain_leaves_recipient_updated_at_loaded(
+        self, test_session: AsyncSession
+    ):
+        domain = await make_domain(test_session, "readable-restore.com")
+        recipient = await make_recipient(test_session, domain, "sales")
+        await soft_delete_domain(test_session, domain)
+        await reload(test_session, recipient)
+        stamp = domain.deleted_at
+        assert stamp is not None
+
+        await restore_domain(test_session, domain)
+
+        assert recipient.deleted_at is None
+        assert recipient.updated_at >= stamp  # readable, and not the value from before
+
+
 class TestTimestampContract:
     """A tombstone written now is strictly newer than one written earlier."""
 
