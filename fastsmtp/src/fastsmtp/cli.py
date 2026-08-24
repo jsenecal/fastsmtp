@@ -35,6 +35,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp import __version__
 from fastsmtp.config import Settings, get_settings
+from fastsmtp.db.integrity import is_unique_violation
 from fastsmtp.db.models import Domain, SoftDeleteMixin, User
 
 app = typer.Typer(
@@ -448,9 +449,6 @@ async def _commit_or_conflict(session: AsyncSession, message: str) -> None:
     concurrent create, or a restore of the tombstoned namesake) hits the
     partial unique index (migration 008) here instead.
     """
-    # Imported here: fastsmtp.api loads every router and FastAPI (see module docstring).
-    from fastsmtp.api.validation import is_unique_violation
-
     try:
         await session.commit()
     except IntegrityError as exc:

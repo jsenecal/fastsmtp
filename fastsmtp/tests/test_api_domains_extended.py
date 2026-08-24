@@ -277,10 +277,10 @@ class TestDomainConflictRace:
         """Make the duplicate pre-checks see no conflict, as the race's loser does."""
         import fastsmtp.api.domains as domains_api
 
-        async def name_is_free(session: AsyncSession, domain_name: str) -> bool:
+        async def name_is_free(session: AsyncSession, column, value, *, exclude_id=None) -> bool:
             return False
 
-        monkeypatch.setattr(domains_api, "_live_domain_name_taken", name_is_free)
+        monkeypatch.setattr(domains_api, "live_value_taken", name_is_free)
         monkeypatch.setattr(domains_api, "_membership", lambda domain_id, user_id: false())
 
     @pytest.mark.asyncio

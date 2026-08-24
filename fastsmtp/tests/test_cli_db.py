@@ -86,6 +86,18 @@ def test_importing_the_cli_does_not_load_the_api(scrubbed_environ: dict[str, str
     _assert_succeeded(result)
 
 
+def test_cli_binds_the_unique_violation_predicate_at_module_level() -> None:
+    """``_commit_or_conflict`` used to import the predicate from ``fastsmtp.api``
+    inside its body to stay clear of FastAPI. Now that the predicate lives in
+    the database layer the CLI imports it like any other module-level name,
+    and the guard above proves that costs no API import.
+    """
+    import fastsmtp.cli
+    from fastsmtp.db.integrity import is_unique_violation
+
+    assert fastsmtp.cli.is_unique_violation is is_unique_violation
+
+
 def test_db_current_needs_only_the_database_url(
     scrubbed_environ: dict[str, str], database_url: str
 ) -> None:

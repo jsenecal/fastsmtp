@@ -23,8 +23,10 @@ import pytest_asyncio
 from fastsmtp.config import Settings
 from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
+from fastsmtp.db.soft_delete import soft_delete_recipient
 from fastsmtp.webhook import queue
 from fastsmtp.webhook.queue import (
+    RETRYABLE_STATUSES,
     cancel_pending_deliveries,
     get_pending_count,
     get_pending_deliveries,
@@ -346,18 +348,75 @@ class TestCancelledIsSticky:
 
 class TestRetryAndCounts:
     @pytest.mark.asyncio
-    async def test_retry_delivery_accepts_cancelled(self, test_session: AsyncSession):
-        domain = await make_domain(test_session, "retry-cancelled.com")
-        delivery = await make_delivery(test_session, domain, None, DeliveryStatus.CANCELLED)
+    @pytest.mark.parametrize("status", RETRYABLE_STATUSES, ids=lambda s: s.value)
+    async def test_retry_delivery_re_arms_every_retryable_status(
+        self, test_session: AsyncSession, status: DeliveryStatus
+    ):
+        """The UPDATE filters on the exported tuple; the returned object already
+        carries the new state (synchronize_session="fetch"), no refresh needed."""
+        domain = await make_domain(test_session, f"retry-{status.value}.com")
+        delivery = await make_delivery(test_session, domain, None, status)
         delivery.next_retry_at = None
         await test_session.flush()
 
         result = await retry_delivery(test_session, delivery.id)
 
-        assert result is not None
+        assert result is delivery
+        assert result.status == DeliveryStatus.PENDING
+        assert result.next_retry_at is not None
         await test_session.refresh(delivery)
         assert delivery.status == DeliveryStatus.PENDING
-        assert delivery.next_retry_at is not None
+
+    @pytest.mark.asyncio
+    async def test_retry_delivery_refuses_a_tombstoned_recipient(self, test_session: AsyncSession):
+        """S14 at the queue: the retry UPDATE carries the claim query's tombstone
+        predicates, so nothing is re-armed for a deleted recipient."""
+        domain = await make_domain(test_session, "retry-dead-recipient.com")
+        dead = await make_recipient(test_session, domain, "dead", deleted_at=NOW)
+        delivery = await make_delivery(test_session, domain, dead, DeliveryStatus.CANCELLED)
+
+        assert await retry_delivery(test_session, delivery.id) is None
+
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_retry_delivery_refuses_a_tombstoned_domain(self, test_session: AsyncSession):
+        domain = await make_domain(test_session, "retry-dead-domain.com", deleted_at=NOW)
+        delivery = await make_delivery(test_session, domain, None, DeliveryStatus.CANCELLED)
+
+        assert await retry_delivery(test_session, delivery.id) is None
+
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_retry_delivery_refuses_a_recipient_tombstoned_under_it(
+        self, test_engine: AsyncEngine, test_session: AsyncSession
+    ):
+        """The check-then-act race: this session loaded the recipient live, and
+        the tombstone lands in another transaction before the retry. A select()
+        does not refresh the identity map, so only the guarded UPDATE can tell;
+        it must match nothing. The delete also cancelled the delivery, and
+        cancelled is retryable, so the recipient predicate is what blocks."""
+        domain = await make_domain(test_session, "retry-race.com")
+        recipient = await make_recipient(test_session, domain, "racing")
+        delivery = await make_delivery(test_session, domain, recipient, DeliveryStatus.FAILED)
+        await test_session.commit()
+
+        other = async_sessionmaker(test_engine, class_=AsyncSession)()
+        try:
+            await soft_delete_recipient(other, await other.get_one(Recipient, recipient.id))
+            await other.commit()
+        finally:
+            await other.close()
+        assert recipient.deleted_at is None  # stale in this session, on purpose
+
+        assert await retry_delivery(test_session, delivery.id) is None
+        await test_session.commit()
+
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.CANCELLED
 
     @pytest.mark.asyncio
     async def test_pending_count_ignores_cancelled(self, test_session: AsyncSession):

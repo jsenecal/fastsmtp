@@ -1,12 +1,19 @@
 """Shared request validation helpers for the API."""
 
+import uuid
 from typing import Annotated
 
 from fastapi import HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp.config import Settings
+
+# Re-exported: the predicate lives with the database layer so the server CLI
+# can use it without loading FastAPI; importers of this module keep the name.
+from fastsmtp.db.integrity import is_unique_violation
 from fastsmtp.db.models import SoftDeleteMixin
 from fastsmtp.rules.conditions import validate_regex_pattern
 
@@ -43,20 +50,29 @@ def require_tombstoned(obj: SoftDeleteMixin, detail: str) -> None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-def is_unique_violation(exc: IntegrityError) -> bool:
-    """True when an IntegrityError is a unique-constraint violation.
+async def live_value_taken(
+    session: AsyncSession,
+    column: InstrumentedAttribute[str],
+    value: str,
+    *,
+    exclude_id: uuid.UUID | None = None,
+) -> bool:
+    """Duplicate pre-check for a name column that is unique over live rows.
 
-    Checked structurally, not by matching driver prose: PostgreSQL reports
-    SQLSTATE 23505 (asyncpg puts it on the wrapped exception's cause), and
-    SQLite has no SQLSTATE but a stable message prefix. Foreign-key failures
-    (23503 / "FOREIGN KEY constraint failed") return False.
+    ``column`` belongs to a ``SoftDeleteMixin`` model (``User.username``,
+    ``Domain.domain_name``). Mirrors what the database enforces: the name
+    indexes are partial over live rows (migration 008), so a tombstone never
+    blocks its name. ``exclude_id`` leaves out the row being updated, which
+    holds its own name legitimately. The check is check-then-flush; the index
+    is the backstop, translated by :func:`flush_or_http_conflict`, and the
+    create, update and restore routes all share this one predicate so it can
+    never drift from the index in only one of them.
     """
-    orig = exc.orig
-    for candidate in (orig, getattr(orig, "__cause__", None)):
-        code = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
-        if code:
-            return code == "23505"
-    return "UNIQUE constraint failed" in str(orig)
+    model = column.class_
+    stmt = select(model.id).where(column == value, model.live())
+    if exclude_id is not None:
+        stmt = stmt.where(model.id != exclude_id)
+    return (await session.execute(stmt)).first() is not None
 
 
 async def flush_or_http_conflict(session: AsyncSession, conflict: HTTPException) -> None:

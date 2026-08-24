@@ -17,8 +17,9 @@ from fastsmtp.db.soft_delete import (
     soft_delete_domain,
     soft_delete_recipient,
 )
+from fastsmtp.webhook.queue import RETRYABLE_STATUSES
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 class TestDeliveryLogsExtended:
@@ -735,6 +736,25 @@ class TestRetryWithTombstones:
         assert log.status == DeliveryStatus.PENDING
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", RETRYABLE_STATUSES, ids=lambda s: s.value)
+    async def test_retry_accepts_every_retryable_status(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+        status: DeliveryStatus,
+    ):
+        """The endpoint's 400 and the queue's UPDATE filter on the same tuple."""
+        domain, recipient, _ = cancelled_delivery
+        log = await make_log(test_session, domain, status, recipient)
+        await test_session.commit()
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{log.id}/retry")
+        assert response.status_code == 200
+        await test_session.refresh(log)
+        assert log.status == DeliveryStatus.PENDING
+
+    @pytest.mark.asyncio
     async def test_wrong_status_is_still_400_under_a_tombstone(
         self,
         auth_client: AsyncClient,
@@ -749,6 +769,45 @@ class TestRetryWithTombstones:
 
         response = await auth_client.post(f"/api/v1/delivery-log/{delivered.id}/retry")
         assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_retry_refused_when_the_recipient_is_tombstoned_under_the_request(
+        self,
+        auth_client: AsyncClient,
+        test_engine: AsyncEngine,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The 409 comes from the guarded UPDATE, not from a check that ran
+        earlier in the request: the recipient is live when the endpoint loads
+        it and tombstoned by another transaction before the retry statement.
+        The wrapper stands in for that other transaction's timing."""
+        import fastsmtp.api.operations as operations_api
+
+        domain, recipient, _ = cancelled_delivery
+        failed = await make_log(test_session, domain, DeliveryStatus.FAILED, recipient)
+        await test_session.commit()
+        real_retry = operations_api.retry_delivery
+
+        async def tombstone_then_retry(session: AsyncSession, delivery_id: uuid.UUID):
+            other = async_sessionmaker(test_engine, class_=AsyncSession)()
+            try:
+                await soft_delete_recipient(other, await other.get_one(Recipient, recipient.id))
+                await other.commit()
+            finally:
+                await other.close()
+            return await real_retry(session, delivery_id)
+
+        monkeypatch.setattr(operations_api, "retry_delivery", tombstone_then_retry)
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{failed.id}/retry")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Recipient is deleted; restore it before retrying"
+        await test_session.refresh(failed)
+        assert (
+            failed.status == DeliveryStatus.CANCELLED
+        )  # the delete cancelled it; retry did not re-arm
 
     @pytest.mark.asyncio
     async def test_retry_on_tombstoned_domain_is_invisible_below_owner(

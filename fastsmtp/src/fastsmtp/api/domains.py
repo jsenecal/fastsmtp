@@ -25,6 +25,7 @@ from fastsmtp.api.validation import (
     IncludeDeleted,
     Purge,
     flush_or_http_conflict,
+    live_value_taken,
     require_s3_for_preservation,
     require_tombstoned,
 )
@@ -44,18 +45,6 @@ from fastsmtp.schemas import (
 )
 
 router = APIRouter(prefix="/domains", tags=["domains"])
-
-
-async def _live_domain_name_taken(session: AsyncSession, domain_name: str) -> bool:
-    """Duplicate pre-check shared by create and restore.
-
-    Mirrors what the database enforces: ``ix_domains_domain_name`` is partial
-    over live rows (migration 008), so a tombstoned domain never blocks its
-    name. The check is check-then-flush; the index is the backstop, translated
-    by ``flush_or_http_conflict``.
-    """
-    stmt = select(Domain.id).where(Domain.domain_name == domain_name, Domain.live())
-    return (await session.execute(stmt)).first() is not None
 
 
 def _duplicate_domain_conflict() -> HTTPException:
@@ -157,7 +146,7 @@ async def create_domain(
     if data.preserve_raw_message:
         require_s3_for_preservation(settings)
 
-    if await _live_domain_name_taken(session, data.domain_name):
+    if await live_value_taken(session, Domain.domain_name, data.domain_name):
         raise _duplicate_domain_conflict()
 
     domain = Domain(
@@ -265,7 +254,7 @@ async def restore_domain(
     )
     require_tombstoned(domain, "Domain is not deleted")
 
-    if await _live_domain_name_taken(session, domain.domain_name):
+    if await live_value_taken(session, Domain.domain_name, domain.domain_name):
         raise _duplicate_domain_conflict()
 
     await soft_delete.restore_domain(session, domain)

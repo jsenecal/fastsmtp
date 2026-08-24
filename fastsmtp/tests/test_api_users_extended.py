@@ -212,10 +212,12 @@ class TestUserConflictRace:
         """Make the duplicate pre-check see no conflict, as the race's loser does."""
         import fastsmtp.api.users as users_api
 
-        async def username_is_free(session: AsyncSession, username: str) -> bool:
+        async def username_is_free(
+            session: AsyncSession, column, value, *, exclude_id=None
+        ) -> bool:
             return False
 
-        monkeypatch.setattr(users_api, "_live_username_taken", username_is_free)
+        monkeypatch.setattr(users_api, "live_value_taken", username_is_free)
 
     @pytest.mark.asyncio
     async def test_raced_duplicate_create_returns_409(

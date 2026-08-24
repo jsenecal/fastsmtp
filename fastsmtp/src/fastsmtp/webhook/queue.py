@@ -33,7 +33,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ColumnElement, CursorResult, exists, or_, select, update
+from sqlalchemy import ColumnElement, CursorResult, Update, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -51,10 +51,49 @@ logger = logging.getLogger(__name__)
 # terminal until an operator re-arms it through retry_delivery.
 QUEUED_STATUSES = (DeliveryStatus.PENDING, DeliveryStatus.FAILED)
 
+# The statuses the explicit retry endpoint re-arms. ``cancelled`` is here
+# because that endpoint is the one path that revives a cancelled delivery, and
+# only once its recipient and domain are live again (the UPDATE in
+# retry_delivery enforces that). The API answers its 400 from this tuple.
+RETRYABLE_STATUSES = (
+    DeliveryStatus.FAILED,
+    DeliveryStatus.EXHAUSTED,
+    DeliveryStatus.CANCELLED,
+)
+
 
 def _not_cancelled() -> ColumnElement[bool]:
     """Guard for UPDATEs that must not overwrite a sticky ``cancelled`` status."""
     return DeliveryLog.status != DeliveryStatus.CANCELLED
+
+
+def _recipient_and_domain_live() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+    """Predicates that exclude deliveries whose recipient or domain is tombstoned.
+
+    Shared by the claim query and the retry UPDATE, so a delivery the worker
+    would refuse to send can never be re-armed either. Written as NOT EXISTS
+    subqueries rather than outer joins: PostgreSQL rejects FOR UPDATE on the
+    nullable side of an outer join, and the claim query's row lock must keep
+    covering delivery_log only. Legacy rows with ``recipient_id`` NULL pass
+    the recipient predicate and are judged on their domain alone.
+    """
+    return (
+        ~exists().where(Recipient.id == DeliveryLog.recipient_id, ~Recipient.live()),
+        ~exists().where(Domain.id == DeliveryLog.domain_id, ~Domain.live()),
+    )
+
+
+async def _execute_counted(session: AsyncSession, stmt: Update) -> int:
+    """Run a guarded UPDATE and return how many rows it matched.
+
+    Every writer here decides something from that count (a cancel that
+    landed under us, a retry that was blocked), and ``AsyncSession.execute``
+    is typed as ``Result[Any]``, so the narrowing lives in one place.
+    """
+    result = await session.execute(stmt)
+    await session.flush()
+    assert isinstance(result, CursorResult)
+    return result.rowcount
 
 
 def _cancelled_values(reason: str, now: datetime) -> dict[str, Any]:
@@ -232,20 +271,17 @@ async def get_pending_deliveries(
     instance_id = instance_id or settings.instance_id
     now = datetime.now(UTC)
 
-    # Select pending deliveries that are due for retry.
-    # The recipient and its domain are eagerly loaded (no N+1, and the
-    # dispatcher guard reads both without a lazy load). Tombstoned recipients
-    # and domains are excluded with NOT EXISTS subqueries rather than outer
-    # joins: PostgreSQL rejects FOR UPDATE on the nullable side of an outer
-    # join, and the row lock below must keep covering delivery_log only.
+    # Select pending deliveries that are due for retry. The recipient and its
+    # domain are eagerly loaded (no N+1, and the dispatcher guard reads both
+    # without a lazy load); tombstoned recipients and domains are excluded by
+    # the shared predicates, shaped so the row lock below stays valid.
     stmt = (
         select(DeliveryLog)
         .options(selectinload(DeliveryLog.recipient).selectinload(Recipient.domain))
         .where(
             DeliveryLog.status.in_(QUEUED_STATUSES),
             DeliveryLog.next_retry_at <= now,
-            ~exists().where(Recipient.id == DeliveryLog.recipient_id, ~Recipient.live()),
-            ~exists().where(Domain.id == DeliveryLog.domain_id, ~Domain.live()),
+            *_recipient_and_domain_live(),
         )
         .order_by(DeliveryLog.next_retry_at)
         .limit(batch_size)
@@ -360,16 +396,12 @@ async def mark_failed(
             f"Delivery {delivery_id} failed (attempt {new_attempts}), next retry at {next_retry}"
         )
 
-    result = await session.execute(update_stmt)
-    await session.flush()
-
     # The loaded row can be stale: a select() does not refresh an object the
     # identity map already holds, so a cancellation committed by another
     # transaction after this delivery was claimed is only visible as the
     # guarded UPDATE matching nothing. That, not the early check above, is
     # what keeps the DLQ quiet for a cancelled delivery.
-    assert isinstance(result, CursorResult)  # AsyncSession.execute is typed as Result[Any]
-    if result.rowcount == 0:
+    if await _execute_counted(session, update_stmt) == 0:
         logger.info(f"Delivery {delivery_id} was cancelled under us; not recording the failure")
         return
 
@@ -423,11 +455,7 @@ async def cancel_pending_deliveries(
         .values(**_cancelled_values(reason, now))
         .execution_options(synchronize_session="fetch")
     )
-    result = await session.execute(stmt)
-    await session.flush()
-
-    assert isinstance(result, CursorResult)  # AsyncSession.execute is typed as Result[Any]
-    cancelled = result.rowcount
+    cancelled = await _execute_counted(session, stmt)
     if cancelled:
         logger.info(f"Cancelled {cancelled} queued deliveries: {reason}")
     return cancelled
@@ -455,12 +483,23 @@ async def retry_delivery(
 ) -> DeliveryLog | None:
     """Reset a delivery for immediate retry.
 
+    The UPDATE decides: it matches only a row in ``RETRYABLE_STATUSES`` whose
+    recipient and domain are live, by the claim query's own predicates. A
+    tombstone that lands between a caller's checks and this statement still
+    blocks the retry, so there is no check-then-act window to exploit, and the
+    worker can never be handed a delivery the retry endpoint re-armed for a
+    deleted endpoint.
+
     Args:
         session: Database session
         delivery_id: Delivery ID to retry
 
     Returns:
-        Updated DeliveryLog or None if not found
+        The re-armed delivery; the delivery unchanged when its status is not
+        retryable; ``None`` when nothing was re-armed because there is no such
+        delivery or the guarded UPDATE matched nothing (tombstoned recipient
+        or domain, or a status change under us). A caller that has already
+        loaded the row reads ``None`` as "blocked".
     """
     stmt = select(DeliveryLog).where(DeliveryLog.id == delivery_id)
     result = await session.execute(stmt)
@@ -469,28 +508,34 @@ async def retry_delivery(
     if not delivery:
         return None
 
-    # Only allow retrying failed/exhausted/cancelled deliveries
-    if delivery.status not in (
-        DeliveryStatus.FAILED,
-        DeliveryStatus.EXHAUSTED,
-        DeliveryStatus.CANCELLED,
-    ):
+    if delivery.status not in RETRYABLE_STATUSES:
         logger.warning(f"Cannot retry delivery {delivery_id} with status {delivery.status}")
         return delivery
 
     now = datetime.now(UTC)
     update_stmt = (
         update(DeliveryLog)
-        .where(DeliveryLog.id == delivery_id)
+        .where(
+            DeliveryLog.id == delivery_id,
+            DeliveryLog.status.in_(RETRYABLE_STATUSES),
+            *_recipient_and_domain_live(),
+        )
         .values(
             status=DeliveryStatus.PENDING,
             next_retry_at=now,
             updated_at=now,  # Explicit update since onupdate doesn't trigger
         )
+        # "fetch" applies the new values to the loaded object as well, so no
+        # refresh is needed; "auto" would silently pick it anyway because the
+        # EXISTS predicates cannot be evaluated in Python.
+        .execution_options(synchronize_session="fetch")
     )
-    await session.execute(update_stmt)
-    await session.flush()
-    await session.refresh(delivery)
+    if await _execute_counted(session, update_stmt) == 0:
+        logger.info(
+            f"Delivery {delivery_id} not re-armed: recipient or domain deleted, "
+            "or status changed under us"
+        )
+        return None
 
     logger.info(f"Delivery {delivery_id} queued for retry")
     return delivery
