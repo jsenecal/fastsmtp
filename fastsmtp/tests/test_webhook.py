@@ -9,7 +9,9 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastsmtp.config import Settings
+from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
+from fastsmtp.metrics.definitions import WEBHOOK_DELIVERIES_TOTAL
 from fastsmtp.webhook.dispatcher import (
     WebhookWorker,
     process_delivery,
@@ -655,14 +657,17 @@ class TestRetryDelivery:
 async def load_delivery_with_recipient(
     session: AsyncSession, delivery_id: uuid.UUID
 ) -> DeliveryLog:
-    """Fetch a delivery with its recipient eagerly loaded, as production does.
+    """Fetch a delivery with its recipient and the recipient's domain eagerly
+    loaded, as production does.
 
     DeliveryLog.recipient is lazy="raise", so process_delivery must be given
-    a delivery whose recipient relationship has been loaded.
+    a delivery whose recipient relationship has been loaded; the tombstone
+    guard then reads Recipient.domain, which must be loaded too (a lazy load
+    from an async session raises MissingGreenlet).
     """
     stmt = (
         select(DeliveryLog)
-        .options(selectinload(DeliveryLog.recipient))
+        .options(selectinload(DeliveryLog.recipient).selectinload(Recipient.domain))
         .where(DeliveryLog.id == delivery_id)
     )
     return (await session.execute(stmt)).scalar_one()
@@ -789,16 +794,7 @@ class TestProcessDelivery:
         )
         test_session.add(delivery)
         await test_session.flush()
-
-        # Re-fetch delivery with recipient relationship eagerly loaded
-        # (simulates how get_pending_deliveries loads deliveries in production)
-        stmt = (
-            select(DeliveryLog)
-            .options(selectinload(DeliveryLog.recipient))
-            .where(DeliveryLog.id == delivery.id)
-        )
-        result = await test_session.execute(stmt)
-        loaded_delivery = result.scalar_one()
+        loaded_delivery = await load_delivery_with_recipient(test_session, delivery.id)
 
         with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
             mock_send.return_value = (True, 200, None)
@@ -889,15 +885,7 @@ class TestProcessDelivery:
         )
         test_session.add(delivery)
         await test_session.flush()
-
-        # Re-fetch delivery with recipient relationship eagerly loaded
-        stmt = (
-            select(DeliveryLog)
-            .options(selectinload(DeliveryLog.recipient))
-            .where(DeliveryLog.id == delivery.id)
-        )
-        result = await test_session.execute(stmt)
-        loaded_delivery = result.scalar_one()
+        loaded_delivery = await load_delivery_with_recipient(test_session, delivery.id)
 
         with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
             mock_send.return_value = (True, 200, None)
@@ -1104,6 +1092,155 @@ class TestWorkerDeliversRecipientHeaders:
                 assert list(call_kwargs["headers"]) == ["X-Idempotency-Key"]
         finally:
             await worker._close_http_client()
+
+
+async def make_claimed_delivery(
+    session: AsyncSession,
+    *,
+    domain_deleted: bool = False,
+    with_recipient: bool = True,
+    recipient_deleted: bool = False,
+) -> DeliveryLog:
+    """Build a pending delivery whose recipient/domain may already be tombstoned.
+
+    The tombstones are written directly (not through ``soft_delete_*``) on
+    purpose: that path also cancels the delivery, and these tests need a row
+    that is still ``pending`` - the shape of a delivery claimed just before the
+    tombstone landed, which only the dispatcher guard can stop.
+    """
+    stamp = datetime.now(UTC)
+    domain = Domain(
+        domain_name=f"guard-{uuid.uuid4().hex[:8]}.com",
+        is_enabled=True,
+        deleted_at=stamp if domain_deleted else None,
+    )
+    session.add(domain)
+    await session.flush()
+
+    recipient_id = None
+    if with_recipient:
+        recipient = Recipient(
+            domain_id=domain.id,
+            local_part="guarded",
+            webhook_url="https://example.com/webhook",
+            webhook_headers={"Authorization": "Bearer secret"},
+            is_enabled=True,
+            deleted_at=stamp if recipient_deleted else None,
+        )
+        session.add(recipient)
+        await session.flush()
+        recipient_id = recipient.id
+
+    delivery = DeliveryLog(
+        domain_id=domain.id,
+        recipient_id=recipient_id,
+        message_id=f"<{uuid.uuid4()}@example.com>",
+        webhook_url="https://example.com/webhook",
+        payload_hash="abc123",
+        payload={"test": "data"},
+        status=DeliveryStatus.PENDING,
+        attempts=0,
+        next_retry_at=datetime.now(UTC),
+        instance_id="test-instance",
+    )
+    session.add(delivery)
+    await session.flush()
+    return delivery
+
+
+def cancelled_metric() -> float:
+    return WEBHOOK_DELIVERIES_TOTAL.labels(status="cancelled")._value.get()
+
+
+class TestDispatcherGuard:
+    """The dispatcher's own tombstone check (spec S11).
+
+    Third layer after delete-time cancellation and claim-time exclusion: a
+    delivery claimed just before its recipient or domain was tombstoned must
+    not go out. The guard marks it ``cancelled`` without an HTTP call, counts
+    it under the ``cancelled`` metric label, and never reaches the DLQ path.
+    Legacy rows whose ``recipient_id`` was nulled by a pre-0.5 hard delete
+    carry nothing to check and deliver as before.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tombstoned_recipient_is_cancelled_without_http_call(
+        self, test_session: AsyncSession, test_settings: Settings
+    ):
+        delivery = await make_claimed_delivery(test_session, recipient_deleted=True)
+        delivery = await load_delivery_with_recipient(test_session, delivery.id)
+        before = cancelled_metric()
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            await process_delivery(delivery, test_settings, test_session)
+
+        mock_send.assert_not_called()
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.CANCELLED
+        assert delivery.last_error == "Recipient deleted"
+        assert delivery.next_retry_at is None
+        assert cancelled_metric() == before + 1
+
+    @pytest.mark.asyncio
+    async def test_tombstoned_domain_with_live_recipient_is_cancelled(
+        self, test_session: AsyncSession, test_settings: Settings
+    ):
+        delivery = await make_claimed_delivery(test_session, domain_deleted=True)
+        delivery = await load_delivery_with_recipient(test_session, delivery.id)
+        before = cancelled_metric()
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            await process_delivery(delivery, test_settings, test_session)
+
+        mock_send.assert_not_called()
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.CANCELLED
+        assert delivery.last_error == "Domain deleted"
+        assert cancelled_metric() == before + 1
+
+    @pytest.mark.asyncio
+    async def test_legacy_delivery_without_recipient_still_delivers(
+        self, test_session: AsyncSession, test_settings: Settings
+    ):
+        delivery = await make_claimed_delivery(test_session, with_recipient=False)
+        delivery = await load_delivery_with_recipient(test_session, delivery.id)
+        before = cancelled_metric()
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            mock_send.return_value = (True, 200, None)
+            await process_delivery(delivery, test_settings, test_session)
+
+        mock_send.assert_called_once()
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.DELIVERED
+        assert cancelled_metric() == before
+
+    @pytest.mark.asyncio
+    async def test_worker_path_loads_the_recipient_domain_for_the_guard(
+        self, test_session: AsyncSession, test_engine, test_settings: Settings
+    ):
+        """_process_single_delivery re-fetches in its own session; the guard
+        reads Recipient.domain there, so it must be eagerly loaded too."""
+        delivery = await make_claimed_delivery(test_session, domain_deleted=True)
+        await test_session.commit()
+
+        worker = WebhookWorker(settings=test_settings)
+        session_factory = async_sessionmaker(
+            test_engine, class_=AsyncSession, expire_on_commit=False
+        )
+        try:
+            with (
+                patch("fastsmtp.webhook.dispatcher.async_session", session_factory),
+                patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send,
+            ):
+                await worker._process_single_delivery(delivery.id)
+        finally:
+            await worker._close_http_client()
+
+        mock_send.assert_not_called()
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.CANCELLED
+        assert delivery.last_error == "Domain deleted"
 
 
 class TestDeadLetterQueue:

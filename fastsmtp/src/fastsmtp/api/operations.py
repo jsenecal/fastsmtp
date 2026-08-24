@@ -8,12 +8,14 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from fastsmtp import __version__
+from fastsmtp.api.validation import IncludeDeleted
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.enums import DeliveryStatus
-from fastsmtp.db.models import DeliveryLog
+from fastsmtp.db.models import DeliveryLog, Domain
 from fastsmtp.db.session import get_session
 from fastsmtp.schemas import (
     DeliveryLogDetailResponse,
@@ -122,6 +124,64 @@ async def ready_check(
 
 # Delivery Log endpoints
 
+# Statuses the retry endpoint re-arms. ``cancelled`` (recipient or domain was
+# soft-deleted with the delivery queued) is retryable only once both are live
+# again; the endpoint checks that after the status.
+_RETRYABLE_STATUSES = (
+    DeliveryStatus.FAILED,
+    DeliveryStatus.EXHAUSTED,
+    DeliveryStatus.CANCELLED,
+)
+
+
+async def _get_delivery_log_with_access(
+    session: AsyncSession,
+    log_id: uuid.UUID,
+    auth: Auth,
+    *,
+    required_role: str,
+    with_recipient: bool = False,
+) -> tuple[DeliveryLog, Domain | None]:
+    """Load a delivery log and check the caller's access to its domain.
+
+    The domain is resolved with ``include_deleted=True`` so the history of a
+    soft-deleted domain stays readable to its owners and superusers - a plain
+    member gets the helper's 404, the same as for a domain that never existed.
+    Rows orphaned by a purge (``domain_id`` NULL) are superuser-only, as they
+    were for a hard delete. Returns the domain (possibly tombstoned) so
+    callers can refuse mutations on it; ``with_recipient`` eager-loads the
+    recipient (``lazy="raise"``) for callers that check its tombstone too.
+    """
+    stmt = select(DeliveryLog).where(DeliveryLog.id == log_id)
+    if with_recipient:
+        stmt = stmt.options(selectinload(DeliveryLog.recipient))
+    result = await session.execute(stmt)
+    log = result.scalar_one_or_none()
+
+    if not log:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Delivery log not found",
+        )
+
+    domain: Domain | None = None
+    if log.domain_id:
+        domain = await get_domain_with_access(
+            log.domain_id,
+            auth,
+            session,
+            required_role=required_role,
+            include_deleted=True,
+        )
+    elif not auth.is_superuser():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied",
+        )
+
+    auth.require_scope("logs:read")
+    return log, domain
+
 
 @router.get("/domains/{domain_id}/delivery-log", response_model=list[DeliveryLogResponse])
 async def list_delivery_logs(
@@ -132,9 +192,22 @@ async def list_delivery_logs(
     message_id: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    include_deleted: IncludeDeleted = False,
 ) -> list[DeliveryLogResponse]:
-    """List delivery logs for a domain."""
-    await get_domain_with_access(domain_id, auth, session, required_role="member")
+    """List delivery logs for a domain.
+
+    ``include_deleted`` also resolves a soft-deleted domain, so its history
+    stays readable after the delete; it is owner-only, elevated before the
+    lookup so a lesser role gets 403 whether or not a tombstone exists.
+    """
+    required_role = "owner" if include_deleted else "member"
+    await get_domain_with_access(
+        domain_id,
+        auth,
+        session,
+        required_role=required_role,
+        include_deleted=include_deleted,
+    )
     auth.require_scope("logs:read")
 
     stmt = (
@@ -162,26 +235,7 @@ async def get_delivery_log(
     session: AsyncSession = Depends(get_session),
 ) -> DeliveryLogDetailResponse:
     """Get a delivery log entry with full payload."""
-    stmt = select(DeliveryLog).where(DeliveryLog.id == log_id)
-    result = await session.execute(stmt)
-    log = result.scalar_one_or_none()
-
-    if not log:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Delivery log not found",
-        )
-
-    # Check access to the domain
-    if log.domain_id:
-        await get_domain_with_access(log.domain_id, auth, session, required_role="member")
-    elif not auth.is_superuser():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied",
-        )
-
-    auth.require_scope("logs:read")
+    log, _ = await _get_delivery_log_with_access(session, log_id, auth, required_role="member")
     return DeliveryLogDetailResponse.model_validate(log)
 
 
@@ -191,34 +245,31 @@ async def retry_delivery_endpoint(
     auth: Auth,
     session: AsyncSession = Depends(get_session),
 ) -> MessageResponse:
-    """Retry a failed delivery."""
-    # Get the log entry first
-    stmt = select(DeliveryLog).where(DeliveryLog.id == log_id)
-    result = await session.execute(stmt)
-    log = result.scalar_one_or_none()
+    """Retry a failed, exhausted or cancelled delivery.
 
-    if not log:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Delivery log not found",
-        )
+    A cancelled delivery is re-armed only once the recipient and domain it
+    was cancelled for are live again; until then the answer is 409 and the
+    operator restores them first.
+    """
+    log, domain = await _get_delivery_log_with_access(
+        session, log_id, auth, required_role="admin", with_recipient=True
+    )
 
-    # Check access to the domain
-    if log.domain_id:
-        await get_domain_with_access(log.domain_id, auth, session, required_role="admin")
-    elif not auth.is_superuser():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied",
-        )
-
-    auth.require_scope("logs:read")
-
-    # Can only retry failed or exhausted deliveries
-    if log.status not in ("failed", "exhausted"):
+    if log.status not in _RETRYABLE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot retry delivery with status '{log.status}'",
+        )
+
+    if domain is not None and domain.is_deleted:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Domain is deleted; restore it before retrying",
+        )
+    if log.recipient is not None and log.recipient.is_deleted:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Recipient is deleted; restore it before retrying",
         )
 
     updated = await retry_delivery(session, log_id)

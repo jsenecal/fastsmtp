@@ -6,9 +6,18 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from fastsmtp.auth import generate_api_key
 from fastsmtp.db.enums import DeliveryStatus
-from fastsmtp.db.models import DeliveryLog, Domain
-from httpx import AsyncClient
+from fastsmtp.db.models import APIKey, DeliveryLog, Domain, DomainMember, Recipient, User
+from fastsmtp.db.soft_delete import (
+    restore_domain,
+    restore_recipient,
+    soft_delete_domain,
+    soft_delete_recipient,
+)
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -473,3 +482,286 @@ class TestHealthCheckDepth:
         assert response_full.queue.pending == 5
         assert response_full.queue.failed == 2
         assert response_full.queue.exhausted == 1
+
+
+def user_client(app: FastAPI, api_key: str) -> AsyncClient:
+    """HTTP client authenticating with ``api_key`` instead of the root key."""
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-API-Key": api_key},
+    )
+
+
+async def add_member_with_key(
+    session: AsyncSession, domain: Domain, username: str, role: str
+) -> str:
+    """Create a user holding ``role`` on ``domain``; return their API key secret."""
+    user = User(username=username, email=f"{username}@example.com", is_active=True)
+    session.add(user)
+    await session.flush()
+    session.add(DomainMember(domain_id=domain.id, user_id=user.id, role=role))
+    full_key, key_prefix, key_hash, key_salt = generate_api_key()
+    session.add(
+        APIKey(
+            user_id=user.id,
+            key_hash=key_hash,
+            key_salt=key_salt,
+            key_prefix=key_prefix,
+            name=f"{username} key",
+            scopes=["logs:read"],
+        )
+    )
+    await session.flush()
+    return full_key
+
+
+async def make_log(
+    session: AsyncSession,
+    domain: Domain,
+    status: DeliveryStatus,
+    recipient: Recipient | None = None,
+) -> DeliveryLog:
+    log = DeliveryLog(
+        domain_id=domain.id,
+        recipient_id=recipient.id if recipient else None,
+        webhook_url="https://webhook.example.com",
+        status=status,
+        message_id=f"<{uuid.uuid4()}@test.com>",
+        payload={"test": True},
+        payload_hash=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
+        instance_id="test-instance",
+    )
+    session.add(log)
+    await session.flush()
+    return log
+
+
+class TestDeliveryLogOfTombstonedDomain:
+    """History of a soft-deleted domain stays reachable to those who could
+    delete it (spec §4.6): superusers and owners read it, plain members get
+    the same 404 as for a domain that never existed.
+    """
+
+    @pytest_asyncio.fixture
+    async def tombstoned(self, test_session: AsyncSession) -> tuple[Domain, DeliveryLog, str, str]:
+        """A tombstoned domain with one cancelled delivery; owner and member keys."""
+        domain = Domain(domain_name="tombstoned-history.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+        owner_key = await add_member_with_key(test_session, domain, "history-owner", "owner")
+        member_key = await add_member_with_key(test_session, domain, "history-member", "member")
+        log = await make_log(test_session, domain, DeliveryStatus.PENDING)
+        await soft_delete_domain(test_session, domain)
+        await test_session.commit()
+        await test_session.refresh(log)
+        assert log.status == DeliveryStatus.CANCELLED
+        return domain, log, owner_key, member_key
+
+    @pytest.mark.asyncio
+    async def test_get_delivery_log_superuser_reads_history(
+        self, auth_client: AsyncClient, tombstoned: tuple[Domain, DeliveryLog, str, str]
+    ):
+        domain, log, _, _ = tombstoned
+        response = await auth_client.get(f"/api/v1/delivery-log/{log.id}")
+        assert response.status_code == 200
+        # The #106 payoff: the soft delete did not sever the FK.
+        assert response.json()["domain_id"] == str(domain.id)
+
+    @pytest.mark.asyncio
+    async def test_get_delivery_log_owner_reads_history(
+        self, app: FastAPI, tombstoned: tuple[Domain, DeliveryLog, str, str]
+    ):
+        _, log, owner_key, _ = tombstoned
+        async with user_client(app, owner_key) as client:
+            response = await client.get(f"/api/v1/delivery-log/{log.id}")
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_get_delivery_log_member_gets_404(
+        self, app: FastAPI, tombstoned: tuple[Domain, DeliveryLog, str, str]
+    ):
+        _, log, _, member_key = tombstoned
+        async with user_client(app, member_key) as client:
+            response = await client.get(f"/api/v1/delivery-log/{log.id}")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Domain not found"
+
+    @pytest.mark.asyncio
+    async def test_list_delivery_logs_requires_include_deleted(
+        self, auth_client: AsyncClient, tombstoned: tuple[Domain, DeliveryLog, str, str]
+    ):
+        domain, _, _, _ = tombstoned
+        response = await auth_client.get(f"/api/v1/domains/{domain.id}/delivery-log")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_list_delivery_logs_include_deleted_returns_history(
+        self, app: FastAPI, tombstoned: tuple[Domain, DeliveryLog, str, str]
+    ):
+        domain, log, owner_key, _ = tombstoned
+        async with user_client(app, owner_key) as client:
+            response = await client.get(
+                f"/api/v1/domains/{domain.id}/delivery-log",
+                params={"include_deleted": "true", "status": "cancelled"},
+            )
+        assert response.status_code == 200
+        assert [entry["id"] for entry in response.json()] == [str(log.id)]
+
+    @pytest.mark.asyncio
+    async def test_list_delivery_logs_include_deleted_member_gets_404(
+        self, app: FastAPI, tombstoned: tuple[Domain, DeliveryLog, str, str]
+    ):
+        domain, _, _, member_key = tombstoned
+        async with user_client(app, member_key) as client:
+            response = await client.get(
+                f"/api/v1/domains/{domain.id}/delivery-log",
+                params={"include_deleted": "true"},
+            )
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_list_delivery_logs_include_deleted_is_owner_gated_on_live_domain(
+        self, app: FastAPI, test_session: AsyncSession
+    ):
+        """The flag elevates the role up front, so a member is refused (403)
+        before any lookup - it is not an existence oracle."""
+        domain = Domain(domain_name="live-history.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+        member_key = await add_member_with_key(test_session, domain, "live-member", "member")
+        await test_session.commit()
+
+        async with user_client(app, member_key) as client:
+            without_flag = await client.get(f"/api/v1/domains/{domain.id}/delivery-log")
+            with_flag = await client.get(
+                f"/api/v1/domains/{domain.id}/delivery-log",
+                params={"include_deleted": "true"},
+            )
+        assert without_flag.status_code == 200
+        assert with_flag.status_code == 403
+
+
+class TestRetryWithTombstones:
+    """Retry accepts ``cancelled`` once recipient and domain are live again,
+    and refuses (409) while either is tombstoned (spec §4.6, S14).
+    """
+
+    @pytest_asyncio.fixture
+    async def cancelled_delivery(
+        self, test_session: AsyncSession
+    ) -> tuple[Domain, Recipient, DeliveryLog]:
+        domain = Domain(domain_name="retry-tombstones.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+        recipient = Recipient(
+            domain_id=domain.id,
+            local_part="sales",
+            webhook_url="https://webhook.example.com",
+            is_enabled=True,
+        )
+        test_session.add(recipient)
+        await test_session.flush()
+        log = await make_log(test_session, domain, DeliveryStatus.PENDING, recipient)
+        await test_session.commit()
+        return domain, recipient, log
+
+    @pytest.mark.asyncio
+    async def test_retry_refused_while_domain_tombstoned(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+    ):
+        domain, _, log = cancelled_delivery
+        await soft_delete_domain(test_session, domain)
+        await test_session.commit()
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{log.id}/retry")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Domain is deleted; restore it before retrying"
+
+    @pytest.mark.asyncio
+    async def test_retry_refused_while_recipient_tombstoned(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+    ):
+        _, recipient, log = cancelled_delivery
+        await soft_delete_recipient(test_session, recipient)
+        await test_session.commit()
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{log.id}/retry")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Recipient is deleted; restore it before retrying"
+
+    @pytest.mark.asyncio
+    async def test_retry_accepts_cancelled_after_domain_restore(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+    ):
+        domain, _, log = cancelled_delivery
+        await soft_delete_domain(test_session, domain)
+        await test_session.commit()
+        await restore_domain(test_session, domain)
+        await test_session.commit()
+        await test_session.refresh(log)
+        assert log.status == DeliveryStatus.CANCELLED  # restore never re-queues
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{log.id}/retry")
+        assert response.status_code == 200
+        await test_session.refresh(log)
+        assert log.status == DeliveryStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_retry_accepts_cancelled_after_recipient_restore(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+    ):
+        _, recipient, log = cancelled_delivery
+        await soft_delete_recipient(test_session, recipient)
+        await test_session.commit()
+        await restore_recipient(test_session, recipient)
+        await test_session.commit()
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{log.id}/retry")
+        assert response.status_code == 200
+        await test_session.refresh(log)
+        assert log.status == DeliveryStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_wrong_status_is_still_400_under_a_tombstone(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+    ):
+        """The status check runs before the tombstone checks (spec §4.6)."""
+        domain, _, _ = cancelled_delivery
+        delivered = await make_log(test_session, domain, DeliveryStatus.DELIVERED)
+        await soft_delete_domain(test_session, domain)
+        await test_session.commit()
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{delivered.id}/retry")
+        assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_retry_on_tombstoned_domain_is_invisible_below_owner(
+        self,
+        app: FastAPI,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+    ):
+        domain, _, log = cancelled_delivery
+        admin_key = await add_member_with_key(test_session, domain, "retry-admin", "admin")
+        await soft_delete_domain(test_session, domain)
+        await test_session.commit()
+
+        async with user_client(app, admin_key) as client:
+            response = await client.post(f"/api/v1/delivery-log/{log.id}/retry")
+        assert response.status_code == 404

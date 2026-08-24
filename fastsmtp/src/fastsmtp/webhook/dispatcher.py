@@ -13,13 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from fastsmtp.config import Settings, get_settings
-from fastsmtp.db.models import DeliveryLog
+from fastsmtp.db.models import DeliveryLog, Recipient
 from fastsmtp.db.session import async_session
 from fastsmtp.metrics.definitions import (
     WEBHOOK_DELIVERIES_TOTAL,
     WEBHOOK_DELIVERY_DURATION,
 )
-from fastsmtp.webhook.queue import get_pending_deliveries, mark_delivered, mark_failed
+from fastsmtp.webhook.queue import (
+    get_pending_deliveries,
+    mark_cancelled,
+    mark_delivered,
+    mark_failed,
+)
 from fastsmtp.webhook.url_validator import (
     SSRFError,
     create_ssrf_safe_client,
@@ -113,6 +118,25 @@ async def send_webhook(
             await client.aclose()
 
 
+def _tombstone_reason(delivery: DeliveryLog) -> str | None:
+    """Why a claimed delivery must not go out, or None when it may.
+
+    The dispatcher guard (spec S11): the last of three layers, for a delivery
+    claimed just before its recipient or domain was tombstoned. Reads the
+    eagerly loaded ``recipient`` and ``recipient.domain``. Legacy rows whose
+    ``recipient_id`` was nulled by a pre-0.5 hard delete carry nothing to
+    check and deliver as before.
+    """
+    recipient = delivery.recipient
+    if recipient is None:
+        return None
+    if recipient.is_deleted:
+        return "Recipient deleted"
+    if recipient.domain.is_deleted:
+        return "Domain deleted"
+    return None
+
+
 async def process_delivery(
     delivery: DeliveryLog,
     settings: Settings,
@@ -122,12 +146,21 @@ async def process_delivery(
     """Process a single delivery.
 
     Args:
-        delivery: DeliveryLog entry to process
+        delivery: DeliveryLog entry to process, with ``recipient`` and
+            ``recipient.domain`` eagerly loaded
         settings: Application settings
         session: Database session
         client: HTTP client for connection reuse (recommended for batch processing)
     """
     logger.debug(f"Processing delivery {delivery.id} to {delivery.webhook_url}")
+
+    # A tombstoned recipient must never receive another authenticated call:
+    # cancel before any header is built. No HTTP request, no DLQ.
+    reason = _tombstone_reason(delivery)
+    if reason is not None:
+        await mark_cancelled(session, delivery.id, reason)
+        WEBHOOK_DELIVERIES_TOTAL.labels(status="cancelled").inc()
+        return
 
     # Get recipient headers if available (recipient may be eagerly loaded via selectinload)
     headers: dict[str, str] = {}
@@ -215,10 +248,11 @@ class WebhookWorker:
 
         async with async_session() as session:
             # Re-fetch the delivery in this session; the recipient must be
-            # eagerly loaded or its webhook_headers are dropped from the request
+            # eagerly loaded or its webhook_headers are dropped from the
+            # request, and its domain too, for the tombstone guard.
             stmt = (
                 select(DeliveryLog)
-                .options(selectinload(DeliveryLog.recipient))
+                .options(selectinload(DeliveryLog.recipient).selectinload(Recipient.domain))
                 .where(DeliveryLog.id == delivery_id)
             )
             result = await session.execute(stmt)
