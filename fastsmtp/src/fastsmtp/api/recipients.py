@@ -1,7 +1,7 @@
 """Recipient management API endpoints.
 
 Deletes are soft: ``DELETE`` tombstones the row and cancels its queued
-deliveries, ``POST …/restore`` clears the tombstone, and ``DELETE …?purge=true``
+deliveries, ``POST .../restore`` clears the tombstone, and ``DELETE ...?purge=true``
 runs the old hard delete on a row that is already tombstoned. Reads hide
 tombstones unless ``include_deleted`` is passed, which raises the required
 domain role to admin up front so the flag is never an existence oracle.

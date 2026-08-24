@@ -5,7 +5,7 @@ from typing import Annotated
 import typer
 
 from fastsmtp_cli.client import APIError, FastSMTPClient
-from fastsmtp_cli.commands.options import IncludeDeleted
+from fastsmtp_cli.commands.options import IncludeDeletedLogs
 from fastsmtp_cli.output import (
     print_delivery_log,
     print_delivery_logs_table,
@@ -71,7 +71,7 @@ def list_logs(
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-l", help="Max results")] = 50,
     offset: Annotated[int, typer.Option("--offset", "-o", help="Offset")] = 0,
-    include_deleted: IncludeDeleted = False,
+    include_deleted: IncludeDeletedLogs = False,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),

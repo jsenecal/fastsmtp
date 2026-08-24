@@ -1612,6 +1612,16 @@ class TestSoftDeleteCommands:
         assert "restorable" not in output
         assert "cannot be restored" in output
 
+    def test_log_list_help_does_not_call_deleted_logs_restorable(self):
+        """The flag resolves a deleted domain; it never lists deleted log rows."""
+        result = runner.invoke(app, ["ops", "log", "list", "--help"])
+
+        assert result.exit_code == 0
+        output = flat(result.output)
+        assert "--include-deleted" in output
+        assert "restorable" not in output
+        assert "deleted domain" in output
+
     def test_purge_help_names_the_superuser_restriction(self):
         result = runner.invoke(app, ["domain", "delete", "--help"])
 

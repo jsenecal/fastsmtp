@@ -18,11 +18,11 @@ order.
 Release Drafter resolves the next version number from **PR labels**, not from commit
 messages. `breaking` bumps major; `feature` / `enhancement` bump minor; everything else
 (`fix`, `bug`, `performance`, `documentation`, `dependencies`, `chore`, `ci`,
-`refactor`) bumps patch — and *patch is also the default for a PR with no label at
+`refactor`) bumps patch, and *patch is also the default for a PR with no label at
 all*. An unlabelled feature PR therefore silently yields a patch version.
 
 An autolabeler maps conventional-commit PR titles (`feat:`, `fix:`, ...) to labels, but
-do not rely on it alone — label every PR explicitly at creation:
+do not rely on it alone - label every PR explicitly at creation:
 
 ```bash
 gh pr create ... --label feature
@@ -33,7 +33,7 @@ gh pr create ... --label feature
 The version lives in **five** files: the root `pyproject.toml`, both package
 `pyproject.toml`s, and both package `__init__.py`s. They are kept in sync by
 `bump-my-version` (configured under `[tool.bumpversion]` in the root
-`pyproject.toml`) — never edit them by hand.
+`pyproject.toml`) - never edit them by hand.
 
 ```bash
 uv run bump-my-version bump minor    # or patch / major
@@ -56,7 +56,7 @@ git push origin main && git push origin v{version}
 
 ## 2. Check whether the release introduces a migration
 
-Nothing applies migrations automatically — `fastsmtp serve` does not run Alembic, and
+Nothing applies migrations automatically - `fastsmtp serve` does not run Alembic, and
 neither does the image. Publishing a release moves the `latest`, `vX` and `vX.Y` tags,
 so anything tracking a floating tag can receive a schema-requiring image the moment you
 publish. Before publishing, check whether the range since the last release adds a
@@ -73,7 +73,7 @@ If it does, the release notes **must** say so and state the required order:
 
 Since the [startup schema check](configuration.md#schema-version-check) landed, an
 image started against a database behind its migrations refuses to start instead of
-failing with `UndefinedColumn` on the first query — but that is a runtime backstop, not
+failing with `UndefinedColumn` on the first query, but that is a runtime backstop, not
 a substitute for calling out the migration at release time.
 
 ## 3. Publish the release
@@ -93,10 +93,10 @@ the tagged commit (running the test suite itself if it has not), then builds mul
 ## 4. Verify the images on ghcr
 
 **ghcr is the only source of truth for what is deployable.** The `Release` workflow can
-also be run manually via `workflow_dispatch` against an existing tag — useful for
+also be run manually via `workflow_dispatch` against an existing tag, useful for
 rebuilding an image without cutting a new version, for example after a base-image CVE.
 A manually dispatched build pushes images but leaves **no GitHub release** behind, so a
-tag can have an image with no release — or neither. Comparing `gh release list` against
+tag can have an image with no release, or neither. Comparing `gh release list` against
 `git tag` proves nothing about images; query the registry itself:
 
 ```bash

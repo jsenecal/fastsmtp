@@ -23,6 +23,17 @@ IncludeDeletedKeys = Annotated[
     ),
 ]
 
+#: The same flag on ``ops log list``: log rows are never deleted, so the flag
+#: only resolves a deleted domain (owner or superuser) to read its history.
+IncludeDeletedLogs = Annotated[
+    bool,
+    typer.Option(
+        "--include-deleted",
+        help="Read the history of a deleted domain (owner or superuser); log rows themselves "
+        "are never deleted",
+    ),
+]
+
 #: ``--purge`` on every delete. A purge is a second step: it only works on a row
 #: that is already deleted (the server answers 409 otherwise), and it runs the
 #: hard-delete cascades that soft delete exists to avoid.
@@ -57,8 +68,8 @@ def clearable_str(option: str | None) -> NullableStr:
 
     CLI-wide convention for options backed by a nullable string column: leaving
     the option off (``None``) leaves the column untouched, passing an empty
-    string (``--option ''``) clears it — the client sends an explicit JSON
-    null — and any other value sets it.
+    string (``--option ''``) clears it (the client sends an explicit JSON
+    null), and any other value sets it.
 
     This is the string counterpart of the ``true``/``false``/``inherit``
     tri-state used for nullable boolean flags (see ``commands/domains.py``);

@@ -5,7 +5,7 @@ on:
     types: [published]
   # Manual dispatch rebuilds the images for an existing tag (e.g. after a
   # base-image CVE) without cutting a new version. Images built this way leave
-  # no GitHub release behind, so `gh release list` will not show them — ghcr is
+  # no GitHub release behind, so `gh release list` will not show them - ghcr is
   # the only source of truth for what is deployable. See docs/releasing.md.
   workflow_dispatch:
     inputs:

@@ -2,8 +2,8 @@
 
 Deletes are soft: ``DELETE`` tombstones the domain, stamps its live recipients
 with the same timestamp and cancels their queued deliveries; ``POST
-…/restore`` clears the tombstone (and the recipients stamped with it); ``DELETE
-…?purge=true`` runs the old hard delete on a row that is already tombstoned.
+.../restore`` clears the tombstone (and the recipients stamped with it); ``DELETE
+...?purge=true`` runs the old hard delete on a row that is already tombstoned.
 Reads hide tombstones unless ``include_deleted`` is passed, which raises the
 required role to owner *before* the lookup so the flag is never an existence
 oracle. Rulesets, rules and memberships carry no tombstone of their own: they
