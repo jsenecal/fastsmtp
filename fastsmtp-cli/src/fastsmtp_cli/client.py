@@ -80,6 +80,16 @@ class APIError(Exception):
         super().__init__(f"API error {status_code}: {self.detail}")
 
 
+def _flags(**flags: bool) -> dict[str, str] | None:
+    """Query params for boolean flags, sent only when true.
+
+    Omitting false flags keeps requests byte-identical for older servers that
+    do not declare them.
+    """
+    sent = {name: "true" for name, value in flags.items() if value}
+    return sent or None
+
+
 class FastSMTPClient:
     """HTTP client for FastSMTP API."""
 
@@ -206,9 +216,9 @@ class FastSMTPClient:
 
     # User endpoints (superuser only)
 
-    def list_users(self) -> list[dict]:
-        """List all users."""
-        return self.get("/api/v1/users")
+    def list_users(self, include_deleted: bool = False) -> list[dict]:
+        """List all users. ``include_deleted`` also returns soft-deleted ones."""
+        return self.get("/api/v1/users", params=_flags(include_deleted=include_deleted))
 
     def create_user(
         self,
@@ -222,9 +232,9 @@ class FastSMTPClient:
             data["email"] = email
         return self.post("/api/v1/users", json=data)
 
-    def get_user(self, user_id: UUID | str) -> dict:
-        """Get a user by ID."""
-        return self.get(f"/api/v1/users/{user_id}")
+    def get_user(self, user_id: UUID | str, include_deleted: bool = False) -> dict:
+        """Get a user by ID. A soft-deleted user is 404 unless ``include_deleted``."""
+        return self.get(f"/api/v1/users/{user_id}", params=_flags(include_deleted=include_deleted))
 
     def update_user(
         self,
@@ -251,9 +261,13 @@ class FastSMTPClient:
             data["is_superuser"] = is_superuser
         return self.put(f"/api/v1/users/{user_id}", json=data)
 
-    def delete_user(self, user_id: UUID | str) -> None:
-        """Delete a user."""
-        self.delete(f"/api/v1/users/{user_id}")
+    def delete_user(self, user_id: UUID | str, purge: bool = False) -> None:
+        """Soft-delete a user; ``purge`` permanently removes an already-deleted one."""
+        self.delete(f"/api/v1/users/{user_id}", params=_flags(purge=purge))
+
+    def restore_user(self, user_id: UUID | str) -> dict:
+        """Restore a soft-deleted user. API keys revoked at deletion stay revoked."""
+        return self.post(f"/api/v1/users/{user_id}/restore")
 
     # Domain endpoints
 
