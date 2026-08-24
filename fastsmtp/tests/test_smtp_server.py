@@ -1,11 +1,17 @@
 """Tests for SMTP server functionality."""
 
 from email import message_from_bytes
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from aiosmtpd.smtp import Envelope
+from fastsmtp.config import Settings
 from fastsmtp.db.models import Domain, Recipient
+from fastsmtp.db.soft_delete import soft_delete_domain, soft_delete_recipient
+from fastsmtp.rules.engine import RuleEvaluationResult
 from fastsmtp.smtp.server import (
+    FastSMTPHandler,
     extract_email_payload,
     find_recipient_for_address,
     lookup_recipient,
@@ -17,7 +23,8 @@ from fastsmtp.smtp.validation import (
     RESULT_SOFTFAIL,
     EmailAuthResult,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 class TestExtractEmailPayload:
@@ -211,6 +218,240 @@ class TestLookupRecipient:
         assert error is None
         assert recipient is not None
         assert recipient.local_part == "info"
+
+
+class TestLookupRecipientTombstones:
+    """Pins for the receive path against soft-deleted rows (spec S9).
+
+    ``lookup_recipient`` already filters tombstones; these tests exist so the
+    behaviour cannot regress silently, and so the DATA-phase re-lookup - the
+    only thing standing between a recipient deleted mid-transaction and a
+    webhook to its URL - is exercised end to end against the database.
+    """
+
+    DOMAIN = "tombstone-test.com"
+
+    @pytest_asyncio.fixture
+    async def domain(self, test_session: AsyncSession) -> Domain:
+        """A live domain with a named recipient and a catch-all."""
+        domain = Domain(domain_name=self.DOMAIN, is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+        test_session.add_all(
+            [
+                Recipient(
+                    domain_id=domain.id,
+                    local_part="sales",
+                    webhook_url="https://example.com/sales",
+                    is_enabled=True,
+                ),
+                Recipient(
+                    domain_id=domain.id,
+                    local_part=None,
+                    webhook_url="https://example.com/catchall",
+                    is_enabled=True,
+                ),
+            ]
+        )
+        await test_session.commit()
+        await test_session.refresh(domain)
+        return domain
+
+    @staticmethod
+    async def _tombstone_recipient(
+        session: AsyncSession, domain: Domain, local_part: str | None
+    ) -> None:
+        local_part_is = (
+            Recipient.local_part.is_(None)
+            if local_part is None
+            else Recipient.local_part == local_part
+        )
+        recipient = (
+            await session.execute(
+                select(Recipient).where(Recipient.domain_id == domain.id, local_part_is)
+            )
+        ).scalar_one()
+        await soft_delete_recipient(session, recipient)
+        await session.commit()
+
+    # -- lookup_recipient -------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_tombstoned_domain_is_not_configured(
+        self, test_session: AsyncSession, domain: Domain
+    ):
+        """A tombstoned domain answers exactly like one that was never created."""
+        await soft_delete_domain(test_session, domain)
+        await test_session.commit()
+
+        found, recipient, error = await lookup_recipient(f"sales@{self.DOMAIN}", test_session)
+
+        assert found is None
+        assert recipient is None
+        assert error == f"Domain {self.DOMAIN} not configured"
+
+    @pytest.mark.asyncio
+    async def test_tombstoned_named_recipient_falls_through_to_catchall(
+        self, test_session: AsyncSession, domain: Domain
+    ):
+        """A tombstoned named recipient routes to the live catch-all, like a disabled one."""
+        await self._tombstone_recipient(test_session, domain, "sales")
+
+        found, recipient, error = await lookup_recipient(f"sales@{self.DOMAIN}", test_session)
+
+        assert error is None
+        assert found is not None
+        assert recipient is not None
+        assert recipient.local_part is None
+
+    @pytest.mark.asyncio
+    async def test_tombstoned_named_recipient_without_catchall_is_not_found(
+        self, test_session: AsyncSession, domain: Domain
+    ):
+        """With no live catch-all, a tombstoned named recipient is a 550 at RCPT."""
+        await self._tombstone_recipient(test_session, domain, "sales")
+        await self._tombstone_recipient(test_session, domain, None)
+
+        found, recipient, error = await lookup_recipient(f"sales@{self.DOMAIN}", test_session)
+
+        assert found is not None
+        assert recipient is None
+        assert error == "User sales not found"
+
+    @pytest.mark.asyncio
+    async def test_tombstoned_catchall_is_not_used(
+        self, test_session: AsyncSession, domain: Domain
+    ):
+        """A tombstoned catch-all no longer absorbs unknown local parts."""
+        await self._tombstone_recipient(test_session, domain, None)
+
+        found, recipient, error = await lookup_recipient(f"nobody@{self.DOMAIN}", test_session)
+
+        assert found is not None
+        assert recipient is None
+        assert error == "User nobody not found"
+
+    # -- handler: RCPT and the DATA-phase re-lookup ----------------------
+
+    @staticmethod
+    def _session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+        return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _rcpt(
+        self, handler: FastSMTPHandler, engine: AsyncEngine, envelope: Envelope, address: str
+    ) -> str:
+        with patch("fastsmtp.smtp.server.async_session", self._session_factory(engine)):
+            return await handler.handle_RCPT(MagicMock(), MagicMock(), envelope, address, [])
+
+    async def _data(
+        self, handler: FastSMTPHandler, engine: AsyncEngine, envelope: Envelope
+    ) -> tuple[int, AsyncMock, AsyncMock]:
+        """Run the DATA-phase persist step; return (deliveries, rules spy, enqueue spy)."""
+        raw = (
+            b"From: sender@external.com\r\n"
+            b"Subject: After RCPT\r\n"
+            b"Message-ID: <after-rcpt@external.com>\r\n\r\n"
+            b"Body\r\n"
+        )
+        envelope.content = raw
+        rules_spy = AsyncMock(return_value=RuleEvaluationResult())
+        enqueue_spy = AsyncMock()
+        with (
+            patch("fastsmtp.smtp.server.async_session", self._session_factory(engine)),
+            patch("fastsmtp.rules.engine.evaluate_rules", rules_spy),
+            patch("fastsmtp.webhook.queue.enqueue_delivery", enqueue_spy),
+        ):
+            created = await handler._process_and_persist_message(
+                envelope=envelope,
+                message=message_from_bytes(raw),
+                message_id="<after-rcpt@external.com>",
+                auth_result=EmailAuthResult(
+                    dkim_result=RESULT_NONE,
+                    dkim_domain=None,
+                    dkim_selector=None,
+                    spf_result=RESULT_NONE,
+                    spf_domain=None,
+                    client_ip="203.0.113.10",
+                ),
+                client_ip="203.0.113.10",
+                raw_content=raw,
+            )
+        return created, rules_spy, enqueue_spy
+
+    @pytest.mark.asyncio
+    async def test_rcpt_rejects_tombstoned_domain(
+        self, test_session: AsyncSession, test_engine: AsyncEngine, test_settings: Settings, domain
+    ):
+        """RCPT answers 550 for a tombstoned domain and leaves the envelope alone."""
+        await soft_delete_domain(test_session, domain)
+        await test_session.commit()
+        envelope = Envelope()
+
+        reply = await self._rcpt(
+            FastSMTPHandler(test_settings), test_engine, envelope, f"sales@{self.DOMAIN}"
+        )
+
+        assert reply == f"550 Domain {self.DOMAIN} not configured"
+        assert envelope.rcpt_tos == []
+
+    @pytest.mark.asyncio
+    async def test_data_delivers_to_live_recipient(
+        self, test_session: AsyncSession, test_engine: AsyncEngine, test_settings: Settings, domain
+    ):
+        """Control for the skip tests: a live recipient reaches the rules engine and the queue."""
+        handler = FastSMTPHandler(test_settings)
+        envelope = Envelope()
+        address = f"sales@{self.DOMAIN}"
+        assert await self._rcpt(handler, test_engine, envelope, address) == "250 OK"
+
+        created, rules_spy, enqueue_spy = await self._data(handler, test_engine, envelope)
+
+        assert created == 1
+        rules_spy.assert_awaited_once()
+        assert rules_spy.await_args.kwargs["domain_id"] == domain.id
+        enqueue_spy.assert_awaited_once()
+        assert enqueue_spy.await_args.kwargs["webhook_url"] == "https://example.com/sales"
+
+    @pytest.mark.asyncio
+    async def test_data_skips_recipient_tombstoned_after_rcpt(
+        self, test_session: AsyncSession, test_engine: AsyncEngine, test_settings: Settings, domain
+    ):
+        """A recipient tombstoned between RCPT and DATA gets no delivery.
+
+        The catch-all is tombstoned too, so the address has nowhere to fall
+        through to: the re-lookup must drop it rather than deliver to the
+        recipient RCPT accepted.
+        """
+        handler = FastSMTPHandler(test_settings)
+        envelope = Envelope()
+        address = f"sales@{self.DOMAIN}"
+        assert await self._rcpt(handler, test_engine, envelope, address) == "250 OK"
+        await self._tombstone_recipient(test_session, domain, "sales")
+        await self._tombstone_recipient(test_session, domain, None)
+
+        created, rules_spy, enqueue_spy = await self._data(handler, test_engine, envelope)
+
+        assert created == 0
+        rules_spy.assert_not_awaited()
+        enqueue_spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_data_never_evaluates_rules_for_domain_tombstoned_after_rcpt(
+        self, test_session: AsyncSession, test_engine: AsyncEngine, test_settings: Settings, domain
+    ):
+        """A domain tombstoned between RCPT and DATA never reaches the rules engine."""
+        handler = FastSMTPHandler(test_settings)
+        envelope = Envelope()
+        address = f"sales@{self.DOMAIN}"
+        assert await self._rcpt(handler, test_engine, envelope, address) == "250 OK"
+        await soft_delete_domain(test_session, domain)
+        await test_session.commit()
+
+        created, rules_spy, enqueue_spy = await self._data(handler, test_engine, envelope)
+
+        assert created == 0
+        rules_spy.assert_not_awaited()
+        enqueue_spy.assert_not_awaited()
 
 
 class TestLookupRecipientSubaddress:

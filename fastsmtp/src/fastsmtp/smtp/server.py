@@ -98,7 +98,7 @@ async def lookup_recipient(
         .where(
             Domain.domain_name == domain_name,
             Domain.is_enabled.is_(True),
-            Domain.deleted_at.is_(None),
+            Domain.live(),
         )
     )
     result = await session.execute(stmt)
@@ -109,7 +109,7 @@ async def lookup_recipient(
 
     # Find matching recipient: exact match first, then subaddress (plus-tag)
     # base match, then catch-all. Filter out disabled and soft-deleted recipients.
-    active_recipients = [r for r in domain.recipients if r.is_enabled and r.deleted_at is None]
+    active_recipients = [r for r in domain.recipients if r.is_enabled and not r.is_deleted]
 
     def find_specific(target_local_part: str) -> Recipient | None:
         for recipient in active_recipients:
