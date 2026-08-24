@@ -354,6 +354,15 @@ def _format_timestamp(value: datetime | None) -> str:
     return f"{value.strftime(TIMESTAMP_FORMAT)} UTC" if value is not None else ""
 
 
+def _yes_no(value: bool) -> str:
+    """Render a flag cell as the same words fsmtp uses, so the cell text is plain ASCII.
+
+    Only the cell is ours: Rich still draws the table frame with box characters
+    on a UTF-8 console and falls back to ASCII on any other encoding.
+    """
+    return "Yes" if value else "No"
+
+
 def _require_purge_for_id(purge: bool, id_option: uuid.UUID | None) -> None:
     """``--id`` names a tombstone; a plain delete addresses the live row and has no use for it.
 
@@ -542,8 +551,8 @@ def user_list(include_deleted: IncludeDeleted = False):
                     str(user.id)[:8],
                     user.username,
                     user.email or "",
-                    "✓" if user.is_active else "✗",
-                    "✓" if user.is_superuser else "✗",
+                    _yes_no(user.is_active),
+                    _yes_no(user.is_superuser),
                     include_deleted=include_deleted,
                 )
 
@@ -754,7 +763,7 @@ def domain_list(include_deleted: IncludeDeleted = False):
                     domain,
                     str(domain.id)[:8],
                     domain.domain_name,
-                    "✓" if domain.is_enabled else "✗",
+                    _yes_no(domain.is_enabled),
                     str(domain.verify_dkim) if domain.verify_dkim is not None else "default",
                     str(domain.verify_spf) if domain.verify_spf is not None else "default",
                     include_deleted=include_deleted,

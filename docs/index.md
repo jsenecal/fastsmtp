@@ -8,10 +8,12 @@ A TLS-capable, async SMTP server that receives emails and forwards them to webho
 - **Email Authentication**: DKIM and SPF verification with configurable enforcement
 - **Webhook Delivery**: Reliable delivery queue with exponential backoff retry, dead letter queue (DLQ) notifications
 - **S3 Attachment Storage**: Optional S3-compatible storage (AWS S3, MinIO, Ceph) with presigned URL support
+- **Raw Message Preservation**: Optional complete-MIME archiving to S3, configurable per domain and per rule
 - **Rule Engine**: Conditional routing based on email attributes (from, to, subject, headers, etc.)
 - **REST API**: Full management API with OpenAPI documentation
 - **Multi-tenant**: Domain-based isolation with role-based access control
 - **Rate Limiting**: Configurable limits for both API and SMTP (per-IP connection/message limits)
+- **Prometheus Metrics**: `/metrics` endpoint with SMTP, webhook, queue and auth metrics, with optional IP allowlisting
 - **Security**: Webhook header encryption at rest, SSRF protection for webhook URLs
 - **Queue Backpressure**: Configurable limits to prevent unbounded queue growth
 - **Soft Delete**: Deleted users, API keys, domains and recipients are restorable; delivery history survives, permanent removal is a separate superuser step or an optional retention job
@@ -42,12 +44,12 @@ flowchart LR
 
 ## Next Steps
 
-- [Getting Started](getting-started.md) — install and run FastSMTP locally or with Docker
-- [Configuration](configuration.md) — all environment variables
-- [Webhook Payload](webhooks.md) — what your webhook receives
-- [Monitoring](monitoring.md) — Prometheus metrics, health checks, and restricting scrape access
-- [CLI Reference](cli/fastsmtp.md) — server and remote CLI tools
+- [Getting Started](getting-started.md) - install and run FastSMTP locally or with Docker
+- [Configuration](configuration.md) - all environment variables
+- [Webhook Payload](webhooks.md) - what your webhook receives
+- [Monitoring](monitoring.md) - Prometheus metrics, health checks, and restricting scrape access
+- [CLI Reference](cli/fastsmtp.md) - server and remote CLI tools
 
 ## License
 
-AGPL-3.0 — see the [LICENSE](https://github.com/jsenecal/fastsmtp/blob/main/LICENSE) file for details.
+AGPL-3.0 - see the [LICENSE](https://github.com/jsenecal/fastsmtp/blob/main/LICENSE) file for details.

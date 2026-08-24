@@ -332,6 +332,21 @@ class TestUserList:
         assert "alice" not in out
         assert "Deleted" not in out
 
+    def test_flags_render_as_ascii_words(self, run, db):
+        """Active/Superuser show Yes/No like fsmtp does, never check marks.
+
+        Each row is matched cell by cell (``\\S`` is the frame between cells,
+        the email cell is empty) so a swapped or hard-coded column cannot pass.
+        """
+        seed_user(db, "alice")
+        seed_user(db, "bob", is_active=False, is_superuser=True)
+
+        code, out = run("user", "list")
+        assert code == 0
+        assert re.search(r"alice\s+\S\s+\S\s+Yes\s+\S\s+No\b", out), out
+        assert re.search(r"bob\s+\S\s+\S\s+No\s+\S\s+Yes\b", out), out
+        assert "\u2713" not in out and "\u2717" not in out
+
 
 class TestUserDelete:
     def test_soft_deletes_and_revokes_keys(self, run, db):
@@ -655,6 +670,15 @@ class TestDomainList:
         code, out = run("domain", "list")
         assert code == 0
         assert "old.example" not in out
+
+    def test_flags_render_as_ascii_words(self, run, db):
+        """Enabled shows Yes/No like fsmtp does, never check marks (see the user test)."""
+        seed_domain(db, "live.example")
+
+        code, out = run("domain", "list")
+        assert code == 0
+        assert re.search(r"live\.example\s+\S\s+Yes\s+\S\s+default\b", out), out
+        assert "\u2713" not in out and "\u2717" not in out
 
 
 class TestDomainDelete:

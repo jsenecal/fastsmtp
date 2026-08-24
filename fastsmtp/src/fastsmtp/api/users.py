@@ -1,7 +1,7 @@
 """User management API endpoints (superuser only).
 
 Deletes are soft: ``DELETE`` tombstones the row (and revokes its API keys),
-``POST …/restore`` clears the tombstone, and ``DELETE …?purge=true`` runs the
+``POST .../restore`` clears the tombstone, and ``DELETE ...?purge=true`` runs the
 old hard delete on a row that is already tombstoned. Reads hide tombstones
 unless ``include_deleted`` is passed; every route requires superuser up front,
 so neither flag can act as an existence oracle below that role.

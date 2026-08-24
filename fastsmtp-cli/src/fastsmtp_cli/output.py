@@ -20,7 +20,7 @@ def field(value: Any, placeholder: str = "-") -> str:
     """Render a server-supplied value as literal text.
 
     Rich parses plain strings as markup, so a value containing square brackets
-    would restyle the output — or crash the command with ``MarkupError`` on an
+    would restyle the output, or crash the command with ``MarkupError`` on an
     unmatched closing tag. Escaping here keeps server text literal while the
     markup the formatters build deliberately (``yes_no``, ``tri_state``, the
     ``status_style`` wrappers) still parses. ``None`` and empty values render
