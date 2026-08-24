@@ -22,7 +22,8 @@ A TLS-capable, async SMTP server that receives emails and forwards them to webho
 - **Prometheus Metrics**: `/metrics` endpoint with SMTP, webhook, queue and auth metrics, with optional IP allowlisting
 - **Security**: Webhook header encryption at rest, SSRF protection for webhook URLs
 - **Queue Backpressure**: Configurable limits to prevent unbounded queue growth
-- **Automatic Cleanup**: Background worker for delivery log retention management
+- **Soft Delete**: Deleted users, API keys, domains and recipients are restorable; delivery history survives, permanent removal is a separate superuser step or an optional retention job
+- **Automatic Cleanup**: Background worker for delivery-log and soft-delete retention
 - **Horizontal Scaling**: Stateless design with database-backed task distribution
 
 ## Quick Start
@@ -250,6 +251,21 @@ All configuration is via environment variables with the `FASTSMTP_` prefix.
 | `FASTSMTP_DATABASE_POOL_SIZE` | `5` | Connection pool size |
 | `FASTSMTP_DATABASE_POOL_MAX_OVERFLOW` | `10` | Max overflow connections |
 
+### Retention
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_DELIVERY_LOG_RETENTION_DAYS` | `90` | Delivery-log rows older than this are deleted |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_ENABLED` | `true` | Run the delivery-log job in the cleanup worker |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_INTERVAL_HOURS` | `24` | How often the worker runs both jobs |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_BATCH_SIZE` | `1000` | Delivery-log rows deleted per statement |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_MAX_PER_RUN` | `100000` | Delivery-log rows deleted per run at most |
+| `FASTSMTP_DELIVERY_LOG_CLEANUP_BATCH_DELAY_MS` | `100` | Pause between delivery-log batches |
+| `FASTSMTP_SOFT_DELETE_RETENTION_DAYS` | - | Days a deleted user, API key, domain or recipient stays restorable before it is purged. Unset never purges automatically |
+
+The cleanup worker starts with `fastsmtp serve` when either job is enabled. See
+[Retention](docs/configuration.md#retention).
+
 ### Webhooks
 
 | Variable | Default | Description |
@@ -314,9 +330,9 @@ archives by age.
 
 Preservation is decided per recipient, from three sources in order:
 
-1. A matching rule with `preserve_raw: true` — always enables it, independent of the
+1. A matching rule with `preserve_raw: true` - always enables it, independent of the
    rule's action, so a rule can archive a message and still drop it.
-2. The domain's `preserve_raw_message` — `true` or `false` overrides the global default.
+2. The domain's `preserve_raw_message` - `true` or `false` overrides the global default.
 3. The global `FASTSMTP_PRESERVE_RAW_MESSAGE` setting, used when the domain leaves it unset.
 
 A message is uploaded at most once no matter how many recipients ask for it. When it is
@@ -402,33 +418,71 @@ curl -H "X-API-Key: your-api-key" https://fastsmtp.example.com/api/v1/domains
 
 ### Endpoints
 
+Routes marked `?include_deleted` and `?purge` take those boolean query parameters  - 
+see [Deletion, restore and purge](docs/api.md#deletion-restore-and-purge).
+
 #### Operations
 - `GET /health` - Health check
 - `GET /ready` - Readiness check (database connectivity)
 - `POST /test-webhook` - Test a webhook URL
 
+#### Auth (the caller's own account and keys)
+- `GET /auth/me` - Current user and domain memberships
+- `GET /auth/keys?include_deleted` - List your API keys
+- `POST /auth/keys` - Create an API key
+- `DELETE /auth/keys/{id}` - Delete an API key (soft; not restorable)
+- `POST /auth/keys/{id}/rotate` - Rotate an API key
+
+#### Users (superuser)
+- `GET /users?include_deleted` - List users
+- `POST /users` - Create user
+- `GET /users/{id}?include_deleted` - Get user
+- `PUT /users/{id}` - Update user
+- `DELETE /users/{id}?purge` - Delete user (soft), or purge an already-deleted one
+- `POST /users/{id}/restore` - Restore a deleted user
+
 #### Domains
-- `GET /domains` - List domains
+- `GET /domains?include_deleted` - List domains
 - `POST /domains` - Create domain
-- `GET /domains/{id}` - Get domain
+- `GET /domains/{id}?include_deleted` - Get domain
 - `PUT /domains/{id}` - Update domain
-- `DELETE /domains/{id}` - Delete domain
+- `DELETE /domains/{id}?purge` - Delete domain (soft), or purge an already-deleted one
+- `POST /domains/{id}/restore` - Restore a deleted domain
+
+#### Members
+- `GET /domains/{id}/members` - List members
+- `POST /domains/{id}/members` - Add member
+- `PUT /domains/{id}/members/{uid}` - Change a member's role
+- `DELETE /domains/{id}/members/{uid}` - Remove member
 
 #### Recipients
-- `GET /domains/{id}/recipients` - List recipients
+- `GET /domains/{id}/recipients?include_deleted` - List recipients
 - `POST /domains/{id}/recipients` - Create recipient
+- `GET /domains/{id}/recipients/{rid}?include_deleted` - Get recipient
 - `PUT /domains/{id}/recipients/{rid}` - Update recipient
-- `DELETE /domains/{id}/recipients/{rid}` - Delete recipient
+- `DELETE /domains/{id}/recipients/{rid}?purge` - Delete recipient (soft), or purge an already-deleted one
+- `POST /domains/{id}/recipients/{rid}/restore` - Restore a deleted recipient
 
 #### Rules
 - `GET /domains/{id}/rulesets` - List rulesets
 - `POST /domains/{id}/rulesets` - Create ruleset
+- `GET /domains/{id}/rulesets/{rsid}` - Get ruleset with its rules
+- `PUT /domains/{id}/rulesets/{rsid}` - Update ruleset
+- `DELETE /domains/{id}/rulesets/{rsid}` - Delete ruleset
+- `POST /domains/{id}/rulesets/{rsid}/reorder` - Set the evaluation order of a ruleset's rules
 - `POST /domains/{id}/rulesets/{rsid}/rules` - Create rule
+- `PUT /domains/{id}/rules/{rule_id}` - Update rule
+- `DELETE /domains/{id}/rules/{rule_id}` - Delete rule
 
 #### Delivery Logs
-- `GET /domains/{id}/delivery-log` - List delivery logs
+- `GET /domains/{id}/delivery-log?include_deleted` - List delivery logs
 - `GET /delivery-log/{id}` - Get delivery log details
-- `POST /delivery-log/{id}/retry` - Retry failed delivery
+- `POST /delivery-log/{id}/retry` - Retry a failed, exhausted or cancelled delivery
+
+Since v0.5.0, `DELETE` on a user, API key, domain or recipient is a **soft delete**,
+reversible with `POST .../restore`; `?purge=true` is the permanent removal. Who may pass
+each flag, what a delete cascades to and how restore behaves are specified once, in
+[docs/api.md](docs/api.md#deletion-restore-and-purge).
 
 Full API documentation available at `/docs` (Swagger UI) or `/redoc`.
 
@@ -669,24 +723,36 @@ fastsmtp db revision -m "Add new table"
 
 #### User Management
 
+Users and domains are addressed by name; every command resolves the *live* entry, so a
+name is reusable right after a delete. `restore` and `delete --purge` take `--id <uuid>`
+when several deleted entries share the name.
+
 ```bash
-# Create a new user
-fastsmtp user create alice alice@example.com
+# Create a new user (only the username is required)
+fastsmtp user create alice --email alice@example.com
 
 # List all users
 fastsmtp user list
 
-# Grant superuser privileges
-fastsmtp user set-superuser alice
+# Include deleted (restorable) users
+fastsmtp user list --include-deleted
 
-# Revoke superuser privileges
-fastsmtp user set-superuser alice --revoke
+# Grant or revoke superuser privileges
+fastsmtp user set-superuser alice --enable
+fastsmtp user set-superuser alice --disable
 
 # Generate API key for user
 fastsmtp user generate-key alice
 
-# Delete a user
+# Delete a user (soft; API keys are revoked for good)
 fastsmtp user delete alice
+
+# Restore a deleted user (keys are not restored)
+fastsmtp user restore alice
+fastsmtp user restore alice --id 3f1c...
+
+# Permanently remove an already-deleted user
+fastsmtp user delete alice --purge
 ```
 
 #### Domain Management
@@ -698,6 +764,9 @@ fastsmtp domain create example.com
 # List all domains
 fastsmtp domain list
 
+# Include deleted (restorable) domains
+fastsmtp domain list --include-deleted
+
 # Add a member to domain
 fastsmtp domain add-member example.com alice --role owner
 fastsmtp domain add-member example.com bob --role admin
@@ -706,8 +775,14 @@ fastsmtp domain add-member example.com charlie --role member
 # Remove member from domain
 fastsmtp domain remove-member example.com charlie
 
-# Delete a domain
+# Delete a domain (soft; recipients go with it, queued deliveries are cancelled)
 fastsmtp domain delete example.com
+
+# Restore a deleted domain and the recipients deleted with it
+fastsmtp domain restore example.com
+
+# Permanently remove an already-deleted domain
+fastsmtp domain delete example.com --purge
 ```
 
 #### Maintenance
@@ -721,6 +796,11 @@ fastsmtp cleanup --dry-run
 
 # Override retention period
 fastsmtp cleanup --older-than 30d
+
+# Permanently remove rows deleted longer ago than FASTSMTP_SOFT_DELETE_RETENTION_DAYS
+fastsmtp purge-deleted
+fastsmtp purge-deleted --dry-run
+fastsmtp purge-deleted --older-than 30d
 
 # Show current configuration
 fastsmtp show-config
@@ -763,29 +843,45 @@ fsmtp auth whoami
 # List your API keys
 fsmtp auth keys
 
+# Also show deleted and retired keys (keys cannot be restored). Keys retired before
+# v0.5.0 carry no deletion time and show as "retired" in the Deleted column
+fsmtp auth keys --include-deleted
+
 # Create a new API key (optionally expiring after N days)
 fsmtp auth create-key "CI/CD" --expires 90
 
 # Rotate an API key
 fsmtp auth rotate-key <key-id>
 
-# Delete an API key
+# Delete an API key (cannot be restored; create or rotate instead)
 fsmtp auth delete-key <key-id>
 ```
 
 #### User Management
 
-Every command in this group requires a superuser API key. Accounts have no password —
-they authenticate with API keys — so no command here takes one. `users update` sends only
+Every command in this group requires a superuser API key. Accounts have no password  - 
+they authenticate with API keys - so no command here takes one. `users update` sends only
 the options you name; an omitted flag leaves that column untouched, while `--email ''`
 clears the stored address (the CLI sends an explicit JSON null).
+
+Deletes are soft across `users`, `domain` and `recipient`: the entry is hidden and
+restorable with the matching `restore` command, which each delete prints
+(`Restore with: fsmtp domain restore <id>`); `--include-deleted` shows deleted entries
+in `list`/`get` with a `Deleted` column, and `delete --purge` (superuser) permanently
+removes an entry that is already deleted, after its own
+`Permanently delete domain <id>? This cannot be undone.` prompt. API keys cannot be
+restored. See [Remote CLI](docs/cli/fsmtp.md) for the full output of each command.
 
 ```bash
 # List all users
 fsmtp users list
 
-# Get user details
+# Include deleted (restorable) users
+fsmtp users list --include-deleted
+
+# Get user details (a deleted user is not found without --include-deleted)
 fsmtp users get <user-id>
+fsmtp users get <user-id> --include-deleted
 
 # Create a user (only the username is required)
 fsmtp users create alice --email alice@example.com
@@ -804,8 +900,14 @@ fsmtp users update <user-id> --inactive
 fsmtp users update <user-id> --superuser
 fsmtp users update <user-id> --no-superuser
 
-# Delete a user (prompts; --force skips the prompt)
+# Delete a user (prompts; --force skips the prompt). Soft: API keys are revoked for good
 fsmtp users delete <user-id>
+
+# Restore a deleted user. API keys revoked at deletion are not restored; create new keys
+fsmtp users restore <user-id>
+
+# Permanently remove an already-deleted user (superuser)
+fsmtp users delete <user-id> --purge
 ```
 
 #### Domain Management
@@ -818,8 +920,12 @@ off entirely leaves the setting untouched.
 # List domains you have access to
 fsmtp domain list
 
-# Get domain details
+# Include deleted domains (all for a superuser, those you own otherwise)
+fsmtp domain list --include-deleted
+
+# Get domain details (a deleted domain is not found without --include-deleted; owner only)
 fsmtp domain get <domain-id>
+fsmtp domain get <domain-id> --include-deleted
 
 # Create a new domain
 fsmtp domain create example.com
@@ -834,8 +940,14 @@ fsmtp domain update <domain-id> --verify-dkim true --reject-dkim-fail false
 # Stop overriding the server-wide raw-preservation default
 fsmtp domain update <domain-id> --preserve-raw-message inherit
 
-# Delete a domain
+# Delete a domain (owner). Soft: recipients go with it, queued deliveries are cancelled
 fsmtp domain delete <domain-id>
+
+# Restore a deleted domain and the recipients deleted with it (owner)
+fsmtp domain restore <domain-id>
+
+# Permanently remove an already-deleted domain (superuser)
+fsmtp domain delete <domain-id> --purge
 
 # Manage domain members
 fsmtp domain member list <domain-id>
@@ -855,8 +967,12 @@ Recipients live under a domain, so every command takes the domain ID first.
 # List recipients for a domain
 fsmtp recipient list <domain-id>
 
-# Get recipient details
+# Include deleted recipients (admin)
+fsmtp recipient list <domain-id> --include-deleted
+
+# Get recipient details (a deleted recipient is not found without --include-deleted)
 fsmtp recipient get <domain-id> <recipient-id>
+fsmtp recipient get <domain-id> <recipient-id> --include-deleted
 
 # Create a recipient with webhook (omit --local for a catch-all)
 fsmtp recipient create <domain-id> https://n8n.example.com/webhook/email --local support
@@ -870,8 +986,14 @@ fsmtp recipient create <domain-id> https://n8n.example.com/webhook/email \
 fsmtp recipient update <domain-id> <recipient-id> \
   --webhook https://new-webhook.example.com/email
 
-# Delete recipient
+# Delete recipient (soft; its pending and failed deliveries are cancelled)
 fsmtp recipient delete <domain-id> <recipient-id>
+
+# Restore a deleted recipient (the domain itself must not be deleted)
+fsmtp recipient restore <domain-id> <recipient-id>
+
+# Permanently remove an already-deleted recipient (superuser)
+fsmtp recipient delete <domain-id> <recipient-id> --purge
 ```
 
 #### Rule Management
@@ -944,10 +1066,17 @@ fsmtp ops test-webhook https://webhook.site/xxx
 fsmtp ops log list <domain-id>
 fsmtp ops log list <domain-id> --status failed --limit 50
 
+# Deliveries cancelled because their recipient or domain was deleted
+fsmtp ops log list <domain-id> --status cancelled
+
+# Read the history of a deleted domain (owner or superuser); this does not list
+# deleted log rows
+fsmtp ops log list <domain-id> --include-deleted
+
 # Get delivery log details
 fsmtp ops log get <log-id>
 
-# Retry a failed delivery
+# Retry a failed, exhausted or cancelled delivery
 fsmtp ops log retry <log-id>
 ```
 
@@ -965,7 +1094,7 @@ The rule engine allows conditional processing of emails based on various attribu
 - `equals`
 - `contains`
 - `starts_with`, `ends_with`
-- `regex` — [RE2 syntax](https://github.com/google/re2/wiki/Syntax), linear-time by
+- `regex` - [RE2 syntax](https://github.com/google/re2/wiki/Syntax), linear-time by
   construction (no ReDoS); backreferences and lookaround are not supported
 - `exists`
 
