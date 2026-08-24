@@ -7,20 +7,39 @@ import pytest
 import pytest_asyncio
 from fastsmtp.db.models import Domain, Recipient
 from httpx import AsyncClient
+from sqlalchemy import false
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@pytest_asyncio.fixture
+async def test_domain(test_session: AsyncSession) -> Domain:
+    """Create a test domain (the schema is rebuilt fresh for every test)."""
+    domain = Domain(domain_name="recipients-extended-test.com", is_enabled=True)
+    test_session.add(domain)
+    await test_session.commit()
+    await test_session.refresh(domain)
+    return domain
+
+
+async def _seed_recipient(
+    session: AsyncSession, domain: Domain, local_part: str | None, **overrides: object
+) -> Recipient:
+    """Insert a committed recipient row directly, bypassing the API."""
+    recipient = Recipient(
+        domain_id=domain.id,
+        local_part=local_part,
+        webhook_url="https://example.com/hook",
+        is_enabled=True,
+        **overrides,
+    )
+    session.add(recipient)
+    await session.commit()
+    await session.refresh(recipient)
+    return recipient
 
 
 class TestRecipientsUpdateExtended:
     """Extended tests for recipient update operations."""
-
-    @pytest_asyncio.fixture
-    async def test_domain(self, test_session: AsyncSession) -> Domain:
-        """Create a test domain."""
-        domain = Domain(domain_name="recipients-update-test.com", is_enabled=True)
-        test_session.add(domain)
-        await test_session.commit()
-        await test_session.refresh(domain)
-        return domain
 
     @pytest.mark.asyncio
     async def test_update_recipient_local_part(
@@ -277,3 +296,83 @@ class TestRecipientsUpdateExtended:
         )
         assert response.status_code == 200
         assert response.json()["local_part"] == "sales"
+
+
+class TestRecipientConflictRace:
+    """The loser of a concurrent duplicate write must get the pre-check's 409.
+
+    create/update are check-then-flush, so two concurrent requests can both
+    pass the duplicate check; the loser then hits a unique index at flush
+    time. These tests simulate the loser deterministically by patching the
+    pre-check filter to match nothing, which is exactly what the loser's
+    stale read saw.
+    """
+
+    @pytest_asyncio.fixture
+    def losing_precheck(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the duplicate pre-check see no conflict, as the race's loser does."""
+        import fastsmtp.api.recipients as recipients_api
+
+        monkeypatch.setattr(recipients_api, "_conflicting_local_part", lambda local_part: false())
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_create_returns_409(
+        self,
+        auth_client: AsyncClient,
+        test_domain: Domain,
+        test_session: AsyncSession,
+        losing_precheck: None,
+    ):
+        """A create that loses the race gets 409, not a 500 from the index."""
+        await _seed_recipient(test_session, test_domain, "raced")
+
+        response = await auth_client.post(
+            f"/api/v1/domains/{test_domain.id}/recipients",
+            json={"local_part": "raced", "webhook_url": "https://example.com/other"},
+        )
+        assert response.status_code == 409
+        assert "already exists" in response.json()["detail"]
+
+        # The translated conflict must leave the app serviceable
+        fresh = await auth_client.post(
+            f"/api/v1/domains/{test_domain.id}/recipients",
+            json={"local_part": "unraced", "webhook_url": "https://example.com/other"},
+        )
+        assert fresh.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_catchall_create_returns_409(
+        self,
+        auth_client: AsyncClient,
+        test_domain: Domain,
+        test_session: AsyncSession,
+        losing_precheck: None,
+    ):
+        """The catch-all index (ix_recipients_domain_catchall) translates too."""
+        await _seed_recipient(test_session, test_domain, None)
+
+        response = await auth_client.post(
+            f"/api/v1/domains/{test_domain.id}/recipients",
+            json={"local_part": "*", "webhook_url": "https://example.com/other"},
+        )
+        assert response.status_code == 409
+        assert "catch-all" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_update_returns_409(
+        self,
+        auth_client: AsyncClient,
+        test_domain: Domain,
+        test_session: AsyncSession,
+        losing_precheck: None,
+    ):
+        """An update that loses the race gets 409, not a 500 from the index."""
+        await _seed_recipient(test_session, test_domain, "keep")
+        target = await _seed_recipient(test_session, test_domain, "target")
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{test_domain.id}/recipients/{target.id}",
+            json={"local_part": "keep"},
+        )
+        assert response.status_code == 409
+        assert "already exists" in response.json()["detail"]
