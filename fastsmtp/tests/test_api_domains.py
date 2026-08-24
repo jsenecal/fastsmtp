@@ -162,7 +162,7 @@ class TestDeleteDomain:
     async def test_delete_domain_success(
         self, auth_client: AsyncClient, test_session: AsyncSession
     ):
-        """Test deleting a domain."""
+        """Test deleting a domain soft-deletes it: the row stays, tombstoned."""
         domain = Domain(domain_name="deletetest.com", is_enabled=True)
         test_session.add(domain)
         await test_session.commit()
@@ -170,7 +170,11 @@ class TestDeleteDomain:
 
         response = await auth_client.delete(f"/api/v1/domains/{domain.id}")
         assert response.status_code == 200
-        assert "deleted" in response.json()["message"]
+        assert response.json()["message"] == "Domain deletetest.com deleted"
+
+        await test_session.refresh(domain)
+        assert domain.deleted_at is not None
+        assert (await auth_client.get(f"/api/v1/domains/{domain.id}")).status_code == 404
 
 
 class TestDomainMembers:

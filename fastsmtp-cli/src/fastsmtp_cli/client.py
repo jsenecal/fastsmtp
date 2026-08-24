@@ -271,9 +271,13 @@ class FastSMTPClient:
 
     # Domain endpoints
 
-    def list_domains(self) -> list[dict]:
-        """List domains the user has access to."""
-        return self.get("/api/v1/domains")
+    def list_domains(self, include_deleted: bool = False) -> list[dict]:
+        """List domains the user has access to.
+
+        ``include_deleted`` also returns soft-deleted ones: all of them for a
+        superuser, only those the caller owns otherwise.
+        """
+        return self.get("/api/v1/domains", params=_flags(include_deleted=include_deleted))
 
     def create_domain(
         self,
@@ -302,9 +306,11 @@ class FastSMTPClient:
             data["preserve_raw_message"] = preserve_raw_message
         return self.post("/api/v1/domains", json=data)
 
-    def get_domain(self, domain_id: UUID | str) -> dict:
-        """Get a domain by ID."""
-        return self.get(f"/api/v1/domains/{domain_id}")
+    def get_domain(self, domain_id: UUID | str, include_deleted: bool = False) -> dict:
+        """Get a domain by ID. A soft-deleted domain is 404 unless ``include_deleted``."""
+        return self.get(
+            f"/api/v1/domains/{domain_id}", params=_flags(include_deleted=include_deleted)
+        )
 
     def update_domain(
         self,
@@ -336,9 +342,13 @@ class FastSMTPClient:
                 data[field] = value
         return self.put(f"/api/v1/domains/{domain_id}", json=data)
 
-    def delete_domain(self, domain_id: UUID | str) -> None:
-        """Delete a domain."""
-        self.delete(f"/api/v1/domains/{domain_id}")
+    def delete_domain(self, domain_id: UUID | str, purge: bool = False) -> None:
+        """Soft-delete a domain; ``purge`` permanently removes an already-deleted one."""
+        self.delete(f"/api/v1/domains/{domain_id}", params=_flags(purge=purge))
+
+    def restore_domain(self, domain_id: UUID | str) -> dict:
+        """Restore a soft-deleted domain and the recipients deleted with it."""
+        return self.post(f"/api/v1/domains/{domain_id}/restore")
 
     # Domain members
 
