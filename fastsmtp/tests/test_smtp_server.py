@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
-from fastsmtp.db.models import Domain, Recipient
+from fastsmtp.db.models import Domain, Recipient, Rule, RuleSet
 from fastsmtp.db.soft_delete import soft_delete_domain, soft_delete_recipient
 from fastsmtp.smtp.server import (
     FastSMTPHandler,
@@ -372,7 +372,7 @@ class TestLookupRecipientTombstones:
 
         assert run.created == 1
         run.rules.assert_awaited_once()
-        assert run.rules.await_args.kwargs["domain_id"] == domain.id
+        assert run.rules.await_args.kwargs["domain"].id == domain.id
         run.enqueue.assert_awaited_once()
         assert run.enqueue.await_args.kwargs["webhook_url"] == "https://example.com/sales"
 
@@ -426,6 +426,91 @@ class TestLookupRecipientTombstones:
         assert run.created == 0
         run.rules.assert_not_awaited()
         run.enqueue.assert_not_awaited()
+
+    # -- handler: the window between the lookup and the rules query ------
+
+    @staticmethod
+    async def _add_rule(session: AsyncSession, domain: Domain, **rule: object) -> None:
+        """Give the domain one enabled ruleset with a rule matching every message."""
+        ruleset = RuleSet(domain_id=domain.id, name="After lookup", priority=10, is_enabled=True)
+        session.add(ruleset)
+        await session.flush()
+        session.add(
+            Rule(ruleset_id=ruleset.id, order=0, field="from", operator="exists", value="", **rule)
+        )
+        await session.commit()
+
+    @staticmethod
+    def _tombstone_after_lookup(session: AsyncSession, domain: Domain):
+        """Patch ``lookup_recipient`` so the domain is tombstoned the moment it answers.
+
+        Reproduces the READ COMMITTED window inside
+        ``_process_and_persist_message``: the lookup has accepted the message
+        for a live domain, and the tombstone commits before the rules query
+        runs on the same session.
+        """
+
+        async def lookup_then_tombstone(address: str, db_session: AsyncSession):
+            found = await lookup_recipient(address, db_session)
+            await soft_delete_domain(session, domain)
+            await session.commit()
+            return found
+
+        return patch("fastsmtp.smtp.server.lookup_recipient", lookup_then_tombstone)
+
+    @pytest.mark.asyncio
+    async def test_data_drops_by_rule_when_domain_tombstoned_after_lookup(
+        self,
+        test_session: AsyncSession,
+        session_factory,
+        test_settings: Settings,
+        run_smtp_handler,
+        domain,
+    ):
+        """A domain tombstoned after the lookup still gets its drop rule applied.
+
+        The lookup is the one liveness decision for the message. If the engine
+        made a second one it would see the tombstone, find no rulesets, and
+        the message the lookup already accepted would be enqueued untagged -
+        and delivered the moment the domain is restored.
+        """
+        await self._add_rule(test_session, domain, action="drop")
+        handler = FastSMTPHandler(test_settings)
+        envelope = Envelope()
+        assert await self._rcpt(handler, session_factory, envelope, f"sales@{self.DOMAIN}") == (
+            "250 OK"
+        )
+
+        with self._tombstone_after_lookup(test_session, domain):
+            run = await run_smtp_handler(handler, envelope)
+
+        run.rules.assert_awaited_once()
+        assert run.created == 0
+        run.enqueue.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_data_tags_by_rule_when_domain_tombstoned_after_lookup(
+        self,
+        test_session: AsyncSession,
+        session_factory,
+        test_settings: Settings,
+        run_smtp_handler,
+        domain,
+    ):
+        """Positive counterpart: the tag rule's outcome reaches the enqueued payload."""
+        await self._add_rule(test_session, domain, action="tag", add_tags=["after-lookup"])
+        handler = FastSMTPHandler(test_settings)
+        envelope = Envelope()
+        assert await self._rcpt(handler, session_factory, envelope, f"sales@{self.DOMAIN}") == (
+            "250 OK"
+        )
+
+        with self._tombstone_after_lookup(test_session, domain):
+            run = await run_smtp_handler(handler, envelope)
+
+        run.rules.assert_awaited_once()
+        assert run.created == 1
+        assert [payload["tags"] for payload in run.payloads] == [["after-lookup"]]
 
 
 class TestLookupRecipientSubaddress:

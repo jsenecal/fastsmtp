@@ -419,7 +419,7 @@ class TestEvaluateRulesAsync:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_rules.id,
+            domain=domain_with_rules,
             message=msg,
             payload={},
         )
@@ -439,7 +439,7 @@ class TestEvaluateRulesAsync:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_rules.id,
+            domain=domain_with_rules,
             message=msg,
             payload={},
         )
@@ -488,7 +488,7 @@ class TestEvaluateRulesAsync:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_drop_rule.id,
+            domain=domain_with_drop_rule,
             message=msg,
             payload={},
         )
@@ -537,7 +537,7 @@ class TestEvaluateRulesAsync:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_webhook_override.id,
+            domain=domain_with_webhook_override,
             message=msg,
             payload={},
         )
@@ -597,7 +597,7 @@ class TestEvaluateRulesAsync:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_stop_on_match.id,
+            domain=domain_with_stop_on_match,
             message=msg,
             payload={},
         )
@@ -608,33 +608,34 @@ class TestEvaluateRulesAsync:
         assert "second" not in result.tags
 
     @pytest.mark.asyncio
-    async def test_evaluate_rules_ignores_tombstoned_domain(
-        self, test_session: AsyncSession, domain_with_webhook_override: Domain
+    async def test_evaluate_rules_does_not_redecide_liveness(
+        self, test_session: AsyncSession, domain_with_drop_rule: Domain
     ):
-        """A tombstoned domain's rules are dormant: nothing matches, no override leaks.
+        """The engine evaluates the domain it is handed, tombstoned or not.
 
-        Today the engine only runs after ``lookup_recipient`` has already
-        rejected the domain, so this path is unreachable from SMTP. The pin
-        exists for the next caller, who will not remember - a dead domain's
-        rules still carry ``webhook_url_override``.
+        Liveness is decided once per message, by whoever loaded the domain
+        (``lookup_recipient`` on the SMTP path). A second decision here would
+        open a READ COMMITTED window: a domain tombstoned after the lookup
+        would have no rulesets, its drop rule would be skipped, and a message
+        the lookup already accepted would be enqueued - to be delivered the
+        moment the domain is restored. A tombstoned domain's rules stay
+        dormant because nothing loads a tombstoned domain, not because the
+        engine checks again.
         """
-        await soft_delete_domain(test_session, domain_with_webhook_override)
+        await soft_delete_domain(test_session, domain_with_drop_rule)
         await test_session.commit()
 
         msg = EmailMessage()
-        msg["From"] = "important@vip.com"
+        msg["From"] = "spammer@spam.com"
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_webhook_override.id,
+            domain=domain_with_drop_rule,
             message=msg,
             payload={},
         )
 
-        assert result.matches == []
-        assert result.tags == []
-        assert result.action == "forward"
-        assert result.webhook_url_override is None
+        assert result.should_drop is True
 
 
 class TestGetDomainAuthSettings:
@@ -674,17 +675,6 @@ class TestGetDomainAuthSettings:
         """Test getting auth settings for non-existent domain."""
         fake_id = uuid.uuid4()
         result = await get_domain_auth_settings(test_session, fake_id)
-        assert result == (None, None, None, None)
-
-    @pytest.mark.asyncio
-    async def test_get_auth_settings_tombstoned_domain(
-        self, test_session: AsyncSession, domain_with_auth_settings: Domain
-    ):
-        """A tombstoned domain reads as absent: every override falls back to global."""
-        await soft_delete_domain(test_session, domain_with_auth_settings)
-        await test_session.commit()
-
-        result = await get_domain_auth_settings(test_session, domain_with_auth_settings.id)
         assert result == (None, None, None, None)
 
 
@@ -769,7 +759,7 @@ class TestPreserveRawRules:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_preserve_rule.id,
+            domain=domain_with_preserve_rule,
             message=msg,
             payload={},
         )
@@ -788,7 +778,7 @@ class TestPreserveRawRules:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_preserve_rule.id,
+            domain=domain_with_preserve_rule,
             message=msg,
             payload={},
         )
@@ -807,7 +797,7 @@ class TestPreserveRawRules:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_preserve_rule.id,
+            domain=domain_with_preserve_rule,
             message=msg,
             payload={},
         )
@@ -826,7 +816,7 @@ class TestPreserveRawRules:
 
         result = await evaluate_rules(
             session=test_session,
-            domain_id=domain_with_preserve_rule.id,
+            domain=domain_with_preserve_rule,
             message=msg,
             payload={},
         )
