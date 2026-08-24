@@ -147,11 +147,12 @@ async def test_engine(test_settings: Settings):
 
 @pytest_asyncio.fixture
 async def session_factory(test_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    """Session factory bound to the test engine, as the app builds its own.
+    """Session factory bound to the test engine.
 
-    ``expire_on_commit=False`` matters: fixtures hand ORM rows to tests across
-    a commit, and the SMTP handler reads ``domain.domain_name`` after the
-    queue commit. The one place the shape is spelled, so it cannot drift.
+    ``expire_on_commit=False`` as in the app's own factory: fixtures commit
+    and then hand the ORM rows to tests, which read their attributes without
+    another round trip. The one place the shape is spelled, so it cannot
+    drift.
     """
     return async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -174,7 +175,7 @@ class SMTPHandlerRun:
     raw: bytes
     """The exact bytes the handler received, for archive assertions."""
     rules: AsyncMock
-    """Spy over ``evaluate_rules`` (wrapping the real engine unless stubbed)."""
+    """Spy wrapping the real ``evaluate_rules``; the rules did run."""
     enqueue: AsyncMock
     """Spy over ``enqueue_delivery``; nothing reaches the queue table."""
 
@@ -192,9 +193,9 @@ def run_smtp_handler(session_factory: async_sessionmaker[AsyncSession]):
     makes its routing, rules and preservation decisions, so several modules
     drive it directly. Building the message and patching the session factory
     and the queue is identical for all of them; this owns that and hands back
-    the spies. ``rules`` replaces the rules engine when given (a plain
-    ``AsyncMock`` stubs it); by default the real engine runs against the
-    database and is merely observed.
+    the spies. The real rules engine runs against the database and is only
+    observed, so a test can assert both what it was handed and what it
+    decided.
 
     Exposed as a fixture rather than a module-level function because the tests
     directory is not an importable package.
@@ -205,7 +206,6 @@ def run_smtp_handler(session_factory: async_sessionmaker[AsyncSession]):
         envelope: Envelope,
         *,
         subject: str = "Handler run",
-        rules: AsyncMock | None = None,
     ) -> SMTPHandlerRun:
         message_id = "<handler-run@external.com>"
         raw = (
@@ -215,7 +215,7 @@ def run_smtp_handler(session_factory: async_sessionmaker[AsyncSession]):
             b"Body\r\n"
         )
         envelope.content = raw
-        rules_spy = rules if rules is not None else AsyncMock(wraps=evaluate_rules)
+        rules_spy = AsyncMock(wraps=evaluate_rules)
         enqueue_spy = AsyncMock()
 
         with (
