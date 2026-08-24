@@ -74,7 +74,7 @@ async def create_user(
     """Create a new user (superuser only)."""
     auth.require_superuser()
 
-    if await live_value_taken(session, User.username, data.username):
+    if await live_value_taken(session, User, User.username, data.username):
         raise _duplicate_conflict()
 
     user = User(
@@ -115,9 +115,13 @@ async def update_user(
 
     user = await _get_user_or_404(session, user_id)
 
-    # Duplicate username pre-check; the user's own row may keep its name.
-    if data.username and await live_value_taken(
-        session, User.username, data.username, exclude_id=user.id
+    # Duplicate pre-check only when the username actually changes: a full
+    # representation PUT carries the current name, and querying the index for
+    # it would be a wasted round trip on every such update.
+    if (
+        data.username
+        and data.username != user.username
+        and await live_value_taken(session, User, User.username, data.username, exclude_id=user.id)
     ):
         raise _duplicate_conflict()
 
@@ -181,7 +185,7 @@ async def restore_user(
     user = await _get_user_or_404(session, user_id, include_deleted=True)
     require_tombstoned(user, "User is not deleted")
 
-    if await live_value_taken(session, User.username, user.username):
+    if await live_value_taken(session, User, User.username, user.username):
         raise _duplicate_conflict()
 
     await soft_delete.restore_user(session, user)

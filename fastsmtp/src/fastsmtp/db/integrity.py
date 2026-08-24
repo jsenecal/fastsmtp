@@ -21,9 +21,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
+from fastsmtp.db.models import Domain, User
 
-async def live_value_taken(
+
+async def live_value_taken[Named: (User, Domain)](
     session: AsyncSession,
+    model: type[Named],
     column: InstrumentedAttribute[str],
     value: str,
     *,
@@ -31,16 +34,22 @@ async def live_value_taken(
 ) -> bool:
     """Duplicate pre-check for a name column that is unique over live rows.
 
-    ``column`` belongs to a ``SoftDeleteMixin`` model (``User.username``,
-    ``Domain.domain_name``). Mirrors what the database enforces: the name
-    indexes are partial over live rows (migration 008), so a tombstone never
-    blocks its name. ``exclude_id`` leaves out the row being updated, which
-    holds its own name legitimately. The check is check-then-flush; the index
-    is the backstop, translated by :func:`is_unique_violation`, and every
-    create, update and restore path in the routers and the CLI shares this
-    one predicate so it can never drift from the index in only one of them.
+    ``model`` is taken explicitly, bound to the models whose name index is
+    partial over live rows (``User.username``, ``Domain.domain_name``), so a
+    column from a model without ``live()`` is a type error rather than an
+    ``AttributeError`` at request time. Mirrors what the database enforces:
+    a tombstone never blocks its name. ``exclude_id`` leaves out the row
+    being updated, which holds its own name legitimately. The check is
+    check-then-flush; the index is the backstop, translated by
+    :func:`is_unique_violation`.
+
+    The user and domain create, update and restore paths in the routers and
+    the CLI all share this one predicate, so it cannot drift from the index
+    in only one of them. Recipients are the deliberate exception:
+    ``api.recipients._local_part_taken`` stays its own query because the
+    catch-all is ``local_part IS NULL``, which no ``column == value`` can
+    express.
     """
-    model = column.class_
     stmt = select(model.id).where(column == value, model.live())
     if exclude_id is not None:
         stmt = stmt.where(model.id != exclude_id)

@@ -18,6 +18,8 @@ from fastsmtp.webhook.dispatcher import (
     send_webhook,
 )
 from fastsmtp.webhook.queue import (
+    FailureOutcome,
+    RetryOutcome,
     check_queue_backpressure,
     compute_payload_hash,
     enqueue_delivery,
@@ -509,7 +511,7 @@ class TestMarkFailed:
         self, test_session: AsyncSession, test_delivery: DeliveryLog, test_settings: Settings
     ):
         """Test that mark_failed schedules a retry."""
-        await mark_failed(
+        outcome = await mark_failed(
             test_session,
             test_delivery.id,
             "Connection refused",
@@ -519,6 +521,7 @@ class TestMarkFailed:
         await test_session.flush()
         await test_session.refresh(test_delivery)
 
+        assert outcome is FailureOutcome.RETRY_SCHEDULED
         assert test_delivery.status == "failed"
         assert test_delivery.attempts == 1
         assert test_delivery.last_error == "Connection refused"
@@ -561,7 +564,7 @@ class TestMarkFailed:
         test_session.add(delivery)
         await test_session.flush()
 
-        await mark_failed(
+        outcome = await mark_failed(
             test_session,
             delivery.id,
             "Final failure",
@@ -571,6 +574,7 @@ class TestMarkFailed:
         await test_session.flush()
         await test_session.refresh(delivery)
 
+        assert outcome is FailureOutcome.EXHAUSTED
         assert delivery.status == "exhausted"
         assert delivery.attempts == test_settings.webhook_max_retries
         assert delivery.next_retry_at is None
@@ -609,20 +613,20 @@ class TestRetryDelivery:
         await test_session.flush()
         await test_session.refresh(delivery)
 
-        assert result is not None
+        assert result is RetryOutcome.REARMED
         assert delivery.status == "pending"
         assert delivery.next_retry_at is not None
 
     @pytest.mark.asyncio
-    async def test_retry_returns_none_for_nonexistent(self, test_session: AsyncSession):
-        """Test that retry_delivery returns None for nonexistent delivery."""
+    async def test_retry_reports_not_found_for_nonexistent(self, test_session: AsyncSession):
+        """A missing row is told apart from a refusal, so the API can keep its 404."""
         result = await retry_delivery(test_session, uuid.uuid4())
-        assert result is None
+        assert result is RetryOutcome.NOT_FOUND
 
     @pytest.mark.asyncio
     async def test_retry_refuses_delivered(self, test_session: AsyncSession):
         """A delivered delivery is not re-armed, and the answer is the same
-        ``None`` as for every other refusal: the guarded UPDATE matched nothing."""
+        refusal as for a tombstone: the guarded UPDATE matched nothing."""
         domain = Domain(
             id=uuid.uuid4(),
             domain_name="skip-test.com",
@@ -650,7 +654,7 @@ class TestRetryDelivery:
         result = await retry_delivery(test_session, delivery.id)
         await test_session.refresh(delivery)
 
-        assert result is None
+        assert result is RetryOutcome.REFUSED
         assert delivery.status == "delivered"
 
 
@@ -1148,8 +1152,48 @@ async def make_claimed_delivery(
     return delivery
 
 
+def deliveries_metric(status: str) -> float:
+    return WEBHOOK_DELIVERIES_TOTAL.labels(status=status)._value.get()
+
+
 def cancelled_metric() -> float:
-    return WEBHOOK_DELIVERIES_TOTAL.labels(status="cancelled")._value.get()
+    return deliveries_metric("cancelled")
+
+
+class TestFailureMetricLabels:
+    """``exhausted`` counts the attempt that exhausted the delivery, no other.
+
+    ``mark_failed`` synchronizes the in-session object with the UPDATE, so
+    ``delivery.attempts`` is already the new count when it returns; deriving
+    the label from ``attempts + 1`` afterwards fired ``exhausted`` one attempt
+    early and undercounted ``failed``. The dispatcher takes the outcome from
+    ``mark_failed`` instead.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("attempts", "label"), [(1, "failed"), (2, "exhausted")], ids=["failed", "exhausted"]
+    )
+    async def test_label_follows_the_recorded_outcome(
+        self, test_session: AsyncSession, test_settings: Settings, attempts: int, label: str
+    ):
+        settings = test_settings.model_copy(update={"webhook_max_retries": 3})
+        delivery = await make_claimed_delivery(test_session, with_recipient=False)
+        delivery.attempts = attempts
+        await test_session.flush()
+        delivery = await load_delivery_with_recipient(test_session, delivery.id)
+        before = {name: deliveries_metric(name) for name in ("failed", "exhausted")}
+
+        with patch("fastsmtp.webhook.dispatcher.send_webhook") as mock_send:
+            mock_send.return_value = (False, 500, "Server Error")
+            await process_delivery(delivery, settings, test_session)
+
+        after = {name: deliveries_metric(name) for name in ("failed", "exhausted")}
+        assert after[label] == before[label] + 1
+        untouched = "exhausted" if label == "failed" else "failed"
+        assert after[untouched] == before[untouched]
+        await test_session.refresh(delivery)
+        assert delivery.attempts == attempts + 1
 
 
 class TestDispatcherGuard:

@@ -21,10 +21,13 @@ resurrect itself as ``failed`` and be retried. Residual race: a delivery whose
 HTTP call was already in flight when the tombstone committed completes once;
 its status is then whatever the guards allow, never a retry. Only
 :func:`retry_delivery` (the explicit operator endpoint) re-arms a cancelled
-delivery.
+delivery, and only while its recipient row still exists: a purge nulls
+``recipient_id``, and a delivery with no recipient has no headers to send
+with, so ``cancelled`` is terminal for it.
 """
 
 import asyncio
+import enum
 import hashlib
 import json
 import logging
@@ -33,7 +36,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ColumnElement, exists, or_, select, update
+from sqlalchemy import ColumnElement, and_, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -53,9 +56,10 @@ logger = logging.getLogger(__name__)
 QUEUED_STATUSES = (DeliveryStatus.PENDING, DeliveryStatus.FAILED)
 
 # The statuses the explicit retry endpoint re-arms. ``cancelled`` is here
-# because that endpoint is the one path that revives a cancelled delivery, and
-# only once its recipient and domain are live again (the UPDATE in
-# retry_delivery enforces that). The API answers its 400 from this tuple.
+# because that endpoint is the one path that revives a cancelled delivery.
+# The API answers its 400 from this tuple; the further conditions on a
+# cancelled row (recipient and domain live, recipient row still present) are
+# the retry UPDATE's, see _retryable().
 RETRYABLE_STATUSES = (
     DeliveryStatus.FAILED,
     DeliveryStatus.EXHAUSTED,
@@ -63,9 +67,41 @@ RETRYABLE_STATUSES = (
 )
 
 
+class RetryOutcome(enum.Enum):
+    """What :func:`retry_delivery` did, so the API can tell 404 from 409."""
+
+    REARMED = "rearmed"
+    NOT_FOUND = "not_found"
+    REFUSED = "refused"
+
+
+class FailureOutcome(enum.Enum):
+    """What :func:`mark_failed` recorded; the dispatcher's metric label follows it."""
+
+    RETRY_SCHEDULED = "retry_scheduled"
+    EXHAUSTED = "exhausted"
+    NOT_RECORDED = "not_recorded"  # cancelled under us, or no such row
+
+
 def _not_cancelled() -> ColumnElement[bool]:
     """Guard for UPDATEs that must not overwrite a sticky ``cancelled`` status."""
     return DeliveryLog.status != DeliveryStatus.CANCELLED
+
+
+def _retryable() -> ColumnElement[bool]:
+    """Status predicate of the retry UPDATE.
+
+    ``RETRYABLE_STATUSES``, except that a cancelled delivery also needs its
+    recipient row: a purge sets ``recipient_id`` NULL, and re-arming such a
+    row would hand the worker a delivery it cannot check and would post to
+    the snapshot URL without the recipient's authentication headers. Failed
+    and exhausted rows with ``recipient_id`` NULL (pre-0.5 hard deletes) keep
+    their old retry semantics.
+    """
+    return and_(
+        DeliveryLog.status.in_(RETRYABLE_STATUSES),
+        or_(_not_cancelled(), DeliveryLog.recipient_id.is_not(None)),
+    )
 
 
 def _recipient_and_domain_live() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
@@ -321,11 +357,14 @@ async def mark_failed(
     error: str,
     status_code: int | None = None,
     settings: Settings | None = None,
-) -> None:
+) -> FailureOutcome:
     """Mark a delivery as failed and schedule retry if applicable.
 
     A delivery cancelled while its request was in flight stays cancelled: no
-    retry is scheduled and no DLQ notification goes out.
+    retry is scheduled and no DLQ notification goes out. Returns what was
+    recorded; the dispatcher labels its metric from that rather than from the
+    object it holds, which the UPDATE has already synchronized to the new
+    attempt count.
     """
     settings = settings or get_settings()
 
@@ -336,11 +375,11 @@ async def mark_failed(
 
     if not delivery:
         logger.error(f"Delivery {delivery_id} not found")
-        return
+        return FailureOutcome.NOT_RECORDED
 
     if delivery.status == DeliveryStatus.CANCELLED:
         logger.info(f"Delivery {delivery_id} was cancelled; not recording the failure")
-        return
+        return FailureOutcome.NOT_RECORDED
 
     new_attempts = delivery.attempts + 1
 
@@ -393,16 +432,18 @@ async def mark_failed(
     await session.flush()
     if matched == 0:
         logger.info(f"Delivery {delivery_id} was cancelled under us; not recording the failure")
-        return
+        return FailureOutcome.NOT_RECORDED
 
-    # Send DLQ notification for exhausted deliveries (fire-and-forget)
-    if is_exhausted and settings.dlq_webhook_url:
-        # Update delivery object with new values for notification
-        delivery.attempts = new_attempts
-        delivery.last_error = error
-        delivery.last_status_code = status_code
+    if not is_exhausted:
+        return FailureOutcome.RETRY_SCHEDULED
+
+    # Send DLQ notification for exhausted deliveries (fire-and-forget). The
+    # object already carries the new attempts / last_error / last_status_code:
+    # execute_counted synchronized it with the UPDATE.
+    if settings.dlq_webhook_url:
         # Schedule as background task to not block the main flow
         asyncio.create_task(_send_dlq_notification(delivery, settings))
+    return FailureOutcome.EXHAUSTED
 
 
 async def cancel_pending_deliveries(
@@ -470,57 +511,50 @@ async def mark_cancelled(
 async def retry_delivery(
     session: AsyncSession,
     delivery_id: uuid.UUID,
-) -> DeliveryLog | None:
+) -> RetryOutcome:
     """Reset a delivery for immediate retry.
 
-    The UPDATE decides: it matches only a row in ``RETRYABLE_STATUSES`` whose
-    recipient and domain are live, by the claim query's own predicates. A
-    tombstone that lands between a caller's checks and this statement still
+    The UPDATE decides: it matches only a row that :func:`_retryable` accepts
+    (``RETRYABLE_STATUSES``; a cancelled row also needs its recipient row)
+    whose recipient and domain are live, by the claim query's own predicates.
+    A tombstone that lands between a caller's checks and this statement still
     blocks the retry, so there is no check-then-act window to exploit, and the
     worker can never be handed a delivery the retry endpoint re-armed for a
-    deleted endpoint.
+    deleted or purged recipient.
 
     Args:
         session: Database session
         delivery_id: Delivery ID to retry
 
     Returns:
-        The re-armed delivery, or ``None`` when nothing was re-armed: no such
-        delivery, a status outside ``RETRYABLE_STATUSES``, or a tombstoned
-        recipient or domain. The loaded row is not consulted for any of that,
-        since it may be stale; the UPDATE's row count is the one answer.
+        ``REARMED`` when the UPDATE matched; otherwise ``NOT_FOUND`` when no
+        such row exists, else ``REFUSED`` (a status outside the retryable set,
+        a cancelled row without a recipient, or a tombstoned recipient or
+        domain). No row is loaded before the UPDATE: an object this session
+        already holds may be stale, and the row count is the one answer. The
+        object, if held, is synchronized with the new state by "fetch".
     """
-    stmt = select(DeliveryLog).where(DeliveryLog.id == delivery_id)
-    result = await session.execute(stmt)
-    delivery = result.scalar_one_or_none()
-
-    if not delivery:
-        return None
-
     now = datetime.now(UTC)
     update_stmt = (
         update(DeliveryLog)
-        .where(
-            DeliveryLog.id == delivery_id,
-            DeliveryLog.status.in_(RETRYABLE_STATUSES),
-            *_recipient_and_domain_live(),
-        )
+        .where(DeliveryLog.id == delivery_id, _retryable(), *_recipient_and_domain_live())
         .values(
             status=DeliveryStatus.PENDING,
             next_retry_at=now,
             updated_at=now,  # Explicit update since onupdate doesn't trigger
         )
     )
-    # execute_counted synchronizes by "fetch", so the returned object already
-    # carries the new state; no refresh round trip.
     matched = await execute_counted(session, update_stmt)
     await session.flush()
-    if matched == 0:
-        logger.info(
-            f"Delivery {delivery_id} not re-armed: not in a retryable status, "
-            "or its recipient or domain is deleted"
-        )
-        return None
+    if matched:
+        logger.info(f"Delivery {delivery_id} queued for retry")
+        return RetryOutcome.REARMED
 
-    logger.info(f"Delivery {delivery_id} queued for retry")
-    return delivery
+    exists_stmt = select(DeliveryLog.id).where(DeliveryLog.id == delivery_id)
+    if (await session.execute(exists_stmt)).first() is None:
+        return RetryOutcome.NOT_FOUND
+    logger.info(
+        f"Delivery {delivery_id} not re-armed: not in a retryable status, "
+        "or its recipient or domain is deleted"
+    )
+    return RetryOutcome.REFUSED

@@ -277,7 +277,9 @@ class TestDomainConflictRace:
         """Make the duplicate pre-checks see no conflict, as the race's loser does."""
         import fastsmtp.api.domains as domains_api
 
-        async def name_is_free(session: AsyncSession, column, value, *, exclude_id=None) -> bool:
+        async def name_is_free(
+            session: AsyncSession, model, column, value, *, exclude_id=None
+        ) -> bool:
             return False
 
         monkeypatch.setattr(domains_api, "live_value_taken", name_is_free)

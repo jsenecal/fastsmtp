@@ -20,6 +20,7 @@ from fastsmtp.metrics.definitions import (
     WEBHOOK_DELIVERY_DURATION,
 )
 from fastsmtp.webhook.queue import (
+    FailureOutcome,
     get_pending_deliveries,
     mark_cancelled,
     mark_delivered,
@@ -193,15 +194,18 @@ async def process_delivery(
         await mark_delivered(session, delivery.id)
         WEBHOOK_DELIVERIES_TOTAL.labels(status="delivered").inc()
     else:
-        await mark_failed(
+        outcome = await mark_failed(
             session,
             delivery.id,
             error or "Unknown error",
             status_code,
             settings,
         )
-        # Check if this was the final attempt (exhausted)
-        if delivery.attempts + 1 >= settings.webhook_max_retries:
+        # The label follows what was recorded, not ``delivery.attempts``:
+        # mark_failed has already synchronized the object to the new count.
+        # An attempt that failed on a delivery cancelled under us still
+        # counts as failed - the request went out and failed.
+        if outcome is FailureOutcome.EXHAUSTED:
             WEBHOOK_DELIVERIES_TOTAL.labels(status="exhausted").inc()
         else:
             WEBHOOK_DELIVERIES_TOTAL.labels(status="failed").inc()

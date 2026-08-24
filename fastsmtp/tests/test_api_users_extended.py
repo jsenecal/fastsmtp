@@ -197,6 +197,43 @@ class TestUsersAuth:
         assert response.status_code == 401
 
 
+class TestUpdateUserPrecheck:
+    """The duplicate pre-check only runs when the username actually changes.
+
+    A full-representation PUT carries the current username; querying the
+    index for a name the row already holds is a wasted round trip on every
+    such update.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unchanged_username_skips_the_query(
+        self, auth_client: AsyncClient, test_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ):
+        import fastsmtp.api.users as users_api
+
+        checked: list[str] = []
+
+        async def record(session: AsyncSession, model, column, value, *, exclude_id=None) -> bool:
+            checked.append(value)
+            return False
+
+        monkeypatch.setattr(users_api, "live_value_taken", record)
+        user = User(username="steady", email="old@example.com", is_active=True)
+        test_session.add(user)
+        await test_session.commit()
+
+        same = await auth_client.put(
+            f"/api/v1/users/{user.id}", json={"username": "steady", "email": "new@example.com"}
+        )
+        assert same.status_code == 200
+        assert same.json()["email"] == "new@example.com"
+        assert checked == []
+
+        renamed = await auth_client.put(f"/api/v1/users/{user.id}", json={"username": "moved"})
+        assert renamed.status_code == 200
+        assert checked == ["moved"]
+
+
 class TestUserConflictRace:
     """The loser of a concurrent duplicate username write must get the pre-check's 409.
 
@@ -213,7 +250,7 @@ class TestUserConflictRace:
         import fastsmtp.api.users as users_api
 
         async def username_is_free(
-            session: AsyncSession, column, value, *, exclude_id=None
+            session: AsyncSession, model, column, value, *, exclude_id=None
         ) -> bool:
             return False
 

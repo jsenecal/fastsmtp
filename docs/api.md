@@ -182,9 +182,12 @@ Restore brings back exactly what the delete took, and nothing more:
 - **Domains** come back with the recipients that were deleted *with* them (same
   timestamp). A recipient deleted on its own earlier keeps its own tombstone.
 - **Deliveries** cancelled by the delete stay `cancelled`. `POST /delivery-log/{id}/retry`
-  re-queues each one you want sent, and answers `409` while the domain or recipient is
-  still deleted (`"Domain is deleted; restore it before retrying"`, `"Recipient is
-  deleted; restore it before retrying"`).
+  re-queues each one you want sent. It answers `409` with one of three details:
+  `"Domain is deleted; restore it before retrying"` and `"Recipient is deleted; restore
+  it before retrying"` while the row is still deleted, or `"Delivery is no longer
+  retryable"` when the delivery changed under the request (a concurrent retry, the worker
+  delivering it) or is `cancelled` for a recipient that has since been purged - with no
+  recipient row left to authenticate with, such a delivery cannot be re-armed.
 - `is_enabled` / `is_active` are never changed by a delete or a restore.
 
 ### Purge

@@ -27,6 +27,8 @@ from fastsmtp.db.soft_delete import soft_delete_recipient
 from fastsmtp.webhook import queue
 from fastsmtp.webhook.queue import (
     RETRYABLE_STATUSES,
+    FailureOutcome,
+    RetryOutcome,
     cancel_pending_deliveries,
     get_pending_count,
     get_pending_deliveries,
@@ -36,7 +38,7 @@ from fastsmtp.webhook.queue import (
     retry_delivery,
 )
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 8, 24, 12, 0, 0, tzinfo=UTC)
 
@@ -218,17 +220,17 @@ class TestClaimQuerySkipsTombstones:
     @pytest.mark.asyncio
     async def test_skip_locked_still_applies(
         self,
-        test_engine: AsyncEngine,
+        session_factory: async_sessionmaker[AsyncSession],
         test_session: AsyncSession,
         fixture_rows: dict[str, DeliveryLog],
     ):
         """Another worker holding a row lock must not block or receive that row.
 
         Proves the tombstone exclusions did not disturb ``FOR UPDATE SKIP
-        LOCKED`` - the reason this file runs against PostgreSQL.
+        LOCKED`` - the reason this file runs against PostgreSQL. Leaving the
+        ``async with`` rolls the lock back.
         """
-        locker = async_sessionmaker(test_engine, class_=AsyncSession)()
-        try:
+        async with session_factory() as locker:
             held = await locker.execute(
                 select(DeliveryLog)
                 .where(DeliveryLog.id == fixture_rows["live"].id)
@@ -238,9 +240,6 @@ class TestClaimQuerySkipsTombstones:
 
             claimed = await get_pending_deliveries(test_session, batch_size=10, instance_id="w2")
             await test_session.commit()
-        finally:
-            await locker.rollback()
-            await locker.close()
 
         assert [d.id for d in claimed] == [fixture_rows["legacy_live_domain"].id]
 
@@ -266,8 +265,11 @@ class TestCancelledIsSticky:
         monkeypatch.setattr(queue, "_send_dlq_notification", dlq)
         settings = test_settings.model_copy(update={"dlq_webhook_url": "https://dlq.example.com"})
 
-        await mark_failed(test_session, delivery.id, "Connection refused", 503, settings=settings)
+        outcome = await mark_failed(
+            test_session, delivery.id, "Connection refused", 503, settings=settings
+        )
 
+        assert outcome is FailureOutcome.NOT_RECORDED
         await test_session.refresh(delivery)
         assert delivery.status == DeliveryStatus.CANCELLED
         assert delivery.attempts == test_settings.webhook_max_retries - 1
@@ -278,7 +280,7 @@ class TestCancelledIsSticky:
     @pytest.mark.asyncio
     async def test_mark_failed_after_a_concurrent_cancel_stays_cancelled_and_skips_dlq(
         self,
-        test_engine: AsyncEngine,
+        session_factory: async_sessionmaker[AsyncSession],
         test_session: AsyncSession,
         test_settings: Settings,
         monkeypatch,
@@ -297,21 +299,21 @@ class TestCancelledIsSticky:
         )
         await test_session.commit()
 
-        other = async_sessionmaker(test_engine, class_=AsyncSession)()
-        try:
+        async with session_factory() as other:
             await mark_cancelled(other, delivery.id, "Recipient deleted")
             await other.commit()
-        finally:
-            await other.close()
         assert delivery.status == DeliveryStatus.PENDING  # stale in this session, on purpose
 
         dlq = AsyncMock()
         monkeypatch.setattr(queue, "_send_dlq_notification", dlq)
         settings = test_settings.model_copy(update={"dlq_webhook_url": "https://dlq.example.com"})
 
-        await mark_failed(test_session, delivery.id, "Connection refused", 503, settings=settings)
+        outcome = await mark_failed(
+            test_session, delivery.id, "Connection refused", 503, settings=settings
+        )
         await test_session.commit()
 
+        assert outcome is FailureOutcome.NOT_RECORDED
         await test_session.refresh(delivery)
         assert delivery.status == DeliveryStatus.CANCELLED
         assert delivery.attempts == test_settings.webhook_max_retries - 1
@@ -352,18 +354,20 @@ class TestRetryAndCounts:
     async def test_retry_delivery_re_arms_every_retryable_status(
         self, test_session: AsyncSession, status: DeliveryStatus
     ):
-        """The UPDATE filters on the exported tuple; the returned object already
-        carries the new state (synchronize_session="fetch"), no refresh needed."""
+        """The UPDATE filters on the exported tuple; the object this session
+        holds already carries the new state (synchronize_session="fetch"), no
+        refresh needed."""
         domain = await make_domain(test_session, f"retry-{status.value}.com")
-        delivery = await make_delivery(test_session, domain, None, status)
+        recipient = await make_recipient(test_session, domain, "sales")
+        delivery = await make_delivery(test_session, domain, recipient, status)
         delivery.next_retry_at = None
         await test_session.flush()
 
         result = await retry_delivery(test_session, delivery.id)
 
-        assert result is delivery
-        assert result.status == DeliveryStatus.PENDING
-        assert result.next_retry_at is not None
+        assert result is RetryOutcome.REARMED
+        assert delivery.status == DeliveryStatus.PENDING
+        assert delivery.next_retry_at is not None
         await test_session.refresh(delivery)
         assert delivery.status == DeliveryStatus.PENDING
 
@@ -375,7 +379,7 @@ class TestRetryAndCounts:
         dead = await make_recipient(test_session, domain, "dead", deleted_at=NOW)
         delivery = await make_delivery(test_session, domain, dead, DeliveryStatus.CANCELLED)
 
-        assert await retry_delivery(test_session, delivery.id) is None
+        assert await retry_delivery(test_session, delivery.id) is RetryOutcome.REFUSED
 
         await test_session.refresh(delivery)
         assert delivery.status == DeliveryStatus.CANCELLED
@@ -383,16 +387,56 @@ class TestRetryAndCounts:
     @pytest.mark.asyncio
     async def test_retry_delivery_refuses_a_tombstoned_domain(self, test_session: AsyncSession):
         domain = await make_domain(test_session, "retry-dead-domain.com", deleted_at=NOW)
-        delivery = await make_delivery(test_session, domain, None, DeliveryStatus.CANCELLED)
+        recipient = await make_recipient(test_session, domain, "sales")
+        delivery = await make_delivery(test_session, domain, recipient, DeliveryStatus.CANCELLED)
 
-        assert await retry_delivery(test_session, delivery.id) is None
+        assert await retry_delivery(test_session, delivery.id) is RetryOutcome.REFUSED
 
         await test_session.refresh(delivery)
         assert delivery.status == DeliveryStatus.CANCELLED
 
     @pytest.mark.asyncio
+    async def test_retry_delivery_refuses_a_cancelled_delivery_without_a_recipient(
+        self, test_session: AsyncSession
+    ):
+        """A purge nulls ``recipient_id``, and a cancelled delivery with no
+        recipient row has nothing to check and no headers to send with: the
+        claim query would hand it out and the dispatcher would post the
+        snapshot URL unauthenticated. So it is never re-armed."""
+        domain = await make_domain(test_session, "retry-purged.com")
+        delivery = await make_delivery(test_session, domain, None, DeliveryStatus.CANCELLED)
+
+        assert await retry_delivery(test_session, delivery.id) is RetryOutcome.REFUSED
+
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status", [DeliveryStatus.FAILED, DeliveryStatus.EXHAUSTED], ids=lambda s: s.value
+    )
+    async def test_retry_delivery_re_arms_legacy_rows_without_a_recipient(
+        self, test_session: AsyncSession, status: DeliveryStatus
+    ):
+        """Rows whose ``recipient_id`` was nulled by a pre-0.5 hard delete keep
+        their pre-soft-delete retry semantics: failed and exhausted re-arm."""
+        domain = await make_domain(test_session, f"retry-legacy-{status.value}.com")
+        delivery = await make_delivery(test_session, domain, None, status)
+
+        assert await retry_delivery(test_session, delivery.id) is RetryOutcome.REARMED
+
+        await test_session.refresh(delivery)
+        assert delivery.status == DeliveryStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_retry_delivery_reports_a_missing_row_apart_from_a_refusal(
+        self, test_session: AsyncSession
+    ):
+        assert await retry_delivery(test_session, uuid.uuid4()) is RetryOutcome.NOT_FOUND
+
+    @pytest.mark.asyncio
     async def test_retry_delivery_refuses_a_recipient_tombstoned_under_it(
-        self, test_engine: AsyncEngine, test_session: AsyncSession
+        self, session_factory: async_sessionmaker[AsyncSession], test_session: AsyncSession
     ):
         """The check-then-act race: this session loaded the recipient live, and
         the tombstone lands in another transaction before the retry. A select()
@@ -404,15 +448,12 @@ class TestRetryAndCounts:
         delivery = await make_delivery(test_session, domain, recipient, DeliveryStatus.FAILED)
         await test_session.commit()
 
-        other = async_sessionmaker(test_engine, class_=AsyncSession)()
-        try:
+        async with session_factory() as other:
             await soft_delete_recipient(other, await other.get_one(Recipient, recipient.id))
             await other.commit()
-        finally:
-            await other.close()
         assert recipient.deleted_at is None  # stale in this session, on purpose
 
-        assert await retry_delivery(test_session, delivery.id) is None
+        assert await retry_delivery(test_session, delivery.id) is RetryOutcome.REFUSED
         await test_session.commit()
 
         await test_session.refresh(delivery)

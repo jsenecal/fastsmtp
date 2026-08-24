@@ -146,7 +146,7 @@ async def create_domain(
     if data.preserve_raw_message:
         require_s3_for_preservation(settings)
 
-    if await live_value_taken(session, Domain.domain_name, data.domain_name):
+    if await live_value_taken(session, Domain, Domain.domain_name, data.domain_name):
         raise _duplicate_domain_conflict()
 
     domain = Domain(
@@ -254,7 +254,7 @@ async def restore_domain(
     )
     require_tombstoned(domain, "Domain is not deleted")
 
-    if await live_value_taken(session, Domain.domain_name, domain.domain_name):
+    if await live_value_taken(session, Domain, Domain.domain_name, domain.domain_name):
         raise _duplicate_domain_conflict()
 
     await soft_delete.restore_domain(session, domain)

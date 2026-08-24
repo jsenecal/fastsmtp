@@ -2,6 +2,8 @@
 
 from fastsmtp.webhook.dispatcher import WebhookWorker, process_delivery, send_webhook
 from fastsmtp.webhook.queue import (
+    FailureOutcome,
+    RetryOutcome,
     check_queue_backpressure,
     compute_payload_hash,
     enqueue_delivery,
@@ -18,6 +20,8 @@ from fastsmtp.webhook.url_validator import (
 )
 
 __all__ = [
+    "FailureOutcome",
+    "RetryOutcome",
     "SSRFError",
     "WebhookWorker",
     "check_queue_backpressure",

@@ -84,15 +84,15 @@ class TestLiveValueTaken:
         test_session.add(User(username="taken", is_active=True))
         await test_session.flush()
 
-        assert await live_value_taken(test_session, User.username, "taken") is True
-        assert await live_value_taken(test_session, User.username, "free") is False
+        assert await live_value_taken(test_session, User, User.username, "taken") is True
+        assert await live_value_taken(test_session, User, User.username, "free") is False
 
     @pytest.mark.asyncio
     async def test_tombstone_does_not_take_the_name(self, test_session: AsyncSession):
         test_session.add(User(username="gone", is_active=True, deleted_at=datetime.now(UTC)))
         await test_session.flush()
 
-        assert await live_value_taken(test_session, User.username, "gone") is False
+        assert await live_value_taken(test_session, User, User.username, "gone") is False
 
     @pytest.mark.asyncio
     async def test_exclude_id_ignores_the_row_being_updated(self, test_session: AsyncSession):
@@ -100,9 +100,10 @@ class TestLiveValueTaken:
         test_session.add(me)
         await test_session.flush()
 
-        assert await live_value_taken(test_session, User.username, "myself") is True
+        assert await live_value_taken(test_session, User, User.username, "myself") is True
         assert (
-            await live_value_taken(test_session, User.username, "myself", exclude_id=me.id) is False
+            await live_value_taken(test_session, User, User.username, "myself", exclude_id=me.id)
+            is False
         )
 
     @pytest.mark.asyncio
@@ -111,8 +112,13 @@ class TestLiveValueTaken:
         test_session.add(Domain(domain_name="dead.example", deleted_at=datetime.now(UTC)))
         await test_session.flush()
 
-        assert await live_value_taken(test_session, Domain.domain_name, "live.example") is True
-        assert await live_value_taken(test_session, Domain.domain_name, "dead.example") is False
+        assert (
+            await live_value_taken(test_session, Domain, Domain.domain_name, "live.example") is True
+        )
+        assert (
+            await live_value_taken(test_session, Domain, Domain.domain_name, "dead.example")
+            is False
+        )
 
 
 class TestRequireTombstoned:
