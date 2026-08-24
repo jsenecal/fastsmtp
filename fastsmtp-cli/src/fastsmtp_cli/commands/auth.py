@@ -6,6 +6,7 @@ from typing import Annotated
 import typer
 
 from fastsmtp_cli.client import APIError, FastSMTPClient
+from fastsmtp_cli.commands.options import IncludeDeletedKeys
 from fastsmtp_cli.output import (
     print_api_key,
     print_api_keys_table,
@@ -36,15 +37,16 @@ def whoami(
 
 @app.command("keys")
 def list_keys(
+    include_deleted: IncludeDeletedKeys = False,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
-    """List your API keys."""
+    """List your API keys (--include-deleted also shows deleted and retired ones)."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            keys = client.list_api_keys()
+            keys = client.list_api_keys(include_deleted=include_deleted)
             if not keys:
                 print_error("No API keys found")
                 return
@@ -95,7 +97,7 @@ def delete_key(
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
-    """Delete an API key."""
+    """Delete an API key. Deleted keys cannot be restored; create or rotate instead."""
     if not force:
         confirm = typer.confirm(f"Delete API key {key_id}?")
         if not confirm:

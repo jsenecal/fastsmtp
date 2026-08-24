@@ -2,11 +2,13 @@
 
 from datetime import UTC, datetime
 
+import pytest
 from fastsmtp_cli.output import (
     _format_expiry,
     console,
     field,
     format_datetime,
+    format_deleted,
     print_api_key,
     print_api_keys_table,
     print_delivery_log,
@@ -145,6 +147,10 @@ class TestStatusStyle:
         """Test warning statuses return yellow."""
         for status in ["pending", "queued", "retrying", "warning"]:
             assert status_style(status) == "yellow"
+
+    def test_cancelled_is_yellow(self):
+        """`cancelled` is terminal but not a failure: the recipient or domain was deleted."""
+        assert status_style("cancelled") == "yellow"
 
     def test_unknown_status(self):
         """Test unknown status returns white."""
@@ -977,6 +983,163 @@ class TestServerShapedOutput:
 
         assert "FAILED" in output
         assert "timeout" in output
+
+
+class TestFormatDeleted:
+    """`format_deleted` renders a tombstone timestamp as a red cell."""
+
+    def test_none_renders_placeholder(self):
+        assert format_deleted(None) == "-"
+
+    def test_empty_renders_placeholder(self):
+        assert format_deleted("") == "-"
+
+    def test_timestamp_is_formatted_and_styled_red(self):
+        assert format_deleted("2026-08-01T10:00:00Z") == "[red]2026-08-01 10:00:00[/red]"
+
+    def test_non_iso_text_is_escaped_inside_the_styling(self):
+        """A malformed value falls through format_datetime's escaping fallback."""
+        assert format_deleted("ex[/x].com") == r"[red]ex\[/x].com[/red]"
+
+
+class TestDeletedColumn:
+    """The `Deleted` column and row are data-driven.
+
+    The server never returns tombstones without ``include_deleted``, so a
+    listing of live rows must render byte-identically to before v0.5.0; only a
+    payload carrying a ``deleted_at`` grows the column, and only tombstoned
+    rows are dimmed.
+    """
+
+    DELETED_AT = "2026-08-01T10:00:00Z"
+
+    USER = {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "username": "alice",
+        "email": "alice@example.com",
+        "is_superuser": False,
+        "is_active": True,
+        "created_at": "2024-01-15T10:00:00Z",
+        "updated_at": "2024-01-16T10:00:00Z",
+    }
+    KEY = {
+        "id": "223e4567-e89b-12d3-a456-426614174000",
+        "name": "ci",
+        "scopes": [],
+        "expires_at": None,
+        "last_used_at": None,
+        "created_at": "2024-01-01T10:00:00Z",
+    }
+    DOMAIN = {
+        "id": "323e4567-e89b-12d3-a456-426614174000",
+        "domain_name": "example.com",
+        "is_enabled": True,
+        "verify_dkim": None,
+        "verify_spf": None,
+        "reject_dkim_fail": None,
+        "reject_spf_fail": None,
+        "preserve_raw_message": None,
+        "created_at": "2024-01-15T10:00:00Z",
+        "updated_at": "2024-01-16T10:00:00Z",
+    }
+    RECIPIENT = {
+        "id": "423e4567-e89b-12d3-a456-426614174000",
+        "local_part": "support",
+        "webhook_url": "https://hook.example.com",
+        "webhook_headers": {},
+        "is_enabled": True,
+        "created_at": "2024-01-15T10:00:00Z",
+    }
+
+    #: (table printer, detail printer, live row)
+    PRINTERS = [
+        (print_users_table, print_user, USER),
+        (print_api_keys_table, print_api_key, KEY),
+        (print_domains_table, print_domain, DOMAIN),
+        (print_recipients_table, print_recipient, RECIPIENT),
+    ]
+
+    @pytest.fixture
+    def printed(self, monkeypatch):
+        """Record the renderables handed to the console instead of printing them.
+
+        ``capsys`` sees a non-tty stream, so rich strips every style and the
+        ``dim`` row styling would be invisible; the ``ID`` column is dim in
+        every table anyway, so ANSI bytes could not tell a dimmed row apart.
+        Inspecting ``Table.rows[*].style`` is exact.
+        """
+        rendered: list = []
+        monkeypatch.setattr(
+            console, "print", lambda renderable, *args, **kwargs: rendered.append(renderable)
+        )
+        return rendered
+
+    @pytest.mark.parametrize(("print_table", "print_one", "row"), PRINTERS)
+    def test_live_rows_render_without_a_deleted_column(
+        self, capsys, monkeypatch, print_table, print_one, row
+    ):
+        monkeypatch.setattr(console, "_width", 200)
+        print_table([row, {**row, "deleted_at": None}])
+        assert "Deleted" not in capsys.readouterr().out
+
+        print_one({**row, "deleted_at": None})
+        assert "Deleted" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize(("print_table", "print_one", "row"), PRINTERS)
+    def test_a_tombstone_adds_the_deleted_column_and_row(
+        self, capsys, monkeypatch, print_table, print_one, row
+    ):
+        monkeypatch.setattr(console, "_width", 200)
+        print_table([row, {**row, "deleted_at": self.DELETED_AT}])
+        output = capsys.readouterr().out
+        assert "Deleted" in output
+        assert "2026-08-01 10:00:00" in output
+        assert "[red]" not in output, "the styling must parse, not print literally"
+
+        print_one({**row, "deleted_at": self.DELETED_AT})
+        output = capsys.readouterr().out
+        assert "Deleted" in output
+        assert "2026-08-01 10:00:00" in output
+
+    @pytest.mark.parametrize(("print_table", "print_one", "row"), PRINTERS)
+    def test_only_tombstoned_rows_are_dimmed(self, printed, print_table, print_one, row):
+        print_table([row, {**row, "deleted_at": self.DELETED_AT}, {**row, "deleted_at": None}])
+
+        table = printed[0]
+        assert [table_row.style for table_row in table.rows] == [None, "dim", None]
+
+    def test_retired_key_without_a_tombstone_is_marked_and_dimmed(self, printed, capsys):
+        """A key retired before v0.5.0 (is_active false, no deleted_at) cannot
+        authenticate either; under --include-deleted it must not look live."""
+        retired = {**self.KEY, "is_active": False, "deleted_at": None}
+        print_api_keys_table([{**self.KEY, "is_active": True}, retired])
+
+        table = printed[0]
+        assert [column.header for column in table.columns][-1] == "Deleted"
+        assert [table_row.style for table_row in table.rows] == [None, "dim"]
+
+    def test_retired_key_renders_the_word_retired(self, capsys, monkeypatch):
+        monkeypatch.setattr(console, "_width", 200)
+        print_api_keys_table([{**self.KEY, "is_active": False, "deleted_at": None}])
+        assert "retired" in capsys.readouterr().out
+
+    def test_active_keys_render_without_a_deleted_column(self, capsys, monkeypatch):
+        monkeypatch.setattr(console, "_width", 200)
+        print_api_keys_table([{**self.KEY, "is_active": True, "deleted_at": None}])
+        assert "Deleted" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize(("print_table", "print_one", "row"), PRINTERS)
+    def test_malformed_deleted_at_is_shown_literally(
+        self, capsys, monkeypatch, print_table, print_one, row
+    ):
+        """A non-ISO `deleted_at` must neither crash nor be parsed as markup."""
+        monkeypatch.setattr(console, "_width", 200)
+        bad = {**row, "deleted_at": "ex[/x].com"}
+        print_table([bad])
+        assert "ex[/x].com" in capsys.readouterr().out
+
+        print_one(bad)
+        assert "ex[/x].com" in capsys.readouterr().out
 
 
 class TestServerTextEscaping:

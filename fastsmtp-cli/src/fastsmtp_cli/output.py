@@ -1,6 +1,7 @@
 """Output formatting utilities for CLI."""
 
 import json
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -83,6 +84,63 @@ def _format_expiry(expires: str | datetime | None) -> str:
     return formatted
 
 
+def format_deleted(value: str | datetime | None) -> str:
+    """Render a ``deleted_at`` tombstone as a red cell, or a dash when live.
+
+    Non-ISO server text falls through ``format_datetime``'s escaping fallback,
+    so the styling wrapper parses while the value inside stays literal.
+    """
+    if not value:
+        return "-"
+    return f"[red]{format_datetime(value)}[/red]"
+
+
+def _tombstone(row: dict) -> Any:
+    """The ``deleted_at`` value of a server row, or a falsy value when live."""
+    return row.get("deleted_at")
+
+
+def _key_tombstone(row: dict) -> Any:
+    """An API key's tombstone, counting keys retired before soft delete existed.
+
+    Those carry ``is_active`` false with no ``deleted_at``; the server lists
+    them under ``include_deleted`` because they cannot authenticate either.
+    """
+    return row.get("deleted_at") or ("retired" if row.get("is_active") is False else None)
+
+
+def _add_rows(
+    table: Table,
+    rows: list[dict],
+    cells: Callable[[dict], list[str]],
+    tombstone: Callable[[dict], Any] = _tombstone,
+) -> None:
+    """Add one table row per server row, plus a data-driven ``Deleted`` column.
+
+    The server only returns tombstones when asked (``--include-deleted``), so
+    the column and the ``dim`` row styling appear only when a row actually
+    carries one; a live-only listing renders exactly as it did before soft
+    delete existed. Nothing needs to thread a flag through. ``tombstone``
+    reads the value to show; non-timestamp text such as ``"retired"`` goes
+    through ``format_deleted``'s literal fallback.
+    """
+    show_deleted = any(tombstone(row) for row in rows)
+    if show_deleted:
+        table.add_column("Deleted")
+    for row in rows:
+        values = cells(row)
+        deleted_at = tombstone(row)
+        if show_deleted:
+            values.append(format_deleted(deleted_at))
+        table.add_row(*values, style="dim" if deleted_at else None)
+
+
+def _add_deleted_row(table: Table, row: dict) -> None:
+    """Add a ``Deleted`` row to a detail view, only when the row is tombstoned."""
+    if row.get("deleted_at"):
+        table.add_row("Deleted", format_deleted(row["deleted_at"]))
+
+
 def truncate(text: str | None, max_length: int = 50) -> str:
     """Truncate text with ellipsis."""
     if text is None:
@@ -99,7 +157,7 @@ def status_style(status: str) -> str:
         return "green"
     if status_lower in ("fail", "failed", "error", "exhausted", "disabled"):
         return "red"
-    if status_lower in ("pending", "queued", "retrying", "warning"):
+    if status_lower in ("pending", "queued", "retrying", "warning", "cancelled"):
         return "yellow"
     return "white"
 
@@ -150,6 +208,18 @@ def print_warning(message: str) -> None:
 def print_info(message: str) -> None:
     """Print an info message."""
     console.print(f"[blue]{escape(str(message))}[/blue]")
+
+
+def print_deleted(kind: str, label: str, *, purge: bool, restore_command: str) -> None:
+    """Report a delete: purged for good, or soft-deleted with the restore hint.
+
+    Shared by the user, domain and recipient ``delete`` commands so the two
+    outcomes read the same everywhere. ``kind`` is the lowercase resource
+    name (``"domain"``); ``restore_command`` is the full ``fsmtp ...`` line.
+    """
+    print_success(f"{kind.capitalize()} {label} {'purged' if purge else 'deleted'}")
+    if not purge:
+        print_info(f"Restore with: {restore_command}")
 
 
 # Table formatters for different resource types
@@ -211,15 +281,18 @@ def print_users_table(users: list[dict]) -> None:
     table.add_column("Active")
     table.add_column("Created")
 
-    for user in users:
-        table.add_row(
+    _add_rows(
+        table,
+        users,
+        lambda user: [
             short_id(user.get("id")),
             field(user.get("username")),
             field(user.get("email")),
             yes_no(user.get("is_superuser")),
             yes_no(user.get("is_active")),
             format_datetime(user.get("created_at")),
-        )
+        ],
+    )
 
     console.print(table)
 
@@ -237,6 +310,7 @@ def print_user(user: dict) -> None:
     table.add_row("Active", yes_no(user.get("is_active")))
     table.add_row("Created", format_datetime(user.get("created_at")))
     table.add_row("Updated", format_datetime(user.get("updated_at")))
+    _add_deleted_row(table, user)
 
     console.print(Panel(table, title="User Details"))
 
@@ -252,15 +326,19 @@ def print_api_keys_table(keys: list[dict]) -> None:
     table.add_column("Last Used")
     table.add_column("Created")
 
-    for key in keys:
-        table.add_row(
+    _add_rows(
+        table,
+        keys,
+        lambda key: [
             short_id(key.get("id")),
             field(key.get("name")),
             field(truncate(", ".join(key.get("scopes", [])), 30), placeholder="all"),
             _format_expiry(key.get("expires_at")),
             format_datetime(key.get("last_used_at")) if key.get("last_used_at") else "-",
             format_datetime(key.get("created_at")),
-        )
+        ],
+        tombstone=_key_tombstone,
+    )
 
     console.print(table)
 
@@ -276,6 +354,7 @@ def print_api_key(key: dict, show_secret: bool = False) -> None:
     table.add_row("Scopes", field(", ".join(key.get("scopes", [])), placeholder="all"))
     table.add_row("Expires", _format_expiry(key.get("expires_at")))
     table.add_row("Created", format_datetime(key.get("created_at")))
+    _add_deleted_row(table, key)
 
     if show_secret and key.get("key"):
         table.add_row("", "")
@@ -297,8 +376,10 @@ def print_domains_table(domains: list[dict]) -> None:
     table.add_column("Preserve Raw")
     table.add_column("Created")
 
-    for domain in domains:
-        table.add_row(
+    _add_rows(
+        table,
+        domains,
+        lambda domain: [
             short_id(domain.get("id")),
             field(domain.get("domain_name")),
             yes_no(domain.get("is_enabled")),
@@ -306,7 +387,8 @@ def print_domains_table(domains: list[dict]) -> None:
             tri_state(domain.get("verify_spf")),
             tri_state(domain.get("preserve_raw_message")),
             format_datetime(domain.get("created_at")),
-        )
+        ],
+    )
 
     console.print(table)
 
@@ -327,6 +409,7 @@ def print_domain(domain: dict) -> None:
     table.add_row("Preserve Raw", tri_state(domain.get("preserve_raw_message")))
     table.add_row("Created", format_datetime(domain.get("created_at")))
     table.add_row("Updated", format_datetime(domain.get("updated_at")))
+    _add_deleted_row(table, domain)
 
     console.print(Panel(table, title="Domain Details"))
 
@@ -354,6 +437,11 @@ def print_members_table(members: list[dict]) -> None:
     console.print(table)
 
 
+def _address(local_part: str | None) -> str:
+    """A recipient's address cell: the local part, or the catch-all marker."""
+    return field(local_part) if local_part else "[dim]*[/dim] (catch-all)"
+
+
 def print_recipients_table(recipients: list[dict]) -> None:
     """Print recipients as a table."""
     table = Table(title="Recipients")
@@ -364,17 +452,17 @@ def print_recipients_table(recipients: list[dict]) -> None:
     table.add_column("Headers")
     table.add_column("Enabled")
 
-    for recipient in recipients:
-        local_part = recipient.get("local_part")
-        address = field(local_part) if local_part else "[dim]*[/dim] (catch-all)"
-
-        table.add_row(
+    _add_rows(
+        table,
+        recipients,
+        lambda recipient: [
             short_id(recipient.get("id")),
-            address,
+            _address(recipient.get("local_part")),
             field(truncate(recipient.get("webhook_url"), 40)),
             field(truncate(format_mapping(recipient.get("webhook_headers")), 20)),
             yes_no(recipient.get("is_enabled")),
-        )
+        ],
+    )
 
     console.print(table)
 
@@ -393,6 +481,7 @@ def print_recipient(recipient: dict) -> None:
     table.add_row("Webhook Headers", field(format_mapping(recipient.get("webhook_headers"))))
     table.add_row("Enabled", yes_no(recipient.get("is_enabled")))
     table.add_row("Created", format_datetime(recipient.get("created_at")))
+    _add_deleted_row(table, recipient)
 
     console.print(Panel(table, title="Recipient Details"))
 

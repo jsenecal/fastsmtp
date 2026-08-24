@@ -23,6 +23,14 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub("", text)
 
 
+def flat(text: str) -> str:
+    """Collapse rich's line wrapping so a long message can be matched whole."""
+    return " ".join(strip_ansi(text).split())
+
+
+BASE = "https://api.example.com/api/v1"
+
+
 @pytest.fixture
 def temp_config(monkeypatch):
     """Create a temporary config directory with a test profile."""
@@ -1362,6 +1370,255 @@ class TestClearableStringOptions:
         assert json.loads(route.calls[0].request.content) == {
             "webhook_url_override": "https://hooks.example.com/x"
         }
+
+
+class TestSoftDeleteCommands:
+    """The soft-delete surface: --include-deleted, --purge and restore.
+
+    Every flag is checked in both states: off must leave the request byte-
+    identical to the pre-0.5.0 CLI (no query string), on must send exactly the
+    one ``<flag>=true`` param.
+    """
+
+    USER = str(uuid4())
+    DOMAIN = str(uuid4())
+    RECIPIENT = str(uuid4())
+
+    #: (argv, path) for every command that grew --include-deleted
+    INCLUDE_DELETED = [
+        (["users", "list"], "/users"),
+        (["users", "get", USER], f"/users/{USER}"),
+        (["domain", "list"], "/domains"),
+        (["domain", "get", DOMAIN], f"/domains/{DOMAIN}"),
+        (["recipient", "list", DOMAIN], f"/domains/{DOMAIN}/recipients"),
+        (["recipient", "get", DOMAIN, RECIPIENT], f"/domains/{DOMAIN}/recipients/{RECIPIENT}"),
+        (["auth", "keys"], "/auth/keys"),
+    ]
+
+    #: (argv, kind, label, path, restore command) for every delete command
+    DELETES = [
+        (["users", "delete", USER], "user", USER, f"/users/{USER}", f"fsmtp users restore {USER}"),
+        (
+            ["domain", "delete", DOMAIN],
+            "domain",
+            DOMAIN,
+            f"/domains/{DOMAIN}",
+            f"fsmtp domain restore {DOMAIN}",
+        ),
+        (
+            ["recipient", "delete", DOMAIN, RECIPIENT],
+            "recipient",
+            RECIPIENT,
+            f"/domains/{DOMAIN}/recipients/{RECIPIENT}",
+            f"fsmtp recipient restore {DOMAIN} {RECIPIENT}",
+        ),
+    ]
+
+    #: (argv, path, success message, detail panel title)
+    RESTORES = [
+        (["users", "restore", USER], f"/users/{USER}/restore", "User restored", "User Details"),
+        (
+            ["domain", "restore", DOMAIN],
+            f"/domains/{DOMAIN}/restore",
+            "Domain restored",
+            "Domain Details",
+        ),
+        (
+            ["recipient", "restore", DOMAIN, RECIPIENT],
+            f"/domains/{DOMAIN}/recipients/{RECIPIENT}/restore",
+            "Recipient restored",
+            "Recipient Details",
+        ),
+    ]
+
+    KEY_NOTE = "API keys revoked at deletion are not restored; create new keys."
+
+    @staticmethod
+    def _payload(argv: list[str]):
+        """A minimal server response of the right shape for a list or get."""
+        return [{"id": "x"}] if argv[1] in ("list", "keys") else {"id": "x"}
+
+    # --include-deleted
+
+    @pytest.mark.parametrize(("argv", "path"), INCLUDE_DELETED)
+    @respx.mock
+    def test_include_deleted_off_sends_no_query(self, temp_config, argv, path):
+        route = respx.get(f"{BASE}{path}").mock(
+            return_value=httpx.Response(200, json=self._payload(argv))
+        )
+
+        result = runner.invoke(app, argv)
+
+        assert result.exit_code == 0, result.output
+        assert route.calls[0].request.url.query == b""
+
+    @pytest.mark.parametrize(("argv", "path"), INCLUDE_DELETED)
+    @respx.mock
+    def test_include_deleted_is_passed_through(self, temp_config, argv, path):
+        route = respx.get(f"{BASE}{path}").mock(
+            return_value=httpx.Response(200, json=self._payload(argv))
+        )
+
+        result = runner.invoke(app, [*argv, "--include-deleted"])
+
+        assert result.exit_code == 0, result.output
+        assert dict(route.calls[0].request.url.params) == {"include_deleted": "true"}
+
+    @respx.mock
+    def test_log_list_passes_include_deleted_through(self, temp_config):
+        route = respx.get(f"{BASE}/domains/{self.DOMAIN}/delivery-log").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        result = runner.invoke(app, ["ops", "log", "list", self.DOMAIN, "--include-deleted"])
+
+        assert result.exit_code == 0, result.output
+        params = dict(route.calls[0].request.url.params)
+        assert params == {"limit": "50", "offset": "0", "include_deleted": "true"}
+
+    @respx.mock
+    def test_log_list_without_the_flag_is_unchanged(self, temp_config):
+        route = respx.get(f"{BASE}/domains/{self.DOMAIN}/delivery-log").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        result = runner.invoke(app, ["ops", "log", "list", self.DOMAIN])
+
+        assert result.exit_code == 0, result.output
+        assert dict(route.calls[0].request.url.params) == {"limit": "50", "offset": "0"}
+
+    # delete (soft)
+
+    @pytest.mark.parametrize(("argv", "kind", "label", "path", "restore"), DELETES)
+    @respx.mock
+    def test_soft_delete_prints_the_restore_hint(
+        self, temp_config, argv, kind, label, path, restore
+    ):
+        route = respx.delete(f"{BASE}{path}").mock(
+            return_value=httpx.Response(200, json={"message": "deleted"})
+        )
+
+        result = runner.invoke(app, [*argv, "--force"])
+
+        assert result.exit_code == 0, result.output
+        assert route.calls[0].request.url.query == b""
+        output = flat(result.output)
+        assert f"{kind.capitalize()} {label} deleted" in output
+        assert f"Restore with: {restore}" in output
+
+    @pytest.mark.parametrize(("argv", "kind", "label", "path", "restore"), DELETES)
+    @respx.mock
+    def test_soft_delete_prompt_is_unchanged(self, temp_config, argv, kind, label, path, restore):
+        respx.delete(f"{BASE}{path}").mock(
+            return_value=httpx.Response(200, json={"message": "deleted"})
+        )
+
+        result = runner.invoke(app, argv, input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert f"Delete {kind} {label}?" in flat(result.output)
+        assert "Permanently" not in result.output
+
+    # delete --purge
+
+    @pytest.mark.parametrize(("argv", "kind", "label", "path", "restore"), DELETES)
+    @respx.mock
+    def test_purge_prompts_and_sends_the_param(self, temp_config, argv, kind, label, path, restore):
+        route = respx.delete(f"{BASE}{path}").mock(
+            return_value=httpx.Response(200, json={"message": "purged"})
+        )
+
+        result = runner.invoke(app, [*argv, "--purge"], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        output = flat(result.output)
+        assert f"Permanently delete {kind} {label}? This cannot be undone." in output
+        assert dict(route.calls[0].request.url.params) == {"purge": "true"}
+        assert f"{kind.capitalize()} {label} purged" in output
+        assert "Restore with" not in output
+
+    @pytest.mark.parametrize(("argv", "kind", "label", "path", "restore"), DELETES)
+    @respx.mock
+    def test_purge_declined_makes_no_request(self, temp_config, argv, kind, label, path, restore):
+        route = respx.delete(f"{BASE}{path}").mock(return_value=httpx.Response(200, json={}))
+
+        result = runner.invoke(app, [*argv, "--purge"], input="n\n")
+
+        assert result.exit_code == 0
+        assert not route.called
+
+    @pytest.mark.parametrize(("argv", "kind", "label", "path", "restore"), DELETES)
+    @respx.mock
+    def test_purge_of_a_live_row_prints_the_server_409(
+        self, temp_config, argv, kind, label, path, restore
+    ):
+        detail = f"{kind.capitalize()} must be deleted before it can be purged"
+        respx.delete(f"{BASE}{path}").mock(
+            return_value=httpx.Response(409, json={"detail": detail})
+        )
+
+        result = runner.invoke(app, [*argv, "--purge", "--force"])
+
+        assert result.exit_code == 1
+        assert detail in flat(result.output)
+
+    # restore
+
+    @pytest.mark.parametrize(("argv", "path", "message", "title"), RESTORES)
+    @respx.mock
+    def test_restore_posts_and_prints_the_detail_panel(
+        self, temp_config, argv, path, message, title
+    ):
+        route = respx.post(f"{BASE}{path}").mock(
+            return_value=httpx.Response(200, json={"id": "x", "deleted_at": None})
+        )
+
+        result = runner.invoke(app, argv)
+
+        assert result.exit_code == 0, result.output
+        assert route.called
+        assert not route.calls[0].request.content
+        output = flat(result.output)
+        assert message in output
+        assert title in output
+        assert (self.KEY_NOTE in output) == (argv[0] == "users")
+
+    @pytest.mark.parametrize(("argv", "path", "message", "title"), RESTORES)
+    @respx.mock
+    def test_restore_conflict_prints_the_server_409(self, temp_config, argv, path, message, title):
+        respx.post(f"{BASE}{path}").mock(
+            return_value=httpx.Response(409, json={"detail": "Name already exists"})
+        )
+
+        result = runner.invoke(app, argv)
+
+        assert result.exit_code == 1
+        assert "Name already exists" in flat(result.output)
+
+    # help text
+
+    def test_delete_key_help_says_keys_cannot_be_restored(self):
+        result = runner.invoke(app, ["auth", "delete-key", "--help"])
+
+        assert result.exit_code == 0
+        assert "cannot be restored" in flat(result.output)
+
+    def test_keys_help_does_not_call_deleted_keys_restorable(self):
+        result = runner.invoke(app, ["auth", "keys", "--help"])
+
+        assert result.exit_code == 0
+        output = flat(result.output)
+        assert "--include-deleted" in output
+        assert "restorable" not in output
+        assert "cannot be restored" in output
+
+    def test_purge_help_names_the_superuser_restriction(self):
+        result = runner.invoke(app, ["domain", "delete", "--help"])
+
+        assert result.exit_code == 0
+        output = flat(result.output)
+        assert "--purge" in output
+        assert "superuser only" in output
 
 
 class TestUserErrorPaths:

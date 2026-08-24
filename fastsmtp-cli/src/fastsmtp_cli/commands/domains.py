@@ -1,4 +1,11 @@
-"""Domain and member management commands."""
+"""Domain and member management commands.
+
+``delete`` is a soft delete: the domain stops receiving mail, its recipients
+are deleted with it and their queued deliveries are cancelled, but
+``restore`` brings everything back (recipients deleted independently earlier
+stay deleted). ``delete --purge`` removes an already-deleted domain for good,
+together with its recipients, rulesets and members.
+"""
 
 from enum import Enum
 from typing import Annotated, Any
@@ -6,7 +13,9 @@ from typing import Annotated, Any
 import typer
 
 from fastsmtp_cli.client import UNSET, APIError, FastSMTPClient
+from fastsmtp_cli.commands.options import IncludeDeleted, Purge, confirm_delete
 from fastsmtp_cli.output import (
+    print_deleted,
     print_domain,
     print_domains_table,
     print_error,
@@ -79,15 +88,16 @@ PreserveRawMessage = Annotated[
 
 @app.command("list")
 def list_domains(
+    include_deleted: IncludeDeleted = False,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
-    """List domains you have access to."""
+    """List domains you have access to (deleted ones only where you are owner)."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            domains = client.list_domains()
+            domains = client.list_domains(include_deleted=include_deleted)
             if not domains:
                 print_error("No domains found")
                 return
@@ -100,15 +110,16 @@ def list_domains(
 @app.command("get")
 def get_domain(
     domain_id: Annotated[str, typer.Argument(help="Domain ID")],
+    include_deleted: IncludeDeleted = False,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
-    """Get domain details."""
+    """Get domain details (a deleted domain is not found without --include-deleted)."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            domain = client.get_domain(domain_id)
+            domain = client.get_domain(domain_id, include_deleted=include_deleted)
             print_domain(domain)
     except APIError as e:
         print_error(e.detail)
@@ -201,21 +212,43 @@ def delete_domain(
         bool,
         typer.Option("--force", "-f", help="Skip confirmation"),
     ] = False,
+    purge: Purge = False,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
-    """Delete a domain."""
-    if not force:
-        confirm = typer.confirm(f"Delete domain {domain_id}?")
-        if not confirm:
-            raise typer.Exit(0)
+    """Delete a domain (restorable), or permanently purge an already-deleted one."""
+    confirm_delete("domain", domain_id, force=force, purge=purge)
 
     try:
         with FastSMTPClient(profile_name=profile) as client:
-            client.delete_domain(domain_id)
-            print_success(f"Domain {domain_id} deleted")
+            client.delete_domain(domain_id, purge=purge)
+            print_deleted(
+                "domain",
+                domain_id,
+                purge=purge,
+                restore_command=f"fsmtp domain restore {domain_id}",
+            )
+    except APIError as e:
+        print_error(e.detail)
+        raise typer.Exit(1) from e
+
+
+@app.command("restore")
+def restore_domain(
+    domain_id: Annotated[str, typer.Argument(help="Domain ID")],
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", "-p", help="Profile to use"),
+    ] = None,
+) -> None:
+    """Restore a deleted domain and the recipients deleted with it."""
+    try:
+        with FastSMTPClient(profile_name=profile) as client:
+            domain = client.restore_domain(domain_id)
+            print_success("Domain restored")
+            print_domain(domain)
     except APIError as e:
         print_error(e.detail)
         raise typer.Exit(1) from e

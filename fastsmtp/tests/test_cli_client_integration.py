@@ -171,6 +171,130 @@ async def test_cli_client_reports_missing_s3_for_raw_preservation(
     await run_blocking(body)
 
 
+def _status(call) -> int:
+    """Run a client call expected to fail and return the server's status code."""
+    with pytest.raises(APIError) as exc_info:
+        call()
+    return exc_info.value.status_code
+
+
+async def test_cli_client_domain_soft_delete_lifecycle(
+    cli_client: FastSMTPClient, run_blocking
+) -> None:
+    """Domain: create, delete, hidden, audited, restored, deleted again, purged, gone.
+
+    Drives the v0.5.0 soft-delete surface (#106) through the real server:
+    ``include_deleted`` on list/get/delivery-log, ``restore``, the 409s for
+    restoring a live row and purging one, and ``purge`` on a tombstone.
+    """
+
+    def body() -> None:
+        with cli_client as client:
+            domain_id = client.create_domain("softdelete.test")["id"]
+            assert client.get_domain(domain_id)["deleted_at"] is None
+
+            assert _status(lambda: client.restore_domain(domain_id)) == 409
+            assert _status(lambda: client.delete_domain(domain_id, purge=True)) == 409
+
+            client.delete_domain(domain_id)
+
+            assert domain_id not in {d["id"] for d in client.list_domains()}
+            tombstones = {d["id"]: d for d in client.list_domains(include_deleted=True)}
+            assert tombstones[domain_id]["deleted_at"] is not None
+
+            assert _status(lambda: client.get_domain(domain_id)) == 404
+            assert client.get_domain(domain_id, include_deleted=True)["deleted_at"] is not None
+
+            # History stays readable after the delete - the #106 payoff.
+            assert _status(lambda: client.list_delivery_logs(domain_id)) == 404
+            assert client.list_delivery_logs(domain_id, include_deleted=True) == []
+
+            restored = client.restore_domain(domain_id)
+            assert restored["deleted_at"] is None
+            assert client.get_domain(domain_id)["domain_name"] == "softdelete.test"
+
+            client.delete_domain(domain_id)
+            client.delete_domain(domain_id, purge=True)
+            assert _status(lambda: client.get_domain(domain_id, include_deleted=True)) == 404
+
+    await run_blocking(body)
+
+
+async def test_cli_client_recipient_soft_delete_lifecycle(
+    cli_client: FastSMTPClient, run_blocking
+) -> None:
+    """Recipient: the same lifecycle under a live domain."""
+
+    def body() -> None:
+        with cli_client as client:
+            domain_id = client.create_domain("softdelete-recipient.test")["id"]
+            recipient_id = client.create_recipient(
+                domain_id, webhook_url="https://hook.example.test/inbox", local_part="sales"
+            )["id"]
+
+            assert _status(lambda: client.restore_recipient(domain_id, recipient_id)) == 409
+            assert (
+                _status(lambda: client.delete_recipient(domain_id, recipient_id, purge=True)) == 409
+            )
+
+            client.delete_recipient(domain_id, recipient_id)
+
+            assert client.list_recipients(domain_id) == []
+            [tombstone] = client.list_recipients(domain_id, include_deleted=True)
+            assert tombstone["id"] == recipient_id
+            assert tombstone["deleted_at"] is not None
+
+            assert _status(lambda: client.get_recipient(domain_id, recipient_id)) == 404
+            shown = client.get_recipient(domain_id, recipient_id, include_deleted=True)
+            assert shown["deleted_at"] is not None
+
+            restored = client.restore_recipient(domain_id, recipient_id)
+            assert restored["deleted_at"] is None
+            assert client.get_recipient(domain_id, recipient_id)["local_part"] == "sales"
+
+            client.delete_recipient(domain_id, recipient_id)
+            client.delete_recipient(domain_id, recipient_id, purge=True)
+            assert (
+                _status(lambda: client.get_recipient(domain_id, recipient_id, include_deleted=True))
+                == 404
+            )
+
+            client.delete_domain(domain_id)
+            client.delete_domain(domain_id, purge=True)
+
+    await run_blocking(body)
+
+
+async def test_cli_client_user_soft_delete_lifecycle(
+    cli_client: FastSMTPClient, run_blocking
+) -> None:
+    """User: delete hides the account, restore brings it back, purge removes it."""
+
+    def body() -> None:
+        with cli_client as client:
+            user_id = client.create_user("softdelete-user", email="sd@example.test")["id"]
+
+            client.delete_user(user_id)
+
+            assert user_id not in {u["id"] for u in client.list_users()}
+            tombstones = {u["id"]: u for u in client.list_users(include_deleted=True)}
+            assert tombstones[user_id]["deleted_at"] is not None
+            assert _status(lambda: client.get_user(user_id)) == 404
+            assert client.get_user(user_id, include_deleted=True)["deleted_at"] is not None
+
+            assert client.restore_user(user_id)["deleted_at"] is None
+            assert client.get_user(user_id)["username"] == "softdelete-user"
+
+            client.delete_user(user_id)
+            client.delete_user(user_id, purge=True)
+            assert _status(lambda: client.get_user(user_id, include_deleted=True)) == 404
+
+            # The root key owns no keys; this only proves the server accepts the param.
+            assert client.list_api_keys(include_deleted=True) == []
+
+    await run_blocking(body)
+
+
 async def test_cli_client_member_role_update(cli_client: FastSMTPClient, run_blocking) -> None:
     """Member role updates use PUT; the client sent PATCH, which 405'd."""
 

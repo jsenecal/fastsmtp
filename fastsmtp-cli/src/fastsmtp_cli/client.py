@@ -80,14 +80,14 @@ class APIError(Exception):
         super().__init__(f"API error {status_code}: {self.detail}")
 
 
-def _flags(**flags: bool) -> dict[str, str] | None:
+def _flags(**flags: bool) -> dict[str, str]:
     """Query params for boolean flags, sent only when true.
 
     Omitting false flags keeps requests byte-identical for older servers that
-    do not declare them.
+    do not declare them. An empty dict yields no query string at all, so the
+    result can be passed as ``params=`` or merged into other params alike.
     """
-    sent = {name: "true" for name, value in flags.items() if value}
-    return sent or None
+    return {name: "true" for name, value in flags.items() if value}
 
 
 class FastSMTPClient:
@@ -188,9 +188,13 @@ class FastSMTPClient:
         """Get current authenticated user info."""
         return self.get("/api/v1/auth/me")
 
-    def list_api_keys(self) -> list[dict]:
-        """List user's API keys."""
-        return self.get("/api/v1/auth/keys")
+    def list_api_keys(self, include_deleted: bool = False) -> list[dict]:
+        """List the caller's active API keys.
+
+        ``include_deleted`` also returns deleted and retired ones. Keys cannot
+        be restored; the listing exists so an operator can audit them.
+        """
+        return self.get("/api/v1/auth/keys", params=_flags(include_deleted=include_deleted))
 
     def create_api_key(
         self,
@@ -631,13 +635,19 @@ class FastSMTPClient:
         message_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_deleted: bool = False,
     ) -> list[dict]:
-        """List delivery logs for a domain."""
+        """List delivery logs for a domain.
+
+        ``include_deleted`` resolves a soft-deleted domain too (owner or
+        superuser only), so its history stays readable after the delete.
+        """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if status:
             params["status"] = status
         if message_id:
             params["message_id"] = message_id
+        params.update(_flags(include_deleted=include_deleted))
         return self.get(f"/api/v1/domains/{domain_id}/delivery-log", params=params)
 
     def get_delivery_log(self, log_id: UUID | str) -> dict:

@@ -9,8 +9,10 @@ from uuid import uuid4
 import httpx
 import pytest
 import respx
-from fastsmtp_cli.client import APIError, FastSMTPClient
+from fastsmtp_cli.client import APIError, FastSMTPClient, _flags
 from fastsmtp_cli.config import Profile
+
+BASE = "https://api.example.com/api/v1"
 
 
 @pytest.fixture
@@ -349,6 +351,189 @@ class TestUpdateSemantics:
             client.update_rule(domain_id, rule_id, value="spam")
 
         assert json.loads(route.calls[0].request.content) == {"value": "spam"}
+
+
+class TestFlags:
+    """`_flags` turns boolean keyword flags into query params, sent only when true.
+
+    A false flag must vanish from the request entirely so a v0.4.0 server,
+    which declares none of these params, sees byte-identical URLs.
+    """
+
+    def test_no_flags_yields_an_empty_dict(self):
+        assert _flags() == {}
+
+    def test_false_flags_are_omitted(self):
+        assert _flags(include_deleted=False, purge=False) == {}
+
+    def test_true_flag_is_sent_as_the_string_true(self):
+        assert _flags(include_deleted=True) == {"include_deleted": "true"}
+
+    def test_mixed_flags_keep_only_the_true_ones(self):
+        assert _flags(include_deleted=True, purge=False) == {"include_deleted": "true"}
+
+
+def _only_call(route):
+    """The single recorded request on a respx route."""
+    assert len(route.calls) == 1
+    return route.calls[0].request
+
+
+class TestSoftDeleteClientMethods:
+    """Paths and params of the soft-delete methods added for v0.5.0.
+
+    Each ``include_deleted``/``purge`` method is driven twice: with the flag
+    off the request must carry no query string at all, with it on the single
+    ``<flag>=true`` param must be present.
+    """
+
+    DOMAIN = str(uuid4())
+    RECIPIENT = str(uuid4())
+    USER = str(uuid4())
+
+    #: (method name, positional args, flag name, HTTP method, path)
+    FLAGGED = [
+        ("list_api_keys", (), "include_deleted", "get", "/auth/keys"),
+        ("list_users", (), "include_deleted", "get", "/users"),
+        ("get_user", (USER,), "include_deleted", "get", f"/users/{USER}"),
+        ("delete_user", (USER,), "purge", "delete", f"/users/{USER}"),
+        ("list_domains", (), "include_deleted", "get", "/domains"),
+        ("get_domain", (DOMAIN,), "include_deleted", "get", f"/domains/{DOMAIN}"),
+        ("delete_domain", (DOMAIN,), "purge", "delete", f"/domains/{DOMAIN}"),
+        (
+            "list_recipients",
+            (DOMAIN,),
+            "include_deleted",
+            "get",
+            f"/domains/{DOMAIN}/recipients",
+        ),
+        (
+            "get_recipient",
+            (DOMAIN, RECIPIENT),
+            "include_deleted",
+            "get",
+            f"/domains/{DOMAIN}/recipients/{RECIPIENT}",
+        ),
+        (
+            "delete_recipient",
+            (DOMAIN, RECIPIENT),
+            "purge",
+            "delete",
+            f"/domains/{DOMAIN}/recipients/{RECIPIENT}",
+        ),
+    ]
+
+    @pytest.mark.parametrize(("name", "args", "flag", "http_method", "path"), FLAGGED)
+    @respx.mock
+    def test_flag_off_sends_no_query_string(
+        self, test_profile, name, args, flag, http_method, path
+    ):
+        route = getattr(respx, http_method)(f"{BASE}{path}").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            getattr(client, name)(*args)
+
+        request = _only_call(route)
+        assert request.url.path == f"/api/v1{path}"
+        assert request.url.query == b""
+
+    @pytest.mark.parametrize(("name", "args", "flag", "http_method", "path"), FLAGGED)
+    @respx.mock
+    def test_flag_on_sends_true(self, test_profile, name, args, flag, http_method, path):
+        route = getattr(respx, http_method)(f"{BASE}{path}").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            getattr(client, name)(*args, **{flag: True})
+
+        request = _only_call(route)
+        assert request.url.path == f"/api/v1{path}"
+        assert dict(request.url.params) == {flag: "true"}
+
+    @respx.mock
+    def test_list_delivery_logs_omits_include_deleted_when_false(self, test_profile):
+        route = respx.get(f"{BASE}/domains/{self.DOMAIN}/delivery-log").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.list_delivery_logs(self.DOMAIN, status="failed")
+
+        params = dict(_only_call(route).url.params)
+        assert params == {"limit": "50", "offset": "0", "status": "failed"}
+
+    @respx.mock
+    def test_list_delivery_logs_sends_include_deleted_when_true(self, test_profile):
+        route = respx.get(f"{BASE}/domains/{self.DOMAIN}/delivery-log").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            client.list_delivery_logs(self.DOMAIN, include_deleted=True)
+
+        params = dict(_only_call(route).url.params)
+        assert params == {"limit": "50", "offset": "0", "include_deleted": "true"}
+
+    @respx.mock
+    def test_restore_user_posts_to_the_restore_route(self, test_profile):
+        route = respx.post(f"{BASE}/users/{self.USER}/restore").mock(
+            return_value=httpx.Response(200, json={"id": self.USER, "deleted_at": None})
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            result = client.restore_user(self.USER)
+
+        request = _only_call(route)
+        assert request.url.query == b""
+        assert not request.content
+        assert result["deleted_at"] is None
+
+    @respx.mock
+    def test_restore_domain_posts_to_the_restore_route(self, test_profile):
+        route = respx.post(f"{BASE}/domains/{self.DOMAIN}/restore").mock(
+            return_value=httpx.Response(200, json={"id": self.DOMAIN, "deleted_at": None})
+        )
+
+        with FastSMTPClient(profile=test_profile) as client:
+            result = client.restore_domain(self.DOMAIN)
+
+        request = _only_call(route)
+        assert request.url.query == b""
+        assert not request.content
+        assert result["id"] == self.DOMAIN
+
+    @respx.mock
+    def test_restore_recipient_posts_to_the_nested_restore_route(self, test_profile):
+        route = respx.post(
+            f"{BASE}/domains/{self.DOMAIN}/recipients/{self.RECIPIENT}/restore"
+        ).mock(return_value=httpx.Response(200, json={"id": self.RECIPIENT, "deleted_at": None}))
+
+        with FastSMTPClient(profile=test_profile) as client:
+            result = client.restore_recipient(self.DOMAIN, self.RECIPIENT)
+
+        request = _only_call(route)
+        assert request.url.query == b""
+        assert not request.content
+        assert result["id"] == self.RECIPIENT
+
+    @respx.mock
+    def test_restore_conflict_surfaces_the_server_detail(self, test_profile):
+        """A 409 (live row, or name re-taken) must reach the command as-is."""
+        respx.post(f"{BASE}/domains/{self.DOMAIN}/restore").mock(
+            return_value=httpx.Response(409, json={"detail": "Domain is not deleted"})
+        )
+
+        with (
+            FastSMTPClient(profile=test_profile) as client,
+            pytest.raises(APIError) as exc_info,
+        ):
+            client.restore_domain(self.DOMAIN)
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == "Domain is not deleted"
 
 
 class TestClientEndpoints:
