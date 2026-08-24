@@ -227,6 +227,15 @@ class Settings(DatabaseSettings):
         description="Delay between batch deletes (ms) to reduce database load.",
     )
 
+    # Soft delete
+    soft_delete_retention_days: int | None = Field(
+        default=None,
+        ge=1,
+        description="Days a soft-deleted user, API key, domain or recipient stays restorable "
+        "before the cleanup worker purges it permanently. None (default) never purges "
+        "automatically.",
+    )
+
     # Rules engine
     rules_max_body_size: int = Field(
         default=1024 * 1024,  # 1MB

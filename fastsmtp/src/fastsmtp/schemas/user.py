@@ -38,6 +38,7 @@ class UserResponse(UserBase):
     is_superuser: bool
     created_at: datetime
     updated_at: datetime
+    deleted_at: datetime | None = None
 
 
 class UserBriefResponse(BaseModel):
@@ -73,6 +74,7 @@ class APIKeyResponse(APIKeyBase):
     last_used_at: datetime | None
     is_active: bool
     created_at: datetime
+    deleted_at: datetime | None = None
 
 
 class APIKeyCreateResponse(APIKeyResponse):

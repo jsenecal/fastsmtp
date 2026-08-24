@@ -49,6 +49,7 @@ class RecipientResponse(BaseModel):
     is_enabled: bool
     created_at: datetime
     updated_at: datetime
+    deleted_at: datetime | None = None
 
     @property
     def email_pattern(self) -> str:

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
+    ColumnElement,
     DateTime,
     ForeignKey,
     Index,
@@ -21,6 +22,24 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
     pass
+
+
+def _live_unique_index(name: str, *columns: str) -> Index:
+    """Partial unique index over live rows: at most one *live* row per key.
+
+    Tombstones are excluded so a soft-deleted row never blocks re-creating
+    the same key - a username, a domain name, a (domain, local_part) pair.
+    Written as an Index rather than a UniqueConstraint, which cannot take a
+    predicate. Index names are kept from the constraints they replaced so
+    error messages and references stay stable (migrations 007 and 008).
+    """
+    return Index(
+        name,
+        *columns,
+        unique=True,
+        postgresql_where=text("deleted_at IS NULL"),
+        sqlite_where=text("deleted_at IS NULL"),
+    )
 
 
 class Base(DeclarativeBase):
@@ -70,6 +89,15 @@ class SoftDeleteMixin:
         """Check if this record has been soft deleted."""
         return self.deleted_at is not None
 
+    @classmethod
+    def live(cls) -> ColumnElement[bool]:
+        """Filter for rows that are not tombstoned.
+
+        The only place ``deleted_at IS NULL`` is spelled: every read path
+        filters through this so a grep for the primitive audits them all.
+        """
+        return cls.deleted_at.is_(None)
+
 
 class User(Base, TimestampMixin, SoftDeleteMixin):
     """User account model."""
@@ -80,7 +108,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
         primary_key=True,
         default=uuid.uuid4,
     )
-    username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
     is_superuser: Mapped[bool] = mapped_column(default=False, nullable=False)
@@ -94,6 +122,8 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+
+    __table_args__ = (_live_unique_index("ix_users_username", "username"),)
 
     def __repr__(self) -> str:
         return f"<User {self.username}>"
@@ -145,7 +175,7 @@ class Domain(Base, TimestampMixin, SoftDeleteMixin):
         primary_key=True,
         default=uuid.uuid4,
     )
-    domain_name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    domain_name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
     verify_dkim: Mapped[bool | None] = mapped_column(nullable=True)
     verify_spf: Mapped[bool | None] = mapped_column(nullable=True)
@@ -167,6 +197,8 @@ class Domain(Base, TimestampMixin, SoftDeleteMixin):
         back_populates="domain",
         cascade="all, delete-orphan",
     )
+
+    __table_args__ = (_live_unique_index("ix_domains_domain_name", "domain_name"),)
 
     def __repr__(self) -> str:
         return f"<Domain {self.domain_name}>"
@@ -229,21 +261,10 @@ class Recipient(Base, TimestampMixin, SoftDeleteMixin):
     domain: Mapped["Domain"] = relationship(back_populates="recipients")
 
     __table_args__ = (
-        # Partial unique index (not a UniqueConstraint, which cannot take a
-        # predicate): at most one *live* recipient per (domain, local_part).
-        # Soft-deleted rows are excluded so a tombstone does not block
-        # recreating the same local part. NULL local_part rows never conflict
-        # here (SQL NULL semantics); the catch-all case is owned by
-        # ix_recipients_domain_catchall below. The name is kept from the old
-        # constraint so error messages and references stay stable.
-        Index(
-            "uq_recipient_local_part",
-            "domain_id",
-            "local_part",
-            unique=True,
-            postgresql_where=text("deleted_at IS NULL"),
-            sqlite_where=text("deleted_at IS NULL"),
-        ),
+        # At most one *live* recipient per (domain, local_part). NULL
+        # local_part rows never conflict here (SQL NULL semantics); the
+        # catch-all case is owned by ix_recipients_domain_catchall below.
+        _live_unique_index("uq_recipient_local_part", "domain_id", "local_part"),
         Index("ix_recipients_domain_local", "domain_id", "local_part"),
         # Partial unique index to prevent multiple catch-all recipients per domain
         # PostgreSQL allows multiple NULLs in unique constraints, so we need this
@@ -371,7 +392,7 @@ class DeliveryLog(Base, TimestampMixin):
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(
         String(50), nullable=False, index=True
-    )  # pending, delivered, failed, exhausted
+    )  # pending, delivered, failed, exhausted, cancelled
     attempts: Mapped[int] = mapped_column(default=0, nullable=False)
     next_retry_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True

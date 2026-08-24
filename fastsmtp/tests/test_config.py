@@ -264,3 +264,32 @@ class TestMetricsAccessConfig:
         """Test a prefix with host bits set is rejected rather than silently widened."""
         with pytest.raises(ValueError, match="metrics_allowed_ips"):
             self._settings(metrics_allowed_ips=["10.1.2.3/8"])
+
+
+class TestSoftDeleteRetentionConfig:
+    """``soft_delete_retention_days`` drives automatic purging of tombstones.
+
+    The default is *never*: the first upgrade to a soft-deleting release must
+    not silently schedule the destruction of everything that gets deleted.
+    """
+
+    def _settings(self, **overrides) -> Settings:
+        base = {
+            "database_url": "sqlite+aiosqlite:///:memory:",
+            "root_api_key": "test_key_12345",
+        }
+        base.update(overrides)
+        return Settings(_env_file=None, **base)
+
+    def test_default_never_purges(self):
+        assert self._settings().soft_delete_retention_days is None
+
+    def test_parsed_from_environment(self, monkeypatch):
+        monkeypatch.setenv("FASTSMTP_SOFT_DELETE_RETENTION_DAYS", "30")
+        assert self._settings().soft_delete_retention_days == 30
+
+    @pytest.mark.parametrize("days", [0, -1])
+    def test_rejects_non_positive_retention(self, days):
+        """Zero would purge on the next worker tick; the only 'keep forever' is unset."""
+        with pytest.raises(ValidationError, match="soft_delete_retention_days"):
+            self._settings(soft_delete_retention_days=days)

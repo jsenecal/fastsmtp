@@ -1,11 +1,46 @@
 """Shared request validation helpers for the API."""
 
-from fastapi import HTTPException, status
+from typing import Annotated
+
+from fastapi import HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp.config import Settings
+from fastsmtp.db.models import SoftDeleteMixin
 from fastsmtp.rules.conditions import validate_regex_pattern
+
+# Query-parameter aliases shared by every route that exposes soft-delete
+# controls. Declare them as ``include_deleted: IncludeDeleted = False`` /
+# ``purge: Purge = False`` - the default goes on the parameter, never inside
+# ``Annotated``: FastAPI 0.128 asserts on ``Query(False)`` inside ``Annotated``,
+# and a real ``False`` default keeps the direct-call tests in test_api_unit.py
+# working without a request.
+IncludeDeleted = Annotated[
+    bool,
+    Query(description="Include soft-deleted rows (requires the role that may delete them)."),
+]
+Purge = Annotated[
+    bool,
+    Query(
+        description="Permanently delete an already soft-deleted row. Superuser only. "
+        "Cannot be undone."
+    ),
+]
+
+
+def require_tombstoned(obj: SoftDeleteMixin, detail: str) -> None:
+    """Reject purge or restore of a row that is not soft-deleted.
+
+    Purge is only reachable on a tombstone so an accidental ``--purge`` on the
+    wrong id is never a one-shot, unrecoverable delete; restore of a live row
+    is simply a no-op the caller should know about.
+
+    Raises:
+        HTTPException: 409 with ``detail``
+    """
+    if obj.deleted_at is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
 def is_unique_violation(exc: IntegrityError) -> bool:
