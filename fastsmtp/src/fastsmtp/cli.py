@@ -1,17 +1,37 @@
-"""FastSMTP server CLI."""
+"""FastSMTP server CLI.
+
+Deletes are soft: ``user|domain delete`` tombstones the row, ``restore`` clears
+the tombstone, and ``delete --purge`` runs the old hard delete on a row that is
+already tombstoned. Every by-name lookup resolves the *live* row, so a
+tombstone that shares the name never gets in the way (and never raises
+``MultipleResultsFound``); the tombstone-addressed commands (``restore``,
+``--purge``) refuse ambiguity and take ``--id``. Every tombstone write and
+every purge goes through ``fastsmtp.db.soft_delete``; nothing here stamps or
+hard-deletes a soft-deletable row itself.
+"""
 
 import asyncio
 import subprocess
 import sys
+import uuid
+from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
+from sqlalchemy import CursorResult, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp import __version__
+from fastsmtp.api.validation import is_unique_violation
 from fastsmtp.auth.keys import generate_api_key
-from fastsmtp.config import get_settings
+from fastsmtp.config import Settings, get_settings
+from fastsmtp.db.models import Domain, SoftDeleteMixin, User
 
 app = typer.Typer(
     name="fastsmtp",
@@ -30,10 +50,54 @@ app.add_typer(db_app, name="db")
 app.add_typer(user_app, name="user")
 app.add_typer(domain_app, name="domain")
 
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Options shared by the user and domain commands, so the flags read the same
+# everywhere. Declared as ``force: Force = False`` -- the default goes on the
+# parameter, not inside ``Annotated``.
+Force = Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")]
+IncludeDeleted = Annotated[
+    bool, typer.Option("--include-deleted", help="Also list deleted (restorable) entries")
+]
+Purge = Annotated[
+    bool,
+    typer.Option(
+        "--purge",
+        help="Permanently delete an entry that is already deleted. Cannot be undone.",
+    ),
+]
+TombstoneId = Annotated[
+    uuid.UUID | None,
+    typer.Option("--id", help="Pick one entry when several deleted entries share the name"),
+]
+DryRun = Annotated[
+    bool, typer.Option("--dry-run", help="Show what would be deleted without actually deleting")
+]
+OlderThan = Annotated[
+    str | None,
+    typer.Option("--older-than", help="Override retention period in days (e.g., '30d')"),
+]
+
 
 def run_async(coro):
     """Run an async function synchronously."""
     return asyncio.run(coro)
+
+
+def _cleanup_worker_started_line(settings: Settings) -> str:
+    """Console line for ``serve``: the worker runs when either retention job is on."""
+    interval = settings.delivery_log_cleanup_interval_hours
+    logs = (
+        f"{settings.delivery_log_retention_days}d"
+        if settings.delivery_log_cleanup_enabled
+        else "off"
+    )
+    days = settings.soft_delete_retention_days
+    tombstones = f"{days}d" if days is not None else "never"
+    return (
+        f"Cleanup worker started (interval: {interval}h, delivery-log retention: {logs}, "
+        f"soft-delete retention: {tombstones})"
+    )
 
 
 @app.command()
@@ -157,12 +221,11 @@ def serve(
             webhook_worker.start()
             console.print("[green]Webhook worker started[/green]")
 
-            # Start cleanup worker (if enabled)
+            # Start cleanup worker (runs when either retention job is enabled)
             cleanup_worker = CleanupWorker(settings)
             cleanup_worker.start()
-            if settings.delivery_log_cleanup_enabled:
-                interval = settings.delivery_log_cleanup_interval_hours
-                console.print(f"[green]Cleanup worker started (interval: {interval}h)[/green]")
+            if cleanup_worker.enabled:
+                console.print(f"[green]{_cleanup_worker_started_line(settings)}[/green]")
 
         if tasks:
             # Wait for server tasks or shutdown event
@@ -266,6 +329,129 @@ def _run_alembic(*args):
         raise typer.Exit(result.returncode)
 
 
+# Soft-delete helpers shared by the user and domain commands
+
+
+def _fail(message: str) -> typer.Exit:
+    """Print ``message`` in red and return the exit to raise."""
+    console.print(f"[red]{message}[/red]")
+    return typer.Exit(1)
+
+
+def _confirm(force: bool, prompt: str) -> None:
+    """Ask before a destructive step unless ``--force`` was given."""
+    if not force and not typer.confirm(prompt):
+        raise typer.Abort()
+
+
+def _format_timestamp(value: datetime | None) -> str:
+    return value.strftime(TIMESTAMP_FORMAT) if value is not None else ""
+
+
+async def _live_user(session: AsyncSession, username: str) -> User | None:
+    """The live user of that name, if any. Tombstones never match (S20)."""
+    stmt = select(User).where(User.username == username, User.live())
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _live_domain(session: AsyncSession, domain_name: str) -> Domain | None:
+    """The live domain of that name, if any. Tombstones never match (S20)."""
+    stmt = select(Domain).where(Domain.domain_name == domain_name, Domain.live())
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _require_live_user(session: AsyncSession, username: str) -> User:
+    user = await _live_user(session, username)
+    if user is None:
+        raise _fail(f"User '{username}' not found")
+    return user
+
+
+async def _require_live_domain(session: AsyncSession, domain_name: str) -> Domain:
+    domain = await _live_domain(session, domain_name)
+    if domain is None:
+        raise _fail(f"Domain '{domain_name}' not found")
+    return domain
+
+
+async def _tombstones[Named: (User, Domain)](
+    session: AsyncSession,
+    model: type[Named],
+    column: InstrumentedAttribute[str],
+    name: str,
+) -> Sequence[Named]:
+    """Deleted rows whose ``column`` equals ``name``, newest tombstone first."""
+    stmt = select(model).where(column == name, ~model.live()).order_by(model.deleted_at.desc())
+    return (await session.execute(stmt)).scalars().all()
+
+
+def _resolve_tombstone[Named: (User, Domain)](
+    rows: Sequence[Named], id_option: uuid.UUID | None, kind: str, name: str
+) -> Named:
+    """Pick the tombstone a restore/purge addresses; refuse to guess between several."""
+    if not rows:
+        raise _fail(f"No deleted {kind} '{name}'")
+    if id_option is not None:
+        for row in rows:
+            if row.id == id_option:
+                return row
+        raise _fail(f"No deleted {kind} '{name}' with ID {id_option}")
+    if len(rows) > 1:
+        console.print(f"[red]{len(rows)} deleted {kind}s are named '{name}'; pass --id:[/red]")
+        for row in rows:
+            console.print(f"  {row.id}  deleted {_format_timestamp(row.deleted_at)}")
+        raise typer.Exit(1)
+    return rows[0]
+
+
+async def _tombstone[Named: (User, Domain)](
+    session: AsyncSession,
+    model: type[Named],
+    column: InstrumentedAttribute[str],
+    name: str,
+    id_option: uuid.UUID | None,
+    kind: str,
+    *,
+    live: Named | None = None,
+) -> Named:
+    """The tombstone a restore or purge addresses.
+
+    ``--purge`` passes the live namesake, if any: a name that is only live is
+    refused with a pointer to delete it first, so purge is never a one-shot
+    delete of the wrong row.
+    """
+    rows = await _tombstones(session, model, column, name)
+    if not rows and live is not None:
+        raise _fail(f"{kind.capitalize()} '{name}' is not deleted; delete it first, then --purge")
+    return _resolve_tombstone(rows, id_option, kind, name)
+
+
+async def _commit_or_conflict(session: AsyncSession, message: str) -> None:
+    """Commit a restore; a lost race against a re-taken name reports ``message``.
+
+    The pre-check is check-then-commit, so a name taken between the two hits
+    the partial unique index (migration 008) here instead.
+    """
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        if not is_unique_violation(exc):
+            raise
+        raise _fail(message) from exc
+
+
+def _add_deleted_column(table: Table, include_deleted: bool) -> None:
+    if include_deleted:
+        table.add_column("Deleted", style="red")
+
+
+def _add_row(table: Table, row: SoftDeleteMixin, *cells: str, include_deleted: bool) -> None:
+    """Add a list row; with ``--include-deleted`` the tombstone stamp joins it, dimmed."""
+    if include_deleted:
+        cells = (*cells, _format_timestamp(row.deleted_at))
+    table.add_row(*cells, style="dim" if row.is_deleted else None)
+
+
 # User commands
 
 
@@ -276,19 +462,12 @@ def user_create(
     superuser: bool = typer.Option(False, "--superuser", help="Create as superuser"),
 ):
     """Create a new user."""
-    from fastsmtp.db.models import User
     from fastsmtp.db.session import async_session
 
     async def create():
         async with async_session() as session:
-            # Check if user exists
-            from sqlalchemy import select
-
-            stmt = select(User).where(User.username == username)
-            result = await session.execute(stmt)
-            if result.scalar_one_or_none():
-                console.print(f"[red]User '{username}' already exists[/red]")
-                raise typer.Exit(1)
+            if await _live_user(session, username):
+                raise _fail(f"User '{username}' already exists")
 
             user = User(username=username, email=email, is_superuser=superuser)
             session.add(user)
@@ -303,16 +482,14 @@ def user_create(
 
 
 @user_app.command("list")
-def user_list():
+def user_list(include_deleted: IncludeDeleted = False):
     """List all users."""
-    from fastsmtp.db.models import User
     from fastsmtp.db.session import async_session
+    from fastsmtp.db.soft_delete import visible
 
     async def list_users():
         async with async_session() as session:
-            from sqlalchemy import select
-
-            stmt = select(User).order_by(User.username)
+            stmt = select(User).where(visible(User, include_deleted)).order_by(User.username)
             result = await session.execute(stmt)
             users = result.scalars().all()
 
@@ -322,14 +499,18 @@ def user_list():
             table.add_column("Email")
             table.add_column("Active")
             table.add_column("Superuser")
+            _add_deleted_column(table, include_deleted)
 
             for user in users:
-                table.add_row(
+                _add_row(
+                    table,
+                    user,
                     str(user.id)[:8],
                     user.username,
                     user.email or "",
                     "✓" if user.is_active else "✗",
                     "✓" if user.is_superuser else "✗",
+                    include_deleted=include_deleted,
                 )
 
             console.print(table)
@@ -340,34 +521,83 @@ def user_list():
 @user_app.command("delete")
 def user_delete(
     username: str = typer.Argument(..., help="Username to delete"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+    force: Force = False,
+    purge: Purge = False,
+    id_option: TombstoneId = None,
 ):
-    """Delete a user."""
-    from fastsmtp.db.models import User
+    """Delete a user (restorable with 'user restore'), or --purge one already deleted.
+
+    Deleting revokes the user's API keys for good; memberships return on restore.
+    --purge permanently removes a deleted user with their keys and memberships.
+    """
+    from fastsmtp.db import soft_delete
     from fastsmtp.db.session import async_session
 
     async def delete():
         async with async_session() as session:
-            from sqlalchemy import select
+            if purge:
+                user = await _tombstone(
+                    session,
+                    User,
+                    User.username,
+                    username,
+                    id_option,
+                    "user",
+                    live=await _live_user(session, username),
+                )
+                _confirm(
+                    force,
+                    f"Permanently delete user '{username}' "
+                    f"(deleted {_format_timestamp(user.deleted_at)}) and all their API keys "
+                    "and memberships? This cannot be undone.",
+                )
+                await soft_delete.purge_user(session, user)
+                await session.commit()
+                console.print(f"[green]Purged user '{username}'[/green]")
+                return
 
-            stmt = select(User).where(User.username == username)
-            result = await session.execute(stmt)
-            user = result.scalar_one_or_none()
-
-            if not user:
-                console.print(f"[red]User '{username}' not found[/red]")
-                raise typer.Exit(1)
-
-            if not force:
-                confirm = typer.confirm(f"Delete user '{username}'?")
-                if not confirm:
-                    raise typer.Abort()
-
-            await session.delete(user)
+            user = await _require_live_user(session, username)
+            _confirm(
+                force,
+                f"Delete user '{username}'? (restorable with: fastsmtp user restore {username})",
+            )
+            revoked = await soft_delete.soft_delete_user(session, user)
             await session.commit()
-            console.print(f"[green]Deleted user '{username}'[/green]")
+            console.print(
+                f"[green]Deleted user '{username}' ({revoked} API key(s) revoked; "
+                f"restore with: fastsmtp user restore {username})[/green]"
+            )
 
     run_async(delete())
+
+
+@user_app.command("restore")
+def user_restore(
+    username: str = typer.Argument(..., help="Username to restore"),
+    id_option: TombstoneId = None,
+):
+    """Restore a deleted user. API keys revoked at deletion stay revoked."""
+    from fastsmtp.db import soft_delete
+    from fastsmtp.db.session import async_session
+
+    conflict = f"User '{username}' already exists; rename or purge it first"
+
+    async def restore():
+        async with async_session() as session:
+            user = await _tombstone(session, User, User.username, username, id_option, "user")
+            if await _live_user(session, username):
+                raise _fail(conflict)
+
+            await soft_delete.restore_user(session, user)
+            await _commit_or_conflict(session, conflict)
+
+            console.print(f"[green]Restored user '{username}' (ID: {user.id})[/green]")
+            console.print(
+                "[yellow]API keys revoked at deletion are not restored; generate new ones "
+                f"with: fastsmtp user generate-key {username}[/yellow]"
+            )
+
+    run_async(restore())
 
 
 @user_app.command("set-superuser")
@@ -376,24 +606,14 @@ def user_set_superuser(
     enable: bool = typer.Option(None, "--enable/--disable", help="Enable or disable superuser"),
 ):
     """Set or unset superuser status."""
-    from fastsmtp.db.models import User
     from fastsmtp.db.session import async_session
 
     if enable is None:
-        console.print("[red]Please specify --enable or --disable[/red]")
-        raise typer.Exit(1)
+        raise _fail("Please specify --enable or --disable")
 
     async def update():
         async with async_session() as session:
-            from sqlalchemy import select
-
-            stmt = select(User).where(User.username == username)
-            result = await session.execute(stmt)
-            user = result.scalar_one_or_none()
-
-            if not user:
-                console.print(f"[red]User '{username}' not found[/red]")
-                raise typer.Exit(1)
+            user = await _require_live_user(session, username)
 
             user.is_superuser = enable
             await session.commit()
@@ -411,20 +631,13 @@ def user_generate_key(
     scopes: str = typer.Option(None, "--scopes", "-s", help="Comma-separated scopes"),
 ):
     """Generate an API key for a user."""
-    from fastsmtp.db.models import APIKey, User
+    from fastsmtp.db.models import APIKey
     from fastsmtp.db.session import async_session
 
     async def generate():
         async with async_session() as session:
-            from sqlalchemy import select
-
-            stmt = select(User).where(User.username == username)
-            result = await session.execute(stmt)
-            user = result.scalar_one_or_none()
-
-            if not user:
-                console.print(f"[red]User '{username}' not found[/red]")
-                raise typer.Exit(1)
+            # A deleted user is simply not found: no key may be minted for a tombstone.
+            user = await _require_live_user(session, username)
 
             full_key, key_prefix, key_hash, key_salt = generate_api_key()
             scope_list = scopes.split(",") if scopes else []
@@ -455,18 +668,12 @@ def domain_create(
     domain_name: str = typer.Argument(..., help="Domain name"),
 ):
     """Create a new domain."""
-    from fastsmtp.db.models import Domain
     from fastsmtp.db.session import async_session
 
     async def create():
         async with async_session() as session:
-            from sqlalchemy import select
-
-            stmt = select(Domain).where(Domain.domain_name == domain_name)
-            result = await session.execute(stmt)
-            if result.scalar_one_or_none():
-                console.print(f"[red]Domain '{domain_name}' already exists[/red]")
-                raise typer.Exit(1)
+            if await _live_domain(session, domain_name):
+                raise _fail(f"Domain '{domain_name}' already exists")
 
             domain = Domain(domain_name=domain_name)
             session.add(domain)
@@ -479,16 +686,16 @@ def domain_create(
 
 
 @domain_app.command("list")
-def domain_list():
+def domain_list(include_deleted: IncludeDeleted = False):
     """List all domains."""
-    from fastsmtp.db.models import Domain
     from fastsmtp.db.session import async_session
+    from fastsmtp.db.soft_delete import visible
 
     async def list_domains():
         async with async_session() as session:
-            from sqlalchemy import select
-
-            stmt = select(Domain).order_by(Domain.domain_name)
+            stmt = (
+                select(Domain).where(visible(Domain, include_deleted)).order_by(Domain.domain_name)
+            )
             result = await session.execute(stmt)
             domains = result.scalars().all()
 
@@ -498,14 +705,18 @@ def domain_list():
             table.add_column("Enabled")
             table.add_column("DKIM")
             table.add_column("SPF")
+            _add_deleted_column(table, include_deleted)
 
             for domain in domains:
-                table.add_row(
+                _add_row(
+                    table,
+                    domain,
                     str(domain.id)[:8],
                     domain.domain_name,
                     "✓" if domain.is_enabled else "✗",
                     str(domain.verify_dkim) if domain.verify_dkim is not None else "default",
                     str(domain.verify_spf) if domain.verify_spf is not None else "default",
+                    include_deleted=include_deleted,
                 )
 
             console.print(table)
@@ -516,34 +727,86 @@ def domain_list():
 @domain_app.command("delete")
 def domain_delete(
     domain_name: str = typer.Argument(..., help="Domain name to delete"),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+    force: Force = False,
+    purge: Purge = False,
+    id_option: TombstoneId = None,
 ):
-    """Delete a domain."""
-    from fastsmtp.db.models import Domain
+    """Delete a domain (restorable with 'domain restore'), or --purge one already deleted.
+
+    Deleting also deletes the domain's recipients and cancels their queued deliveries.
+    Rulesets and members are kept and return on restore.
+    --purge permanently removes a deleted domain with its recipients, rulesets and members.
+    Delivery history survives a purge with its domain and recipient links cleared.
+    """
+    from fastsmtp.db import soft_delete
     from fastsmtp.db.session import async_session
 
     async def delete():
         async with async_session() as session:
-            from sqlalchemy import select
+            if purge:
+                domain = await _tombstone(
+                    session,
+                    Domain,
+                    Domain.domain_name,
+                    domain_name,
+                    id_option,
+                    "domain",
+                    live=await _live_domain(session, domain_name),
+                )
+                _confirm(
+                    force,
+                    f"Permanently delete domain '{domain_name}' "
+                    f"(deleted {_format_timestamp(domain.deleted_at)}) and all its recipients, "
+                    "rulesets and members? This cannot be undone.",
+                )
+                await soft_delete.purge_domain(session, domain)
+                await session.commit()
+                console.print(f"[green]Purged domain '{domain_name}'[/green]")
+                return
 
-            stmt = select(Domain).where(Domain.domain_name == domain_name)
-            result = await session.execute(stmt)
-            domain = result.scalar_one_or_none()
-
-            if not domain:
-                console.print(f"[red]Domain '{domain_name}' not found[/red]")
-                raise typer.Exit(1)
-
-            if not force:
-                confirm = typer.confirm(f"Delete domain '{domain_name}'?")
-                if not confirm:
-                    raise typer.Abort()
-
-            await session.delete(domain)
+            domain = await _require_live_domain(session, domain_name)
+            _confirm(
+                force,
+                f"Delete domain '{domain_name}'? "
+                f"(restorable with: fastsmtp domain restore {domain_name})",
+            )
+            recipients, cancelled = await soft_delete.soft_delete_domain(session, domain)
             await session.commit()
-            console.print(f"[green]Deleted domain '{domain_name}'[/green]")
+            console.print(
+                f"[green]Deleted domain '{domain_name}' ({recipients} recipient(s) deleted, "
+                f"{cancelled} delivery(ies) cancelled; "
+                f"restore with: fastsmtp domain restore {domain_name})[/green]"
+            )
 
     run_async(delete())
+
+
+@domain_app.command("restore")
+def domain_restore(
+    domain_name: str = typer.Argument(..., help="Domain name to restore"),
+    id_option: TombstoneId = None,
+):
+    """Restore a deleted domain and the recipients deleted with it."""
+    from fastsmtp.db import soft_delete
+    from fastsmtp.db.session import async_session
+
+    conflict = f"Domain '{domain_name}' already exists; rename or purge it first"
+
+    async def restore():
+        async with async_session() as session:
+            domain = await _tombstone(
+                session, Domain, Domain.domain_name, domain_name, id_option, "domain"
+            )
+            if await _live_domain(session, domain_name):
+                raise _fail(conflict)
+
+            recipients = await soft_delete.restore_domain(session, domain)
+            await _commit_or_conflict(session, conflict)
+
+            console.print(f"[green]Restored domain '{domain_name}' (ID: {domain.id})[/green]")
+            console.print(f"[green]{recipients} recipient(s) restored[/green]")
+
+    run_async(restore())
 
 
 @domain_app.command("add-member")
@@ -553,32 +816,17 @@ def domain_add_member(
     role: str = typer.Option("member", "--role", "-r", help="Role: owner, admin, member"),
 ):
     """Add a member to a domain."""
-    from fastsmtp.db.models import Domain, DomainMember, User
+    from fastsmtp.db.models import DomainMember
     from fastsmtp.db.session import async_session
 
     if role not in ("owner", "admin", "member"):
-        console.print(f"[red]Invalid role '{role}'. Use: owner, admin, member[/red]")
-        raise typer.Exit(1)
+        raise _fail(f"Invalid role '{role}'. Use: owner, admin, member")
 
     async def add():
         async with async_session() as session:
-            from sqlalchemy import select
-
-            # Get domain
-            domain_stmt = select(Domain).where(Domain.domain_name == domain_name)
-            domain_result = await session.execute(domain_stmt)
-            domain = domain_result.scalar_one_or_none()
-            if not domain:
-                console.print(f"[red]Domain '{domain_name}' not found[/red]")
-                raise typer.Exit(1)
-
-            # Get user
-            user_stmt = select(User).where(User.username == username)
-            user_result = await session.execute(user_stmt)
-            user = user_result.scalar_one_or_none()
-            if not user:
-                console.print(f"[red]User '{username}' not found[/red]")
-                raise typer.Exit(1)
+            domain = await _require_live_domain(session, domain_name)
+            # A deleted user is not found: no membership is granted to a tombstone.
+            user = await _require_live_user(session, username)
 
             # Check existing membership
             member_stmt = select(DomainMember).where(
@@ -587,10 +835,7 @@ def domain_add_member(
             )
             member_result = await session.execute(member_stmt)
             if member_result.scalar_one_or_none():
-                console.print(
-                    f"[red]User '{username}' is already a member of '{domain_name}'[/red]"
-                )
-                raise typer.Exit(1)
+                raise _fail(f"User '{username}' is already a member of '{domain_name}'")
 
             member = DomainMember(domain_id=domain.id, user_id=user.id, role=role)
             session.add(member)
@@ -607,41 +852,26 @@ def domain_remove_member(
     username: str = typer.Argument(..., help="Username to remove"),
 ):
     """Remove a member from a domain."""
-    from fastsmtp.db.models import Domain, DomainMember, User
+    from sqlalchemy import delete
+
+    from fastsmtp.db.models import DomainMember
     from fastsmtp.db.session import async_session
 
     async def remove():
         async with async_session() as session:
-            from sqlalchemy import select
+            domain = await _require_live_domain(session, domain_name)
+            user = await _require_live_user(session, username)
 
-            # Get domain
-            domain_stmt = select(Domain).where(Domain.domain_name == domain_name)
-            domain_result = await session.execute(domain_stmt)
-            domain = domain_result.scalar_one_or_none()
-            if not domain:
-                console.print(f"[red]Domain '{domain_name}' not found[/red]")
-                raise typer.Exit(1)
-
-            # Get user
-            user_stmt = select(User).where(User.username == username)
-            user_result = await session.execute(user_stmt)
-            user = user_result.scalar_one_or_none()
-            if not user:
-                console.print(f"[red]User '{username}' not found[/red]")
-                raise typer.Exit(1)
-
-            # Get membership
-            member_stmt = select(DomainMember).where(
+            # Membership is an edge with no tombstone of its own: removing it is
+            # a hard delete, as before.
+            member_stmt = delete(DomainMember).where(
                 DomainMember.domain_id == domain.id,
                 DomainMember.user_id == user.id,
             )
-            member_result = await session.execute(member_stmt)
-            member = member_result.scalar_one_or_none()
-            if not member:
-                console.print(f"[red]User '{username}' is not a member of '{domain_name}'[/red]")
-                raise typer.Exit(1)
-
-            await session.delete(member)
+            result = await session.execute(member_stmt)
+            assert isinstance(result, CursorResult)  # execute() is typed as Result[Any]
+            if result.rowcount == 0:
+                raise _fail(f"User '{username}' is not a member of '{domain_name}'")
             await session.commit()
 
             console.print(f"[green]Removed '{username}' from '{domain_name}'[/green]")
@@ -649,29 +879,33 @@ def domain_remove_member(
     run_async(remove())
 
 
+# Maintenance commands
+
+
+def _retention_override(older_than: str | None) -> int | None:
+    """Days from ``--older-than``; ``None`` when not given. Exits on a bad format."""
+    if not older_than:
+        return None
+    retention_days = _parse_duration_to_days(older_than)
+    if retention_days is None:
+        console.print(f"[red]Invalid duration format: {older_than}[/red]")
+        console.print("Use format like '30d' (days)")
+        raise typer.Exit(1)
+    return retention_days
+
+
+def _format_cutoff(cutoff_date: datetime) -> str:
+    return f"{_format_timestamp(cutoff_date)} UTC"
+
+
 @app.command()
-def cleanup(
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Show what would be deleted without actually deleting"
-    ),
-    older_than: str | None = typer.Option(
-        None, "--older-than", help="Override retention period in days (e.g., '30d')"
-    ),
-):
+def cleanup(dry_run: DryRun = False, older_than: OlderThan = None):
     """Clean up old delivery log records."""
     from fastsmtp.cleanup.service import DeliveryLogCleanupService
     from fastsmtp.db.session import async_session
 
     settings = get_settings()
-
-    # Parse older_than if provided
-    retention_days: int | None = None
-    if older_than:
-        retention_days = _parse_duration_to_days(older_than)
-        if retention_days is None:
-            console.print(f"[red]Invalid duration format: {older_than}[/red]")
-            console.print("Use format like '30d' (days)")
-            raise typer.Exit(1)
+    retention_days = _retention_override(older_than)
 
     async def run_cleanup():
         async with async_session() as session:
@@ -681,7 +915,7 @@ def cleanup(
 
     result = run_async(run_cleanup())
 
-    cutoff_str = result.cutoff_date.strftime("%Y-%m-%d %H:%M:%S UTC")
+    cutoff_str = _format_cutoff(result.cutoff_date)
 
     if dry_run:
         console.print(
@@ -693,6 +927,39 @@ def cleanup(
             f"[green]Deleted {result.deleted_count} delivery log records "
             f"older than {cutoff_str}[/green]"
         )
+
+
+@app.command("purge-deleted")
+def purge_deleted(dry_run: DryRun = False, older_than: OlderThan = None):
+    """Permanently remove users, API keys, domains and recipients deleted long enough ago.
+
+    The retention period is FASTSMTP_SOFT_DELETE_RETENTION_DAYS unless --older-than is given.
+    Delivery history survives a purge with its domain and recipient links cleared.
+    """
+    from fastsmtp.cleanup.purge import SoftDeletePurgeService
+    from fastsmtp.db.session import async_session
+
+    settings = get_settings()
+    retention_days = _retention_override(older_than)
+
+    async def run_purge():
+        async with async_session() as session:
+            service = SoftDeletePurgeService(settings, session)
+            return await service.purge(dry_run=dry_run, retention_days=retention_days)
+
+    try:
+        result = run_async(run_purge())
+    except ValueError as exc:
+        # The service refuses to compute a cutoff without a retention window.
+        raise _fail(
+            "No retention configured. Set FASTSMTP_SOFT_DELETE_RETENTION_DAYS or pass --older-than."
+        ) from exc
+
+    verb, colour = ("Would purge", "yellow") if dry_run else ("Purged", "green")
+    console.print(
+        f"[{colour}]{verb} {result.total} soft-deleted rows older than "
+        f"{_format_cutoff(result.cutoff_date)} ({result.breakdown})[/{colour}]"
+    )
 
 
 def _parse_duration_to_days(duration: str) -> int | None:
