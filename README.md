@@ -47,10 +47,10 @@ uv sync
 export FASTSMTP_DATABASE_URL="postgresql+asyncpg://user:pass@localhost/fastsmtp"
 export FASTSMTP_ROOT_API_KEY="your-secure-root-key"
 
-# Run database migrations
+# Run database migrations (needs only FASTSMTP_DATABASE_URL)
 uv run fastsmtp db upgrade
 
-# Start the server
+# Start the server (needs FASTSMTP_ROOT_API_KEY as well)
 uv run fastsmtp serve
 ```
 
@@ -356,7 +356,7 @@ do nothing.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FASTSMTP_ROOT_API_KEY` | *required* | Root API key for superuser access |
+| `FASTSMTP_ROOT_API_KEY` | *required* | Root API key for superuser access. Required by `fastsmtp serve`; not read by `fastsmtp db` |
 
 ## Architecture
 
@@ -643,6 +643,9 @@ fastsmtp serve --shutdown-timeout 60
 ```
 
 #### Database Management
+
+The `db` commands read only `FASTSMTP_DATABASE_URL`; the root API key and S3 settings
+are not needed, so a one-off migration Job can be given just the database URL.
 
 ```bash
 # Apply all pending migrations

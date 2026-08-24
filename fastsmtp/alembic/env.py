@@ -4,7 +4,7 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from fastsmtp.config import get_settings
+from fastsmtp.config import DatabaseSettings
 from fastsmtp.db.models import Base
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -16,8 +16,10 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Only the URL is needed here. Loading the full Settings would demand a root
+# API key and apply the S3 cross-field rules, none of which a migration run
+# uses -- a one-off Job given just the database URL must be able to run.
+config.set_main_option("sqlalchemy.url", DatabaseSettings().database_url)
 
 
 def run_migrations_offline() -> None:

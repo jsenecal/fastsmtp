@@ -48,6 +48,10 @@ revisions and the migrations that have not been applied.
 This turns a missed `fastsmtp db upgrade head` into an immediate, explicit failure
 instead of a `UndefinedColumn` error on the first query that touches a new column.
 
+`fastsmtp db upgrade head` itself reads only `FASTSMTP_DATABASE_URL`: the migration
+Job or pod does not need the root API key, the S3 settings, or anything else `serve`
+requires.
+
 A database *ahead* of the build is allowed, so a rolling deploy that migrates before the
 old pods are gone does not take them down. A database with no `alembic_version` table
 cannot be compared and is allowed with a warning.
@@ -193,4 +197,4 @@ and the reverse-proxy caveats.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FASTSMTP_ROOT_API_KEY` | *required* | Root API key for superuser access |
+| `FASTSMTP_ROOT_API_KEY` | *required* | Root API key for superuser access. Required by `fastsmtp serve`; not read by `fastsmtp db` |

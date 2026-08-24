@@ -103,6 +103,18 @@ def make_smtp_settings() -> Callable[..., Settings]:
     return make
 
 
+@pytest.fixture
+def scrubbed_environ() -> dict[str, str]:
+    """``os.environ`` with every ``FASTSMTP_*`` variable removed.
+
+    This module exports a root API key (and more) for the whole session, so a
+    child process that has to prove it needs *less* than the server -- the
+    migration chain, ``fastsmtp db`` -- must start from an environment with
+    that namespace cleared and add back only what it is entitled to.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("FASTSMTP_")}
+
+
 @pytest_asyncio.fixture
 async def test_engine(test_settings: Settings):
     """Create test database engine with fresh tables."""

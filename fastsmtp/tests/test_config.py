@@ -1,7 +1,45 @@
 """Tests for configuration settings."""
 
 import pytest
-from fastsmtp.config import Settings
+from fastsmtp.config import DatabaseSettings, Settings
+from pydantic import ValidationError
+
+
+class TestSettingsScope:
+    """The full model is for ``serve``; the migration tooling gets a narrower view.
+
+    ``DatabaseSettings`` exists so ``alembic/env.py`` can resolve the database
+    URL without being handed a root API key it never uses (issue #110). The
+    root key stays required on ``Settings`` -- the point is scoping, not
+    weakening.
+    """
+
+    def test_root_api_key_is_still_required_for_the_full_settings(self, monkeypatch):
+        monkeypatch.delenv("FASTSMTP_ROOT_API_KEY", raising=False)
+        with pytest.raises(ValidationError, match="root_api_key"):
+            Settings(_env_file=None, database_url="sqlite+aiosqlite:///:memory:")
+
+    def test_database_settings_need_only_the_url(self, monkeypatch):
+        monkeypatch.delenv("FASTSMTP_ROOT_API_KEY", raising=False)
+        monkeypatch.setenv("FASTSMTP_DATABASE_URL", "sqlite+aiosqlite:///scoped.db")
+        settings = DatabaseSettings(_env_file=None)
+        assert settings.database_url == "sqlite+aiosqlite:///scoped.db"
+
+    def test_database_settings_ignore_the_s3_cross_field_rules(self, monkeypatch):
+        """A config map shared with the serving pods must not break migrations."""
+        monkeypatch.delenv("FASTSMTP_ROOT_API_KEY", raising=False)
+        monkeypatch.setenv("FASTSMTP_DATABASE_URL", "sqlite+aiosqlite:///scoped.db")
+        monkeypatch.setenv("FASTSMTP_ATTACHMENT_STORAGE", "s3")
+        DatabaseSettings(_env_file=None)
+
+    def test_database_settings_share_env_semantics_with_the_full_model(self):
+        """Same prefix and .env handling, so the two views cannot drift apart."""
+        assert issubclass(Settings, DatabaseSettings)
+        assert Settings.model_config == DatabaseSettings.model_config
+        assert (
+            Settings.model_fields["database_url"].default
+            == DatabaseSettings.model_fields["database_url"].default
+        )
 
 
 class TestS3ConfigValidation:

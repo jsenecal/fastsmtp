@@ -20,10 +20,10 @@ uv sync
 export FASTSMTP_DATABASE_URL="postgresql+asyncpg://user:pass@localhost/fastsmtp"
 export FASTSMTP_ROOT_API_KEY="your-secure-root-key"
 
-# Run database migrations
+# Run database migrations (needs only FASTSMTP_DATABASE_URL)
 uv run fastsmtp db upgrade head
 
-# Start the server
+# Start the server (needs FASTSMTP_ROOT_API_KEY as well)
 uv run fastsmtp serve
 ```
 
