@@ -1,11 +1,16 @@
 """Extended tests for users API endpoints to improve coverage."""
 
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
-from fastsmtp.db.models import User
-from httpx import AsyncClient
-from sqlalchemy import false
+import pytest_asyncio
+from fastapi import FastAPI
+from fastsmtp.auth import generate_api_key
+from fastsmtp.db.models import APIKey, User
+from fastsmtp.db.soft_delete import soft_delete_user
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -207,7 +212,10 @@ class TestUserConflictRace:
         """Make the duplicate pre-check see no conflict, as the race's loser does."""
         import fastsmtp.api.users as users_api
 
-        monkeypatch.setattr(users_api, "_conflicting_username", lambda username: false())
+        async def username_is_free(session: AsyncSession, username: str) -> bool:
+            return False
+
+        monkeypatch.setattr(users_api, "_live_username_taken", username_is_free)
 
     @pytest.mark.asyncio
     async def test_raced_duplicate_create_returns_409(
@@ -244,3 +252,345 @@ class TestUserConflictRace:
         response = await auth_client.put(f"/api/v1/users/{target.id}", json={"username": "keep"})
         assert response.status_code == 409
         assert response.json()["detail"] == "Username already exists"
+
+    @pytest.mark.asyncio
+    async def test_raced_restore_returns_409(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        losing_precheck: None,
+    ):
+        """A restore that loses the race to a re-created name hits the 008 index -> 409.
+
+        The partial unique index only covers live rows, so clearing the
+        tombstone while a live row holds the name is the violation.
+        """
+        old = User(username="phoenix", is_active=True)
+        test_session.add(old)
+        await test_session.commit()
+        await soft_delete_user(test_session, old)
+        await test_session.commit()
+        test_session.add(User(username="phoenix", is_active=True))
+        await test_session.commit()
+
+        response = await auth_client.post(f"/api/v1/users/{old.id}/restore")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Username already exists"
+
+        # The translated conflict must leave the app serviceable
+        fresh = await auth_client.post("/api/v1/users", json={"username": "unraced"})
+        assert fresh.status_code == 201
+
+
+ClientFor = Callable[[User], Awaitable[AsyncClient]]
+
+
+class TestUserSoftDelete:
+    """DELETE tombstones, restore clears it, purge is the old hard delete on a tombstone."""
+
+    @pytest_asyncio.fixture
+    async def client_for(
+        self, app: FastAPI, test_session: AsyncSession
+    ) -> AsyncIterator[ClientFor]:
+        """Build an authenticated client for a (persisted) user with a fresh key."""
+        clients: list[AsyncClient] = []
+
+        async def make(user: User) -> AsyncClient:
+            full_key, key_prefix, key_hash, key_salt = generate_api_key()
+            test_session.add(
+                APIKey(
+                    user_id=user.id,
+                    key_hash=key_hash,
+                    key_salt=key_salt,
+                    key_prefix=key_prefix,
+                    name=f"{user.username} key",
+                    scopes=[],
+                    is_active=True,
+                )
+            )
+            await test_session.commit()
+            client = AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+                headers={"X-API-Key": full_key},
+            )
+            clients.append(client)
+            return client
+
+        yield make
+        for client in clients:
+            await client.aclose()
+
+    @pytest_asyncio.fixture
+    async def user(self, test_session: AsyncSession) -> User:
+        user = User(username="alice", email="alice@example.com", is_active=True)
+        test_session.add(user)
+        await test_session.commit()
+        await test_session.refresh(user)
+        return user
+
+    @pytest_asyncio.fixture
+    async def deleted_user(
+        self, auth_client: AsyncClient, test_session: AsyncSession, user: User
+    ) -> User:
+        response = await auth_client.delete(f"/api/v1/users/{user.id}")
+        assert response.status_code == 200
+        await test_session.refresh(user)
+        assert user.deleted_at is not None
+        return user
+
+    # -- delete -------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_delete_tombstones_and_keeps_message(
+        self, auth_client: AsyncClient, test_session: AsyncSession, user: User
+    ):
+        response = await auth_client.delete(f"/api/v1/users/{user.id}")
+        assert response.status_code == 200
+        assert response.json()["message"] == "User alice deleted"
+
+        await test_session.refresh(user)
+        assert user.deleted_at is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_revokes_keys(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        user: User,
+        client_for: ClientFor,
+    ):
+        await client_for(user)
+
+        response = await auth_client.delete(f"/api/v1/users/{user.id}")
+        assert response.status_code == 200
+
+        keys = (
+            (await test_session.execute(select(APIKey).where(APIKey.user_id == user.id)))
+            .scalars()
+            .all()
+        )
+        assert len(keys) == 1
+        await test_session.refresh(keys[0])
+        assert keys[0].deleted_at is not None
+        assert keys[0].is_active is False
+
+    @pytest.mark.asyncio
+    async def test_delete_tombstone_again_is_404(
+        self, auth_client: AsyncClient, deleted_user: User
+    ):
+        response = await auth_client.delete(f"/api/v1/users/{deleted_user.id}")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "User not found"
+
+    @pytest.mark.asyncio
+    async def test_self_delete_400_in_both_modes(
+        self, test_session: AsyncSession, client_for: ClientFor
+    ):
+        admin = User(username="admin", is_active=True, is_superuser=True)
+        test_session.add(admin)
+        await test_session.commit()
+        await test_session.refresh(admin)
+        client = await client_for(admin)
+
+        for params in ({}, {"purge": "true"}):
+            response = await client.delete(f"/api/v1/users/{admin.id}", params=params)
+            assert response.status_code == 400, params
+            assert response.json()["detail"] == "Cannot delete your own account"
+
+        await test_session.refresh(admin)
+        assert admin.deleted_at is None
+
+    # -- reads --------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_get_hides_tombstone_unless_include_deleted(
+        self, auth_client: AsyncClient, deleted_user: User
+    ):
+        response = await auth_client.get(f"/api/v1/users/{deleted_user.id}")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "User not found"
+
+        response = await auth_client.get(
+            f"/api/v1/users/{deleted_user.id}", params={"include_deleted": "true"}
+        )
+        assert response.status_code == 200
+        assert response.json()["deleted_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_list_hides_tombstone_unless_include_deleted(
+        self, auth_client: AsyncClient, deleted_user: User
+    ):
+        response = await auth_client.get("/api/v1/users")
+        assert response.status_code == 200
+        assert "alice" not in {u["username"] for u in response.json()}
+
+        response = await auth_client.get("/api/v1/users", params={"include_deleted": "true"})
+        assert response.status_code == 200
+        rows = {u["username"]: u for u in response.json()}
+        assert rows["alice"]["deleted_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_include_deleted_below_superuser_is_403(
+        self, test_session: AsyncSession, client_for: ClientFor, deleted_user: User
+    ):
+        plain = User(username="plain", is_active=True)
+        test_session.add(plain)
+        await test_session.commit()
+        await test_session.refresh(plain)
+        client = await client_for(plain)
+
+        for url in ("/api/v1/users", f"/api/v1/users/{deleted_user.id}"):
+            response = await client.get(url, params={"include_deleted": "true"})
+            assert response.status_code == 403, url
+
+    @pytest.mark.asyncio
+    async def test_update_tombstone_is_404(self, auth_client: AsyncClient, deleted_user: User):
+        response = await auth_client.put(
+            f"/api/v1/users/{deleted_user.id}", json={"email": "x@example.com"}
+        )
+        assert response.status_code == 404
+
+    # -- name reuse (S18) ---------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_create_after_delete_is_201(self, auth_client: AsyncClient, deleted_user: User):
+        response = await auth_client.post("/api/v1/users", json={"username": "alice"})
+        assert response.status_code == 201
+        assert response.json()["id"] != str(deleted_user.id)
+
+    @pytest.mark.asyncio
+    async def test_update_to_tombstoned_name_is_200(
+        self, auth_client: AsyncClient, test_session: AsyncSession, deleted_user: User
+    ):
+        other = User(username="bob", is_active=True)
+        test_session.add(other)
+        await test_session.commit()
+        await test_session.refresh(other)
+
+        response = await auth_client.put(f"/api/v1/users/{other.id}", json={"username": "alice"})
+        assert response.status_code == 200
+        assert response.json()["username"] == "alice"
+
+    # -- restore ------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_restore_clears_tombstone(self, auth_client: AsyncClient, deleted_user: User):
+        response = await auth_client.post(f"/api/v1/users/{deleted_user.id}/restore")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == str(deleted_user.id)
+        assert body["deleted_at"] is None
+
+        response = await auth_client.get(f"/api/v1/users/{deleted_user.id}")
+        assert response.status_code == 200
+        assert response.json()["deleted_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_restore_leaves_keys_revoked(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        user: User,
+        client_for: ClientFor,
+    ):
+        key_client = await client_for(user)
+        assert (await auth_client.delete(f"/api/v1/users/{user.id}")).status_code == 200
+        assert (await auth_client.post(f"/api/v1/users/{user.id}/restore")).status_code == 200
+
+        response = await key_client.get("/api/v1/auth/me")
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_restore_live_is_409(self, auth_client: AsyncClient, user: User):
+        response = await auth_client.post(f"/api/v1/users/{user.id}/restore")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "User is not deleted"
+
+    @pytest.mark.asyncio
+    async def test_restore_unknown_is_404(self, auth_client: AsyncClient):
+        response = await auth_client.post(f"/api/v1/users/{uuid.uuid4()}/restore")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_restore_retaken_name_is_409(self, auth_client: AsyncClient, deleted_user: User):
+        assert (
+            await auth_client.post("/api/v1/users", json={"username": "alice"})
+        ).status_code == 201
+
+        response = await auth_client.post(f"/api/v1/users/{deleted_user.id}/restore")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Username already exists"
+
+    @pytest.mark.asyncio
+    async def test_restore_below_superuser_is_403(
+        self, test_session: AsyncSession, client_for: ClientFor, deleted_user: User
+    ):
+        plain = User(username="plain", is_active=True)
+        test_session.add(plain)
+        await test_session.commit()
+        await test_session.refresh(plain)
+        client = await client_for(plain)
+
+        response = await client.post(f"/api/v1/users/{deleted_user.id}/restore")
+        assert response.status_code == 403
+
+    # -- purge --------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_purge_live_is_409(
+        self, auth_client: AsyncClient, test_session: AsyncSession, user: User
+    ):
+        response = await auth_client.delete(f"/api/v1/users/{user.id}", params={"purge": "true"})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "User must be deleted before it can be purged"
+
+        await test_session.refresh(user)
+        assert user.deleted_at is None
+
+    @pytest.mark.asyncio
+    async def test_purge_below_superuser_is_403(
+        self, test_session: AsyncSession, client_for: ClientFor, deleted_user: User
+    ):
+        plain = User(username="plain", is_active=True)
+        test_session.add(plain)
+        await test_session.commit()
+        await test_session.refresh(plain)
+        client = await client_for(plain)
+
+        response = await client.delete(f"/api/v1/users/{deleted_user.id}", params={"purge": "true"})
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_purge_tombstone_removes_row_and_keys(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        user: User,
+        client_for: ClientFor,
+    ):
+        await client_for(user)
+        assert (await auth_client.delete(f"/api/v1/users/{user.id}")).status_code == 200
+
+        response = await auth_client.delete(f"/api/v1/users/{user.id}", params={"purge": "true"})
+        assert response.status_code == 200
+        assert response.json()["message"] == "User alice purged"
+
+        assert (
+            await test_session.execute(select(User).where(User.id == user.id))
+        ).scalar_one_or_none() is None
+        assert (
+            await test_session.execute(select(APIKey).where(APIKey.user_id == user.id))
+        ).scalars().all() == []
+
+        response = await auth_client.get(
+            f"/api/v1/users/{user.id}", params={"include_deleted": "true"}
+        )
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_purge_unknown_is_404(self, auth_client: AsyncClient):
+        response = await auth_client.delete(
+            f"/api/v1/users/{uuid.uuid4()}", params={"purge": "true"}
+        )
+        assert response.status_code == 404
