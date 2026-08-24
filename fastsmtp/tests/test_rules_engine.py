@@ -8,6 +8,7 @@ from email.message import EmailMessage
 import pytest
 import pytest_asyncio
 from fastsmtp.db.models import Domain, Rule, RuleSet
+from fastsmtp.db.soft_delete import soft_delete_domain
 from fastsmtp.rules.conditions import (
     MATCHERS,
     evaluate_condition,
@@ -606,6 +607,35 @@ class TestEvaluateRulesAsync:
         assert "first" in result.tags
         assert "second" not in result.tags
 
+    @pytest.mark.asyncio
+    async def test_evaluate_rules_ignores_tombstoned_domain(
+        self, test_session: AsyncSession, domain_with_webhook_override: Domain
+    ):
+        """A tombstoned domain's rules are dormant: nothing matches, no override leaks.
+
+        Today the engine only runs after ``lookup_recipient`` has already
+        rejected the domain, so this path is unreachable from SMTP. The pin
+        exists for the next caller, who will not remember - a dead domain's
+        rules still carry ``webhook_url_override``.
+        """
+        await soft_delete_domain(test_session, domain_with_webhook_override)
+        await test_session.commit()
+
+        msg = EmailMessage()
+        msg["From"] = "important@vip.com"
+
+        result = await evaluate_rules(
+            session=test_session,
+            domain_id=domain_with_webhook_override.id,
+            message=msg,
+            payload={},
+        )
+
+        assert result.matches == []
+        assert result.tags == []
+        assert result.action == "forward"
+        assert result.webhook_url_override is None
+
 
 class TestGetDomainAuthSettings:
     """Tests for get_domain_auth_settings function."""
@@ -644,6 +674,17 @@ class TestGetDomainAuthSettings:
         """Test getting auth settings for non-existent domain."""
         fake_id = uuid.uuid4()
         result = await get_domain_auth_settings(test_session, fake_id)
+        assert result == (None, None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_get_auth_settings_tombstoned_domain(
+        self, test_session: AsyncSession, domain_with_auth_settings: Domain
+    ):
+        """A tombstoned domain reads as absent: every override falls back to global."""
+        await soft_delete_domain(test_session, domain_with_auth_settings)
+        await test_session.commit()
+
+        result = await get_domain_auth_settings(test_session, domain_with_auth_settings.id)
         assert result == (None, None, None, None)
 
 

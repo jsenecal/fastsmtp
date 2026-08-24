@@ -173,13 +173,18 @@ async def evaluate_rules(
     settings = settings or get_settings()
     result = RuleEvaluationResult()
 
-    # Get all enabled rulesets for this domain, ordered by priority
+    # Get all enabled rulesets for this domain, ordered by priority. A
+    # tombstoned domain's rulesets are dormant: the SMTP path never gets here
+    # for one (lookup_recipient rejects it first), but a rule can carry a
+    # webhook_url_override, so no caller may see them while the domain is dead.
     stmt = (
         select(RuleSet)
+        .join(RuleSet.domain)
         .options(selectinload(RuleSet.rules))
         .where(
             RuleSet.domain_id == domain_id,
             RuleSet.is_enabled.is_(True),
+            Domain.live(),
         )
         .order_by(RuleSet.priority.desc())
     )
@@ -254,7 +259,8 @@ async def get_domain_auth_settings(
         Tuple of (verify_dkim, verify_spf, reject_dkim_fail, reject_spf_fail)
         Values are None if not overridden at domain level
     """
-    stmt = select(Domain).where(Domain.id == domain_id)
+    # A tombstoned domain reads as absent so every override falls back to global
+    stmt = select(Domain).where(Domain.id == domain_id, Domain.live())
     result = await session.execute(stmt)
     domain = result.scalar_one_or_none()
 
