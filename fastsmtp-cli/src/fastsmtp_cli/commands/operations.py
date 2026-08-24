@@ -5,6 +5,7 @@ from typing import Annotated
 import typer
 
 from fastsmtp_cli.client import APIError, FastSMTPClient
+from fastsmtp_cli.commands.options import IncludeDeleted
 from fastsmtp_cli.output import (
     print_delivery_log,
     print_delivery_logs_table,
@@ -70,12 +71,13 @@ def list_logs(
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-l", help="Max results")] = 50,
     offset: Annotated[int, typer.Option("--offset", "-o", help="Offset")] = 0,
+    include_deleted: IncludeDeleted = False,
     profile: Annotated[
         str | None,
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
-    """List delivery logs for a domain."""
+    """List delivery logs for a domain (--include-deleted reads a deleted domain's history)."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
             logs = client.list_delivery_logs(
@@ -84,6 +86,7 @@ def list_logs(
                 message_id=message_id,
                 limit=limit,
                 offset=offset,
+                include_deleted=include_deleted,
             )
             if not logs:
                 print_error("No delivery logs found")
@@ -120,7 +123,7 @@ def retry_log(
         typer.Option("--profile", "-p", help="Profile to use"),
     ] = None,
 ) -> None:
-    """Retry a failed delivery."""
+    """Retry a failed, exhausted or cancelled delivery."""
     try:
         with FastSMTPClient(profile_name=profile) as client:
             result = client.retry_delivery(log_id)
