@@ -7,8 +7,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.params import Query
 from fastsmtp.api import validation
-from fastsmtp.api.validation import IncludeDeleted, Purge, live_value_taken, require_tombstoned
-from fastsmtp.db.integrity import is_unique_violation
+from fastsmtp.api.validation import IncludeDeleted, Purge, require_tombstoned
+from fastsmtp.db.integrity import is_unique_violation, live_value_taken
 from fastsmtp.db.models import Domain, User
 from pydantic_core import PydanticUndefined
 from sqlalchemy.exc import IntegrityError
@@ -73,6 +73,11 @@ class TestLiveValueTaken:
     check-then-flush; the index is the backstop, translated by
     ``flush_or_http_conflict``.
     """
+
+    def test_api_validation_re_exports_the_db_predicate(self):
+        """The routers and the server CLI must run the same query, so the
+        predicate lives in the database layer and the API module re-exports it."""
+        assert validation.live_value_taken is live_value_taken
 
     @pytest.mark.asyncio
     async def test_live_row_takes_the_name(self, test_session: AsyncSession):

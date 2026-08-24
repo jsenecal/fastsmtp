@@ -33,11 +33,12 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ColumnElement, CursorResult, Update, exists, or_, select, update
+from sqlalchemy import ColumnElement, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from fastsmtp.config import Settings, get_settings
+from fastsmtp.db.bulk import execute_counted
 from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from fastsmtp.smtp.validation import EmailAuthResult
@@ -81,19 +82,6 @@ def _recipient_and_domain_live() -> tuple[ColumnElement[bool], ColumnElement[boo
         ~exists().where(Recipient.id == DeliveryLog.recipient_id, ~Recipient.live()),
         ~exists().where(Domain.id == DeliveryLog.domain_id, ~Domain.live()),
     )
-
-
-async def _execute_counted(session: AsyncSession, stmt: Update) -> int:
-    """Run a guarded UPDATE and return how many rows it matched.
-
-    Every writer here decides something from that count (a cancel that
-    landed under us, a retry that was blocked), and ``AsyncSession.execute``
-    is typed as ``Result[Any]``, so the narrowing lives in one place.
-    """
-    result = await session.execute(stmt)
-    await session.flush()
-    assert isinstance(result, CursorResult)
-    return result.rowcount
 
 
 def _cancelled_values(reason: str, now: datetime) -> dict[str, Any]:
@@ -401,7 +389,9 @@ async def mark_failed(
     # transaction after this delivery was claimed is only visible as the
     # guarded UPDATE matching nothing. That, not the early check above, is
     # what keeps the DLQ quiet for a cancelled delivery.
-    if await _execute_counted(session, update_stmt) == 0:
+    matched = await execute_counted(session, update_stmt)
+    await session.flush()
+    if matched == 0:
         logger.info(f"Delivery {delivery_id} was cancelled under us; not recording the failure")
         return
 
@@ -453,9 +443,9 @@ async def cancel_pending_deliveries(
         update(DeliveryLog)
         .where(DeliveryLog.status.in_(QUEUED_STATUSES), or_(*targets))
         .values(**_cancelled_values(reason, now))
-        .execution_options(synchronize_session="fetch")
     )
-    cancelled = await _execute_counted(session, stmt)
+    cancelled = await execute_counted(session, stmt)
+    await session.flush()
     if cancelled:
         logger.info(f"Cancelled {cancelled} queued deliveries: {reason}")
     return cancelled
@@ -495,11 +485,10 @@ async def retry_delivery(
         delivery_id: Delivery ID to retry
 
     Returns:
-        The re-armed delivery; the delivery unchanged when its status is not
-        retryable; ``None`` when nothing was re-armed because there is no such
-        delivery or the guarded UPDATE matched nothing (tombstoned recipient
-        or domain, or a status change under us). A caller that has already
-        loaded the row reads ``None`` as "blocked".
+        The re-armed delivery, or ``None`` when nothing was re-armed: no such
+        delivery, a status outside ``RETRYABLE_STATUSES``, or a tombstoned
+        recipient or domain. The loaded row is not consulted for any of that,
+        since it may be stale; the UPDATE's row count is the one answer.
     """
     stmt = select(DeliveryLog).where(DeliveryLog.id == delivery_id)
     result = await session.execute(stmt)
@@ -507,10 +496,6 @@ async def retry_delivery(
 
     if not delivery:
         return None
-
-    if delivery.status not in RETRYABLE_STATUSES:
-        logger.warning(f"Cannot retry delivery {delivery_id} with status {delivery.status}")
-        return delivery
 
     now = datetime.now(UTC)
     update_stmt = (
@@ -525,15 +510,15 @@ async def retry_delivery(
             next_retry_at=now,
             updated_at=now,  # Explicit update since onupdate doesn't trigger
         )
-        # "fetch" applies the new values to the loaded object as well, so no
-        # refresh is needed; "auto" would silently pick it anyway because the
-        # EXISTS predicates cannot be evaluated in Python.
-        .execution_options(synchronize_session="fetch")
     )
-    if await _execute_counted(session, update_stmt) == 0:
+    # execute_counted synchronizes by "fetch", so the returned object already
+    # carries the new state; no refresh round trip.
+    matched = await execute_counted(session, update_stmt)
+    await session.flush()
+    if matched == 0:
         logger.info(
-            f"Delivery {delivery_id} not re-armed: recipient or domain deleted, "
-            "or status changed under us"
+            f"Delivery {delivery_id} not re-armed: not in a retryable status, "
+            "or its recipient or domain is deleted"
         )
         return None
 

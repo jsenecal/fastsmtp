@@ -620,8 +620,9 @@ class TestRetryDelivery:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_retry_skips_delivered(self, test_session: AsyncSession):
-        """Test that retry_delivery doesn't reset delivered deliveries."""
+    async def test_retry_refuses_delivered(self, test_session: AsyncSession):
+        """A delivered delivery is not re-armed, and the answer is the same
+        ``None`` as for every other refusal: the guarded UPDATE matched nothing."""
         domain = Domain(
             id=uuid.uuid4(),
             domain_name="skip-test.com",
@@ -649,8 +650,7 @@ class TestRetryDelivery:
         result = await retry_delivery(test_session, delivery.id)
         await test_session.refresh(delivery)
 
-        # Should return the delivery but not change status
-        assert result is not None
+        assert result is None
         assert delivery.status == "delivered"
 
 

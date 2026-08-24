@@ -1,13 +1,50 @@
-"""Classifying database integrity errors.
+"""Uniqueness over live rows: the pre-check and the backstop.
 
-Lives in the database layer, not with the HTTP helpers, because every writer
-that backs a duplicate pre-check with a unique index needs it: the API routers
-translate a lost race into a 409 (``api.validation.flush_or_http_conflict``),
-and the server CLI into an exit message. The CLI must stay importable without
-FastAPI, so this module depends on SQLAlchemy alone.
+Migration 008 made the name indexes (``users.username``, ``domains.domain_name``)
+partial over live rows, so a tombstone never blocks its name. Every writer
+that creates or restores a named row does the same two things: ask
+:func:`live_value_taken` first, for a readable error, and treat a unique
+violation on flush or commit, classified by :func:`is_unique_violation`, as
+the lost race. The API routers translate that into a 409
+(``api.validation.flush_or_http_conflict``) and the server CLI into an exit
+message.
+
+This module lives in the database layer so both can share it: the CLI must
+stay importable without FastAPI, so it depends on SQLAlchemy and the models
+alone.
 """
 
+import uuid
+
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
+
+
+async def live_value_taken(
+    session: AsyncSession,
+    column: InstrumentedAttribute[str],
+    value: str,
+    *,
+    exclude_id: uuid.UUID | None = None,
+) -> bool:
+    """Duplicate pre-check for a name column that is unique over live rows.
+
+    ``column`` belongs to a ``SoftDeleteMixin`` model (``User.username``,
+    ``Domain.domain_name``). Mirrors what the database enforces: the name
+    indexes are partial over live rows (migration 008), so a tombstone never
+    blocks its name. ``exclude_id`` leaves out the row being updated, which
+    holds its own name legitimately. The check is check-then-flush; the index
+    is the backstop, translated by :func:`is_unique_violation`, and every
+    create, update and restore path in the routers and the CLI shares this
+    one predicate so it can never drift from the index in only one of them.
+    """
+    model = column.class_
+    stmt = select(model.id).where(column == value, model.live())
+    if exclude_id is not None:
+        stmt = stmt.where(model.id != exclude_id)
+    return (await session.execute(stmt)).first() is not None
 
 
 def is_unique_violation(exc: IntegrityError) -> bool:

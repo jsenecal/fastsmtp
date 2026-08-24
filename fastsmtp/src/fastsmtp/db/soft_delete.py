@@ -34,9 +34,10 @@ is already tombstoned (``api.validation.require_tombstoned``).
 
 from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, CursorResult, Update, true, update
+from sqlalchemy import ColumnElement, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastsmtp.db.bulk import execute_counted
 from fastsmtp.db.models import APIKey, Domain, Recipient, SoftDeleteMixin, User
 from fastsmtp.webhook.queue import cancel_pending_deliveries
 
@@ -50,13 +51,6 @@ def _stamp(now: datetime | None) -> datetime:
     return now or datetime.now(UTC)
 
 
-async def _bulk_update(session: AsyncSession, stmt: Update) -> int:
-    """Run a child-cascade UPDATE, keeping loaded objects in sync; return the row count."""
-    result = await session.execute(stmt.execution_options(synchronize_session="fetch"))
-    assert isinstance(result, CursorResult)  # AsyncSession.execute is typed as Result[Any]
-    return result.rowcount
-
-
 async def soft_delete_user(
     session: AsyncSession, user: User, *, now: datetime | None = None
 ) -> int:
@@ -67,7 +61,7 @@ async def soft_delete_user(
     """
     now = _stamp(now)
     user.deleted_at = now
-    revoked = await _bulk_update(
+    revoked = await execute_counted(
         session,
         update(APIKey)
         .where(APIKey.user_id == user.id, APIKey.live())
@@ -86,7 +80,7 @@ async def soft_delete_domain(
     """
     now = _stamp(now)
     domain.deleted_at = now
-    stamped = await _bulk_update(
+    stamped = await execute_counted(
         session,
         update(Recipient)
         .where(Recipient.domain_id == domain.id, Recipient.live())
@@ -138,7 +132,7 @@ async def restore_domain(session: AsyncSession, domain: Domain) -> int:
         # Callers gate on require_tombstoned, but ``deleted_at == None`` would
         # compile to IS NULL and match every live recipient.
         return 0
-    restored = await _bulk_update(
+    restored = await execute_counted(
         session,
         update(Recipient)
         .where(Recipient.domain_id == domain.id, Recipient.deleted_at == stamp)

@@ -12,6 +12,7 @@ from fastsmtp.auth import generate_api_key
 from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import APIKey, DeliveryLog, Domain, DomainMember, Recipient, User
 from fastsmtp.db.soft_delete import (
+    purge_recipient,
     restore_domain,
     restore_recipient,
     soft_delete_domain,
@@ -808,6 +809,49 @@ class TestRetryWithTombstones:
         assert (
             failed.status == DeliveryStatus.CANCELLED
         )  # the delete cancelled it; retry did not re-arm
+
+    @pytest.mark.asyncio
+    async def test_retry_refused_when_the_recipient_is_purged_under_the_request(
+        self,
+        auth_client: AsyncClient,
+        test_engine: AsyncEngine,
+        test_session: AsyncSession,
+        cancelled_delivery: tuple[Domain, Recipient, DeliveryLog],
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The 409's reason is read fresh, and a row that is gone counts as
+        deleted. Another transaction tombstones the recipient before the
+        guarded UPDATE (so it matches nothing) and purges it before the
+        endpoint asks why. A ``session.refresh`` of the recipient this request
+        loaded would raise on the missing row and turn the 409 into a 500."""
+        import fastsmtp.api.operations as operations_api
+
+        domain, recipient, _ = cancelled_delivery
+        failed = await make_log(test_session, domain, DeliveryStatus.FAILED, recipient)
+        await test_session.commit()
+        real_retry = operations_api.retry_delivery
+
+        async def tombstone_retry_then_purge(session: AsyncSession, delivery_id: uuid.UUID):
+            other = async_sessionmaker(test_engine, class_=AsyncSession)()
+            try:
+                victim = await other.get_one(Recipient, recipient.id)
+                await soft_delete_recipient(other, victim)
+                await other.commit()
+                result = await real_retry(session, delivery_id)
+                await purge_recipient(other, victim)
+                await other.commit()
+            finally:
+                await other.close()
+            return result
+
+        monkeypatch.setattr(operations_api, "retry_delivery", tombstone_retry_then_purge)
+
+        response = await auth_client.post(f"/api/v1/delivery-log/{failed.id}/retry")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Recipient is deleted; restore it before retrying"
+        await test_session.refresh(failed)
+        assert failed.status == DeliveryStatus.CANCELLED
+        assert failed.recipient_id is None  # the purge nulled the FK; history kept
 
     @pytest.mark.asyncio
     async def test_retry_on_tombstoned_domain_is_invisible_below_owner(
