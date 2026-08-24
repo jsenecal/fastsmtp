@@ -3,11 +3,15 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from fastsmtp.api.validation import require_s3_for_preservation, require_valid_rule_regex
+from fastsmtp.api.validation import (
+    flush_or_http_conflict,
+    require_s3_for_preservation,
+    require_valid_rule_regex,
+)
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Rule, RuleSet
@@ -29,6 +33,18 @@ from fastsmtp.schemas.rule import (
 )
 
 router = APIRouter(tags=["rules"])
+
+
+def _conflicting_ruleset_name(domain_id: uuid.UUID, name: str) -> ColumnElement[bool]:
+    """Filter for the ruleset row ``uq_ruleset_name`` keys on."""
+    return and_(RuleSet.domain_id == domain_id, RuleSet.name == name)
+
+
+def _duplicate_conflict(name: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"Ruleset '{name}' already exists for this domain",
+    )
 
 
 def validate_rule_field(field: str) -> None:
@@ -101,16 +117,10 @@ async def create_ruleset(
     auth.require_scope("rules:write")
 
     # Check for duplicate name
-    stmt = select(RuleSet).where(
-        RuleSet.domain_id == domain_id,
-        RuleSet.name == data.name,
-    )
+    stmt = select(RuleSet).where(_conflicting_ruleset_name(domain_id, data.name))
     result = await session.execute(stmt)
     if result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Ruleset '{data.name}' already exists for this domain",
-        )
+        raise _duplicate_conflict(data.name)
 
     ruleset = RuleSet(
         domain_id=domain_id,
@@ -119,7 +129,7 @@ async def create_ruleset(
         stop_on_match=data.stop_on_match,
     )
     session.add(ruleset)
-    await session.flush()
+    await flush_or_http_conflict(session, _duplicate_conflict(data.name))
     await session.refresh(ruleset)
 
     return RuleSetResponse.model_validate(ruleset)
@@ -191,21 +201,17 @@ async def update_ruleset(
     # Check for duplicate name if changing
     if "name" in update_data and update_data["name"] != ruleset.name:
         check_stmt = select(RuleSet).where(
-            RuleSet.domain_id == domain_id,
             RuleSet.id != ruleset_id,
-            RuleSet.name == update_data["name"],
+            _conflicting_ruleset_name(domain_id, update_data["name"]),
         )
         check_result = await session.execute(check_stmt)
         if check_result.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Ruleset '{update_data['name']}' already exists for this domain",
-            )
+            raise _duplicate_conflict(update_data["name"])
 
     for field, value in update_data.items():
         setattr(ruleset, field, value)
 
-    await session.flush()
+    await flush_or_http_conflict(session, _duplicate_conflict(ruleset.name))
     await session.refresh(ruleset)
 
     return RuleSetResponse.model_validate(ruleset)

@@ -7,6 +7,7 @@ import pytest_asyncio
 from fastsmtp.auth import generate_api_key
 from fastsmtp.db.models import APIKey, Domain, DomainMember, User
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import false
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -245,3 +246,67 @@ class TestDomainRoleHierarchy:
             response = await admin_client.delete(f"/api/v1/domains/{domain.id}")
             assert response.status_code == 403
             assert "owner" in response.json()["detail"].lower()
+
+
+class TestDomainConflictRace:
+    """The loser of a concurrent duplicate write must get the pre-check's 409.
+
+    create_domain and add_member are check-then-flush, so two concurrent
+    requests can both pass the duplicate check; the loser then hits a unique
+    index at flush time. The loser is simulated deterministically by patching
+    the pre-check filter to match nothing, which is exactly what its stale
+    read saw.
+    """
+
+    @pytest.fixture
+    def losing_precheck(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the duplicate pre-checks see no conflict, as the race's loser does."""
+        import fastsmtp.api.domains as domains_api
+
+        monkeypatch.setattr(domains_api, "_conflicting_domain_name", lambda domain_name: false())
+        monkeypatch.setattr(domains_api, "_membership", lambda domain_id, user_id: false())
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_domain_create_returns_409(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        losing_precheck: None,
+    ):
+        """A domain create that loses the race gets 409, not a 500 from the index."""
+        test_session.add(Domain(domain_name="raced.example.com", is_enabled=True))
+        await test_session.commit()
+
+        response = await auth_client.post(
+            "/api/v1/domains", json={"domain_name": "raced.example.com"}
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Domain already exists"
+
+        # The translated conflict must leave the app serviceable
+        fresh = await auth_client.post(
+            "/api/v1/domains", json={"domain_name": "unraced.example.com"}
+        )
+        assert fresh.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_member_add_returns_409(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        losing_precheck: None,
+    ):
+        """A member add that loses the race gets 409 from uq_domain_member."""
+        domain = Domain(domain_name="members-raced.example.com", is_enabled=True)
+        user = User(username="raced-member", is_active=True)
+        test_session.add_all([domain, user])
+        await test_session.flush()
+        test_session.add(DomainMember(domain_id=domain.id, user_id=user.id, role="member"))
+        await test_session.commit()
+
+        response = await auth_client.post(
+            f"/api/v1/domains/{domain.id}/members",
+            json={"user_id": str(user.id), "role": "admin"},
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"] == "User is already a member of this domain"

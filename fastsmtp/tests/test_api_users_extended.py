@@ -5,6 +5,7 @@ import uuid
 import pytest
 from fastsmtp.db.models import User
 from httpx import AsyncClient
+from sqlalchemy import false
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -189,3 +190,57 @@ class TestUsersAuth:
             json={"username": "test", "email": "test@example.com"},
         )
         assert response.status_code == 401
+
+
+class TestUserConflictRace:
+    """The loser of a concurrent duplicate username write must get the pre-check's 409.
+
+    create_user and update_user are check-then-flush, so two concurrent
+    requests can both pass the duplicate check; the loser then hits the
+    unique index on users.username at flush time. The loser is simulated
+    deterministically by patching the pre-check filter to match nothing,
+    which is exactly what its stale read saw.
+    """
+
+    @pytest.fixture
+    def losing_precheck(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the duplicate pre-check see no conflict, as the race's loser does."""
+        import fastsmtp.api.users as users_api
+
+        monkeypatch.setattr(users_api, "_conflicting_username", lambda username: false())
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_create_returns_409(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        losing_precheck: None,
+    ):
+        """A create that loses the race gets 409, not a 500 from the index."""
+        test_session.add(User(username="raced", is_active=True))
+        await test_session.commit()
+
+        response = await auth_client.post("/api/v1/users", json={"username": "raced"})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Username already exists"
+
+        # The translated conflict must leave the app serviceable
+        fresh = await auth_client.post("/api/v1/users", json={"username": "unraced"})
+        assert fresh.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_update_returns_409(
+        self,
+        auth_client: AsyncClient,
+        test_session: AsyncSession,
+        losing_precheck: None,
+    ):
+        """An update that loses the race gets 409, not a 500 from the index."""
+        target = User(username="target", is_active=True)
+        test_session.add_all([User(username="keep", is_active=True), target])
+        await test_session.commit()
+        await test_session.refresh(target)
+
+        response = await auth_client.put(f"/api/v1/users/{target.id}", json={"username": "keep"})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Username already exists"
