@@ -12,8 +12,12 @@ opened and closed inside whichever loop calls it. The same factory backs the
 What is pinned here: every name-addressed command resolves the *live* row when
 a tombstone shares the name (before this, ``scalar_one_or_none`` raised
 ``MultipleResultsFound``), ``delete`` is soft and ``--purge`` only reaches a
-tombstone, ``restore`` refuses ambiguity without ``--id``, and no command
-writes ``deleted_at`` or calls ``session.delete`` itself.
+tombstone, ``--id`` is refused without ``--purge`` rather than ignored,
+``restore`` refuses ambiguity without ``--id``, ``create`` reports a lost race
+as the same conflict as its pre-check, ``remove-member`` (an un-grant) reaches
+a tombstoned user, ``purge-deleted`` decides the unconfigured case before it
+opens a session, and no command writes ``deleted_at`` or calls
+``session.delete`` itself.
 """
 
 import asyncio
@@ -49,7 +53,10 @@ ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 OLDER = datetime(2020, 1, 1, tzinfo=UTC)
 NEWER = datetime(2021, 6, 15, 12, 30, 45, tzinfo=UTC)
-NEWER_TEXT = "2021-06-15 12:30:45"
+# Tombstone stamps render like the cleanup cutoffs: explicit UTC, everywhere.
+NEWER_TEXT = "2021-06-15 12:30:45 UTC"
+
+ID_NEEDS_PURGE = "--id only applies with --purge; delete addresses the live entry"
 
 
 def strip_ansi(text: str) -> str:
@@ -236,6 +243,20 @@ class TestUserLookupsResolveTheLiveRow:
         assert "User 'alice' already exists" in out
         assert len(users_named(db, "alice")) == 2
 
+    def test_create_lost_race_reports_the_same_conflict(self, run, db, monkeypatch):
+        """The pre-check misses (patched: the loser's stale read); the index must not leak."""
+        seed_user(db, "alice")
+
+        async def miss(session: AsyncSession, username: str) -> None:
+            return None
+
+        monkeypatch.setattr(cli, "_live_user", miss)
+        code, out = run("user", "create", "alice")
+        assert code == 1
+        assert "User 'alice' already exists" in out
+        assert "Traceback" not in out
+        assert len(users_named(db, "alice")) == 1
+
     def test_set_superuser_targets_the_live_row(self, run, db, alice):
         dead, live = alice
         code, out = run("user", "set-superuser", "alice", "--enable")
@@ -313,14 +334,31 @@ class TestUserDelete:
         assert len(keys) == 2
         assert all(k.deleted_at == alice.deleted_at and k.is_active is False for k in keys)
 
-    def test_prompt_names_the_restore_command_and_declining_aborts(self, run, db):
+    def test_prompt_warns_about_keys_names_restore_and_declining_aborts(self, run, db):
+        """Restore does not bring the keys back, so the prompt has to say they go for good."""
         seed_user(db, "alice")
 
         code, out = run("user", "delete", "alice", input="n\n")
         assert code == 1
-        assert "Delete user 'alice'? (restorable with: fastsmtp user restore alice)" in out
+        assert (
+            "Delete user 'alice'? Their API keys are revoked for good; the user is "
+            "restorable with: fastsmtp user restore alice" in out
+        )
         (alice,) = users_named(db, "alice")
         assert alice.deleted_at is None
+
+    def test_id_without_purge_is_refused(self, run, db):
+        """``--id`` names a tombstone; without ``--purge`` it must not soft-delete the live row."""
+        dead = seed_user(db, "alice", deleted_at=OLDER)
+        live = seed_user(db, "alice", keys=1)
+
+        code, out = run("user", "delete", "alice", "--id", str(dead), "--force")
+        assert code == 1
+        assert ID_NEEDS_PURGE in out
+        by_id = {u.id: u for u in users_named(db, "alice")}
+        assert by_id[live].deleted_at is None
+        (key,) = fetch(db, APIKey, APIKey.user_id == live)
+        assert key.is_active is True and key.deleted_at is None
 
     def test_confirming_deletes(self, run, db):
         seed_user(db, "alice")
@@ -504,6 +542,40 @@ class TestUserCommandsRefuseTombstones:
         assert fetch(db, DomainMember) == []
 
 
+class TestRemoveMemberReachesTombstonedUsers:
+    """Removing a membership is an un-grant, so a deleted user's edge is detachable
+    from the CLI just as it is through the REST API."""
+
+    def test_detaches_a_tombstoned_users_membership(self, run, db):
+        alice = seed_user(db, "alice", deleted_at=OLDER)
+        seed_domain(db, "example.com", member=alice)
+
+        code, out = run("domain", "remove-member", "example.com", "alice")
+        assert code == 0, out
+        assert "Removed 'alice' from 'example.com'" in out
+        assert fetch(db, DomainMember) == []
+
+    def test_live_namesake_wins_and_keeps_the_tombstones_edge(self, run, db):
+        dead = seed_user(db, "alice", deleted_at=OLDER)
+        live = seed_user(db, "alice")
+        domain_id = seed_domain(db, "example.com", member=live)
+
+        async def add_dead_edge(session: AsyncSession) -> None:
+            session.add(DomainMember(domain_id=domain_id, user_id=dead, role="member"))
+
+        db(add_dead_edge)
+
+        code, out = run("domain", "remove-member", "example.com", "alice")
+        assert code == 0, out
+        assert [m.user_id for m in fetch(db, DomainMember)] == [dead]
+
+    def test_unknown_user(self, run, db):
+        seed_domain(db, "example.com")
+        code, out = run("domain", "remove-member", "example.com", "alice")
+        assert code == 1
+        assert "User 'alice' not found" in out
+
+
 # --- domains -----------------------------------------------------------------
 
 
@@ -519,6 +591,19 @@ class TestDomainLookupsResolveTheLiveRow:
         assert code == 1
         assert "Domain 'example.com' already exists" in out
         assert len(domains_named(db, "example.com")) == 2
+
+    def test_create_lost_race_reports_the_same_conflict(self, run, db, monkeypatch):
+        seed_domain(db, "example.com")
+
+        async def miss(session: AsyncSession, domain_name: str) -> None:
+            return None
+
+        monkeypatch.setattr(cli, "_live_domain", miss)
+        code, out = run("domain", "create", "example.com")
+        assert code == 1
+        assert "Domain 'example.com' already exists" in out
+        assert "Traceback" not in out
+        assert len(domains_named(db, "example.com")) == 1
 
     def test_add_and_remove_member_target_the_live_row(self, run, db, example):
         dead, live = example
@@ -600,6 +685,18 @@ class TestDomainDelete:
         code, out = run("domain", "delete", "example.com", "--force")
         assert code == 1
         assert "Domain 'example.com' not found" in out
+
+    def test_id_without_purge_is_refused(self, run, db):
+        dead = seed_domain(db, "example.com", deleted_at=OLDER)
+        live = seed_domain(db, "example.com", recipients=("sales",))
+
+        code, out = run("domain", "delete", "example.com", "--id", str(dead), "--force")
+        assert code == 1
+        assert ID_NEEDS_PURGE in out
+        by_id = {d.id: d for d in domains_named(db, "example.com")}
+        assert by_id[live].deleted_at is None
+        (recipient,) = fetch(db, Recipient, Recipient.domain_id == live)
+        assert recipient.deleted_at is None
 
     def test_name_is_reusable_after_delete(self, run, db):
         seed_domain(db, "example.com")
@@ -748,14 +845,36 @@ def configure(test_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Calla
 
 
 class TestPurgeDeleted:
-    def test_unconfigured_without_override(self, run, db, configure):
+    def test_unconfigured_is_decided_before_touching_the_database(
+        self, run, db, configure, monkeypatch
+    ):
         configure(soft_delete_retention_days=None)
+
+        def no_session() -> AsyncSession:
+            raise AssertionError("purge-deleted opened a session with no retention to apply")
+
+        monkeypatch.setattr("fastsmtp.db.session.async_session", no_session)
         code, out = run("purge-deleted")
         assert code == 1
         assert (
             "No retention configured. Set FASTSMTP_SOFT_DELETE_RETENTION_DAYS or pass --older-than."
             in out
         )
+
+    def test_a_service_error_is_not_relabelled_as_unconfigured(
+        self, run, db, configure, monkeypatch
+    ):
+        """Only the unconfigured case is the CLI's to explain; anything else propagates."""
+        from fastsmtp.cleanup.purge import SoftDeletePurgeService
+
+        configure(soft_delete_retention_days=30)
+
+        async def broken(self: Any, **kwargs: Any) -> Any:
+            raise ValueError("boom")
+
+        monkeypatch.setattr(SoftDeletePurgeService, "purge", broken)
+        with pytest.raises(ValueError, match="^boom$"):
+            run("purge-deleted")
 
     def test_dry_run_counts_without_deleting(self, run, db, configure):
         configure(soft_delete_retention_days=30)

@@ -5,9 +5,15 @@ the tombstone, and ``delete --purge`` runs the old hard delete on a row that is
 already tombstoned. Every by-name lookup resolves the *live* row, so a
 tombstone that shares the name never gets in the way (and never raises
 ``MultipleResultsFound``); the tombstone-addressed commands (``restore``,
-``--purge``) refuse ambiguity and take ``--id``. Every tombstone write and
+``--purge``) refuse ambiguity and take ``--id``. The one lookup that reaches a
+tombstone by name is ``remove-member``: taking a membership away is an
+un-grant, so a deleted user's edge stays detachable. Every tombstone write and
 every purge goes through ``fastsmtp.db.soft_delete``; nothing here stamps or
 hard-deletes a soft-deletable row itself.
+
+Imports stay lazy: ``version`` and ``db upgrade`` must not load the API package
+(every router, FastAPI, the SMTP server, S3), so each command imports what it
+needs inside its body.
 """
 
 import asyncio
@@ -28,8 +34,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp import __version__
-from fastsmtp.api.validation import is_unique_violation
-from fastsmtp.auth.keys import generate_api_key
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, SoftDeleteMixin, User
 
@@ -345,7 +349,18 @@ def _confirm(force: bool, prompt: str) -> None:
 
 
 def _format_timestamp(value: datetime | None) -> str:
-    return value.strftime(TIMESTAMP_FORMAT) if value is not None else ""
+    """A tombstone stamp or a retention cutoff, both in explicit UTC; empty for ``None``."""
+    return f"{value.strftime(TIMESTAMP_FORMAT)} UTC" if value is not None else ""
+
+
+def _require_purge_for_id(purge: bool, id_option: uuid.UUID | None) -> None:
+    """``--id`` names a tombstone; a plain delete addresses the live row and has no use for it.
+
+    Ignoring the flag would soft-delete the live namesake the operator never
+    meant to touch, and revoke its API keys for good.
+    """
+    if id_option is not None and not purge:
+        raise _fail("--id only applies with --purge; delete addresses the live entry")
 
 
 async def _live_user(session: AsyncSession, username: str) -> User | None:
@@ -427,17 +442,37 @@ async def _tombstone[Named: (User, Domain)](
 
 
 async def _commit_or_conflict(session: AsyncSession, message: str) -> None:
-    """Commit a restore; a lost race against a re-taken name reports ``message``.
+    """Commit a create or restore; a lost race on the name reports ``message``.
 
-    The pre-check is check-then-commit, so a name taken between the two hits
-    the partial unique index (migration 008) here instead.
+    The pre-check is check-then-commit, so a name taken between the two (a
+    concurrent create, or a restore of the tombstoned namesake) hits the
+    partial unique index (migration 008) here instead.
     """
+    # Imported here: fastsmtp.api loads every router and FastAPI (see module docstring).
+    from fastsmtp.api.validation import is_unique_violation
+
     try:
         await session.commit()
     except IntegrityError as exc:
         if not is_unique_violation(exc):
             raise
         raise _fail(message) from exc
+
+
+async def _member_user_ids(session: AsyncSession, username: str) -> list[uuid.UUID]:
+    """The users ``remove-member`` may detach: the live one, else the tombstones.
+
+    Unlike ``add-member`` this is an un-grant, so it reaches a deleted user the
+    way the REST API does. Without a live namesake every deleted one is
+    detached: none of them can hold the membership until restored.
+    """
+    user = await _live_user(session, username)
+    if user is not None:
+        return [user.id]
+    rows = await _tombstones(session, User, User.username, username)
+    if not rows:
+        raise _fail(f"User '{username}' not found")
+    return [row.id for row in rows]
 
 
 def _add_deleted_column(table: Table, include_deleted: bool) -> None:
@@ -466,12 +501,13 @@ def user_create(
 
     async def create():
         async with async_session() as session:
+            conflict = f"User '{username}' already exists"
             if await _live_user(session, username):
-                raise _fail(f"User '{username}' already exists")
+                raise _fail(conflict)
 
             user = User(username=username, email=email, is_superuser=superuser)
             session.add(user)
-            await session.commit()
+            await _commit_or_conflict(session, conflict)
             await session.refresh(user)
 
             console.print(f"[green]Created user '{username}' (ID: {user.id})[/green]")
@@ -533,6 +569,8 @@ def user_delete(
     from fastsmtp.db import soft_delete
     from fastsmtp.db.session import async_session
 
+    _require_purge_for_id(purge, id_option)
+
     async def delete():
         async with async_session() as session:
             if purge:
@@ -559,7 +597,8 @@ def user_delete(
             user = await _require_live_user(session, username)
             _confirm(
                 force,
-                f"Delete user '{username}'? (restorable with: fastsmtp user restore {username})",
+                f"Delete user '{username}'? Their API keys are revoked for good; the user is "
+                f"restorable with: fastsmtp user restore {username}",
             )
             revoked = await soft_delete.soft_delete_user(session, user)
             await session.commit()
@@ -631,6 +670,9 @@ def user_generate_key(
     scopes: str = typer.Option(None, "--scopes", "-s", help="Comma-separated scopes"),
 ):
     """Generate an API key for a user."""
+    # fastsmtp.auth's package __init__ pulls in the FastAPI dependencies, so
+    # the key helper is imported by the one command that mints keys.
+    from fastsmtp.auth.keys import generate_api_key
     from fastsmtp.db.models import APIKey
     from fastsmtp.db.session import async_session
 
@@ -672,12 +714,13 @@ def domain_create(
 
     async def create():
         async with async_session() as session:
+            conflict = f"Domain '{domain_name}' already exists"
             if await _live_domain(session, domain_name):
-                raise _fail(f"Domain '{domain_name}' already exists")
+                raise _fail(conflict)
 
             domain = Domain(domain_name=domain_name)
             session.add(domain)
-            await session.commit()
+            await _commit_or_conflict(session, conflict)
             await session.refresh(domain)
 
             console.print(f"[green]Created domain '{domain_name}' (ID: {domain.id})[/green]")
@@ -740,6 +783,8 @@ def domain_delete(
     """
     from fastsmtp.db import soft_delete
     from fastsmtp.db.session import async_session
+
+    _require_purge_for_id(purge, id_option)
 
     async def delete():
         async with async_session() as session:
@@ -860,13 +905,13 @@ def domain_remove_member(
     async def remove():
         async with async_session() as session:
             domain = await _require_live_domain(session, domain_name)
-            user = await _require_live_user(session, username)
+            user_ids = await _member_user_ids(session, username)
 
             # Membership is an edge with no tombstone of its own: removing it is
             # a hard delete, as before.
             member_stmt = delete(DomainMember).where(
                 DomainMember.domain_id == domain.id,
-                DomainMember.user_id == user.id,
+                DomainMember.user_id.in_(user_ids),
             )
             result = await session.execute(member_stmt)
             assert isinstance(result, CursorResult)  # execute() is typed as Result[Any]
@@ -894,10 +939,6 @@ def _retention_override(older_than: str | None) -> int | None:
     return retention_days
 
 
-def _format_cutoff(cutoff_date: datetime) -> str:
-    return f"{_format_timestamp(cutoff_date)} UTC"
-
-
 @app.command()
 def cleanup(dry_run: DryRun = False, older_than: OlderThan = None):
     """Clean up old delivery log records."""
@@ -915,7 +956,7 @@ def cleanup(dry_run: DryRun = False, older_than: OlderThan = None):
 
     result = run_async(run_cleanup())
 
-    cutoff_str = _format_cutoff(result.cutoff_date)
+    cutoff_str = _format_timestamp(result.cutoff_date)
 
     if dry_run:
         console.print(
@@ -941,24 +982,25 @@ def purge_deleted(dry_run: DryRun = False, older_than: OlderThan = None):
 
     settings = get_settings()
     retention_days = _retention_override(older_than)
+    # The service has no cutoff to compute without a window; that is decidable
+    # here, before a session is opened, and it is the only input error left
+    # (settings and --older-than both reject anything under a day).
+    if retention_days is None and settings.soft_delete_retention_days is None:
+        raise _fail(
+            "No retention configured. Set FASTSMTP_SOFT_DELETE_RETENTION_DAYS or pass --older-than."
+        )
 
     async def run_purge():
         async with async_session() as session:
             service = SoftDeletePurgeService(settings, session)
             return await service.purge(dry_run=dry_run, retention_days=retention_days)
 
-    try:
-        result = run_async(run_purge())
-    except ValueError as exc:
-        # The service refuses to compute a cutoff without a retention window.
-        raise _fail(
-            "No retention configured. Set FASTSMTP_SOFT_DELETE_RETENTION_DAYS or pass --older-than."
-        ) from exc
+    result = run_async(run_purge())
 
     verb, colour = ("Would purge", "yellow") if dry_run else ("Purged", "green")
     console.print(
         f"[{colour}]{verb} {result.total} soft-deleted rows older than "
-        f"{_format_cutoff(result.cutoff_date)} ({result.breakdown})[/{colour}]"
+        f"{_format_timestamp(result.cutoff_date)} ({result.breakdown})[/{colour}]"
     )
 
 

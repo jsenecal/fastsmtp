@@ -64,6 +64,28 @@ def test_cli_loads_without_any_configuration(scrubbed_environ: dict[str, str]) -
     assert "FastSMTP version" in result.stdout
 
 
+def test_importing_the_cli_does_not_load_the_api(scrubbed_environ: dict[str, str]) -> None:
+    """``fastsmtp.api`` pulls in every router, FastAPI, the SMTP server and S3.
+
+    None of that belongs on the path of ``version`` or ``db upgrade``: the CLI
+    imports what a command needs inside that command, and a module-level import
+    of the API package undoes that for every invocation.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, fastsmtp.cli; "
+            "assert 'fastsmtp.api' not in sys.modules and 'fastapi' not in sys.modules, "
+            "sorted(m for m in sys.modules if m.startswith(('fastsmtp.api', 'fastapi')))",
+        ],
+        env={**scrubbed_environ, "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    _assert_succeeded(result)
+
+
 def test_db_current_needs_only_the_database_url(
     scrubbed_environ: dict[str, str], database_url: str
 ) -> None:
