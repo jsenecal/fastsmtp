@@ -3,15 +3,32 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastsmtp.api.validation import flush_or_http_conflict
 from fastsmtp.auth import Auth
 from fastsmtp.db.models import User
 from fastsmtp.db.session import get_session
 from fastsmtp.schemas import MessageResponse, UserCreate, UserResponse, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+def _conflicting_username(username: str) -> ColumnElement[bool]:
+    """Filter for rows that conflict with taking ``username``.
+
+    Mirrors the unique index on ``users.username``, which covers soft-deleted
+    rows too: a tombstoned user still blocks its name.
+    """
+    return User.username == username
+
+
+def _duplicate_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Username already exists",
+    )
 
 
 @router.get("", response_model=list[UserResponse])
@@ -38,13 +55,10 @@ async def create_user(
     auth.require_superuser()
 
     # Check for duplicate username
-    stmt = select(User).where(User.username == data.username)
+    stmt = select(User).where(_conflicting_username(data.username))
     result = await session.execute(stmt)
     if result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Username already exists",
-        )
+        raise _duplicate_conflict()
 
     user = User(
         username=data.username,
@@ -52,7 +66,7 @@ async def create_user(
         is_superuser=data.is_superuser,
     )
     session.add(user)
-    await session.flush()
+    await flush_or_http_conflict(session, _duplicate_conflict())
     await session.refresh(user)
 
     return UserResponse.model_validate(user)
@@ -102,20 +116,17 @@ async def update_user(
 
     # Check for duplicate username if changing
     if data.username and data.username != user.username:
-        check_stmt = select(User).where(User.username == data.username)
+        check_stmt = select(User).where(_conflicting_username(data.username))
         check_result = await session.execute(check_stmt)
         if check_result.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Username already exists",
-            )
+            raise _duplicate_conflict()
 
     # Update fields
     update_data = data.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(user, field, value)
 
-    await session.flush()
+    await flush_or_http_conflict(session, _duplicate_conflict())
     await session.refresh(user)
 
     return UserResponse.model_validate(user)

@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 from fastsmtp.db.models import Domain, Rule, RuleSet
 from httpx import AsyncClient
+from sqlalchemy import false
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -319,3 +320,73 @@ class TestRulesReorderExtended:
             json={"rule_ids": [str(uuid.uuid4())]},
         )
         assert response.status_code == 404
+
+
+class TestRuleSetConflictRace:
+    """The loser of a concurrent duplicate ruleset write must get the pre-check's 409.
+
+    create_ruleset and update_ruleset are check-then-flush, so two concurrent
+    requests can both pass the duplicate check; the loser then hits
+    uq_ruleset_name at flush time. The loser is simulated deterministically
+    by patching the pre-check filter to match nothing, which is exactly what
+    its stale read saw.
+    """
+
+    @pytest.fixture
+    def losing_precheck(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the duplicate pre-check see no conflict, as the race's loser does."""
+        import fastsmtp.api.rules as rules_api
+
+        monkeypatch.setattr(rules_api, "_conflicting_ruleset_name", lambda domain_id, name: false())
+
+    @pytest_asyncio.fixture
+    async def raced_domain(self, test_session: AsyncSession) -> tuple[Domain, RuleSet]:
+        """A domain holding rulesets 'keep' and 'target'; returns (domain, target)."""
+        domain = Domain(domain_name="ruleset-race.com", is_enabled=True)
+        test_session.add(domain)
+        await test_session.flush()
+
+        target = RuleSet(domain_id=domain.id, name="target")
+        test_session.add_all([RuleSet(domain_id=domain.id, name="keep"), target])
+        await test_session.commit()
+        await test_session.refresh(domain)
+        await test_session.refresh(target)
+        return domain, target
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_create_returns_409(
+        self,
+        auth_client: AsyncClient,
+        raced_domain: tuple[Domain, RuleSet],
+        losing_precheck: None,
+    ):
+        """A create that loses the race gets 409, not a 500 from the constraint."""
+        domain, _ = raced_domain
+
+        response = await auth_client.post(
+            f"/api/v1/domains/{domain.id}/rulesets", json={"name": "keep"}
+        )
+        assert response.status_code == 409
+        assert "already exists" in response.json()["detail"]
+
+        # The translated conflict must leave the app serviceable
+        fresh = await auth_client.post(
+            f"/api/v1/domains/{domain.id}/rulesets", json={"name": "unraced"}
+        )
+        assert fresh.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_raced_duplicate_update_returns_409(
+        self,
+        auth_client: AsyncClient,
+        raced_domain: tuple[Domain, RuleSet],
+        losing_precheck: None,
+    ):
+        """An update that loses the race gets 409, not a 500 from the constraint."""
+        domain, target = raced_domain
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{domain.id}/rulesets/{target.id}", json={"name": "keep"}
+        )
+        assert response.status_code == 409
+        assert "already exists" in response.json()["detail"]

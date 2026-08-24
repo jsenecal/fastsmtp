@@ -3,11 +3,11 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from fastsmtp.api.validation import require_s3_for_preservation
+from fastsmtp.api.validation import flush_or_http_conflict, require_s3_for_preservation
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, DomainMember, User
@@ -23,6 +23,38 @@ from fastsmtp.schemas import (
 )
 
 router = APIRouter(prefix="/domains", tags=["domains"])
+
+
+def _conflicting_domain_name(domain_name: str) -> ColumnElement[bool]:
+    """Filter for rows that conflict with creating ``domain_name``.
+
+    Mirrors the unique index on ``domains.domain_name``, which covers
+    soft-deleted rows too: a tombstoned domain still blocks its name.
+    """
+    return Domain.domain_name == domain_name
+
+
+def _duplicate_domain_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Domain already exists",
+    )
+
+
+def _membership(domain_id: uuid.UUID, user_id: uuid.UUID) -> ColumnElement[bool]:
+    """Filter for one user's membership in one domain.
+
+    This pair is what ``uq_domain_member`` keys on, so the same filter serves
+    both as the row lookup and as the duplicate pre-check before an insert.
+    """
+    return and_(DomainMember.domain_id == domain_id, DomainMember.user_id == user_id)
+
+
+def _duplicate_member_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="User is already a member of this domain",
+    )
 
 
 @router.get("", response_model=list[DomainResponse])
@@ -63,13 +95,10 @@ async def create_domain(
         require_s3_for_preservation(settings)
 
     # Check for duplicate domain
-    stmt = select(Domain).where(Domain.domain_name == data.domain_name)
+    stmt = select(Domain).where(_conflicting_domain_name(data.domain_name))
     result = await session.execute(stmt)
     if result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Domain already exists",
-        )
+        raise _duplicate_domain_conflict()
 
     domain = Domain(
         domain_name=data.domain_name,
@@ -80,7 +109,7 @@ async def create_domain(
         preserve_raw_message=data.preserve_raw_message,
     )
     session.add(domain)
-    await session.flush()
+    await flush_or_http_conflict(session, _duplicate_domain_conflict())
     await session.refresh(domain)
 
     return DomainResponse.model_validate(domain)
@@ -187,16 +216,10 @@ async def add_member(
         )
 
     # Check for existing membership
-    existing_stmt = select(DomainMember).where(
-        DomainMember.domain_id == domain_id,
-        DomainMember.user_id == data.user_id,
-    )
+    existing_stmt = select(DomainMember).where(_membership(domain_id, data.user_id))
     existing_result = await session.execute(existing_stmt)
     if existing_result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User is already a member of this domain",
-        )
+        raise _duplicate_member_conflict()
 
     # Only owners can add other owners
     if data.role == "owner":
@@ -208,7 +231,7 @@ async def add_member(
         role=data.role,
     )
     session.add(member)
-    await session.flush()
+    await flush_or_http_conflict(session, _duplicate_member_conflict())
     await session.refresh(member)
 
     response = MemberResponse.model_validate(member)
@@ -230,10 +253,7 @@ async def update_member(
     stmt = (
         select(DomainMember)
         .options(selectinload(DomainMember.user))
-        .where(
-            DomainMember.domain_id == domain_id,
-            DomainMember.user_id == user_id,
-        )
+        .where(_membership(domain_id, user_id))
     )
     result = await session.execute(stmt)
     member = result.scalar_one_or_none()
@@ -270,10 +290,7 @@ async def remove_member(
     stmt = (
         select(DomainMember)
         .options(selectinload(DomainMember.user))
-        .where(
-            DomainMember.domain_id == domain_id,
-            DomainMember.user_id == user_id,
-        )
+        .where(_membership(domain_id, user_id))
     )
     result = await session.execute(stmt)
     member = result.scalar_one_or_none()
