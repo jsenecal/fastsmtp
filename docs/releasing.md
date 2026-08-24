@@ -68,7 +68,7 @@ git diff --name-only <last-release-tag>..HEAD -- fastsmtp/alembic/versions/
 
 If it does, the release notes **must** say so and state the required order:
 
-1. `fastsmtp db upgrade head` first,
+1. `fastsmtp db upgrade head` first (it needs only `FASTSMTP_DATABASE_URL`),
 2. then move the image.
 
 Since the [startup schema check](configuration.md#schema-version-check) landed, an

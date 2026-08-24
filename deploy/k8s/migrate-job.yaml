@@ -41,6 +41,10 @@ spec:
           # Must match the image the Deployments are about to run.
           image: ghcr.io/jsenecal/fastsmtp:v0.3.0
           command: ["fastsmtp", "db", "upgrade", "head"]
+          # `fastsmtp db` reads only FASTSMTP_DATABASE_URL. The Secret is
+          # referenced because that is where the URL lives in this layout; the
+          # root API key it also carries is not needed here, and a layout that
+          # keeps the URL on its own can hand the Job just that one variable.
           envFrom:
             - configMapRef:
                 name: fastsmtp-config

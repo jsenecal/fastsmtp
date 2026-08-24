@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+import sys
 from pathlib import Path
 
 import typer
@@ -256,7 +257,10 @@ def _run_alembic(*args):
         console.print(f"[red]alembic.ini not found at {alembic_ini}[/red]")
         raise typer.Exit(1)
 
-    cmd = ["alembic", "-c", str(alembic_ini), *args]
+    # Run Alembic through the interpreter that runs this CLI rather than by
+    # name: it is installed beside us, and a cron job or systemd unit that
+    # starts .venv/bin/fastsmtp directly has no venv bin on PATH.
+    cmd = [sys.executable, "-m", "alembic", "-c", str(alembic_ini), *args]
     result = subprocess.run(cmd, cwd=package_dir)
     if result.returncode != 0:
         raise typer.Exit(result.returncode)

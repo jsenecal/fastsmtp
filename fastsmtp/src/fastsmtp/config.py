@@ -12,8 +12,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from fastsmtp.net import parse_networks
 
 
-class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
+class DatabaseSettings(BaseSettings):
+    """The settings needed to reach the database, and nothing else.
+
+    ``alembic/env.py`` loads this view rather than the full :class:`Settings`,
+    so ``fastsmtp db upgrade`` works with only ``FASTSMTP_DATABASE_URL`` set
+    and is not held to the requirements of a serving process -- the root API
+    key, the S3 cross-field rules -- which a one-off migration Job has no use
+    for. ``Settings`` inherits from this class so the prefix, ``.env``
+    handling and the field itself cannot drift between the two.
+    """
 
     model_config = SettingsConfigDict(
         env_prefix="FASTSMTP_",
@@ -21,6 +29,15 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    database_url: str = Field(
+        default="postgresql+asyncpg://fastsmtp:fastsmtp@localhost:5432/fastsmtp",
+        description="Database connection URL (postgresql+asyncpg://...)",
+    )
+
+
+class Settings(DatabaseSettings):
+    """Application settings loaded from environment variables."""
 
     # SMTP Server
     smtp_host: str = "0.0.0.0"
@@ -58,11 +75,7 @@ class Settings(BaseSettings):
         description="Allowed CORS origins. Empty disables CORS. ['*'] for dev only.",
     )
 
-    # Database (PostgreSQL)
-    database_url: str = Field(
-        default="postgresql+asyncpg://fastsmtp:fastsmtp@localhost:5432/fastsmtp",
-        description="Database connection URL (postgresql+asyncpg://...)",
-    )
+    # Database (PostgreSQL) -- database_url is inherited from DatabaseSettings
     database_pool_size: int = 5
     database_pool_max_overflow: int = 10
     database_echo: bool = False

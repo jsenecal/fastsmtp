@@ -24,6 +24,10 @@ fastsmtp serve --shutdown-timeout 60
 
 ## Database Management
 
+The `db` commands read only `FASTSMTP_DATABASE_URL`. The root API key, S3 settings and
+every other variable `fastsmtp serve` requires are not needed, so a one-off migration
+Job or pod can be given just the database URL.
+
 ```bash
 # Apply all pending migrations
 fastsmtp db upgrade
