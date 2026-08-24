@@ -20,7 +20,7 @@ REQUEST_DURATION = Histogram(
 WEBHOOK_DELIVERIES_TOTAL = Counter(
     "fastsmtp_webhook_deliveries_total",
     "Total webhook deliveries",
-    ["status"],  # delivered, failed, exhausted
+    ["status"],  # delivered, failed, exhausted, cancelled (recipient/domain soft-deleted)
 )
 
 WEBHOOK_DELIVERY_DURATION = Histogram(

@@ -173,7 +173,7 @@ class TestSoftDeleteQueries:
         await test_session.commit()
 
         # Query excluding deleted
-        stmt = select(Domain).where(Domain.deleted_at.is_(None))
+        stmt = select(Domain).where(Domain.live())
         result = await test_session.execute(stmt)
         domains = result.scalars().all()
 
@@ -204,6 +204,38 @@ class TestSoftDeleteQueries:
         assert len(domains) == 2
         deleted_count = sum(1 for d in domains if d.is_deleted)
         assert deleted_count == 1
+
+
+class TestLiveFilter:
+    """``Model.live()`` is the one place ``deleted_at IS NULL`` is spelled.
+
+    Every read path filters tombstones through it, so it has to be exactly
+    that predicate - and available on every model carrying the mixin - or a
+    grep for inline ``deleted_at.is_(None)`` stops being a complete audit.
+    """
+
+    @pytest.mark.parametrize("model", [User, APIKey, Domain, Recipient])
+    def test_live_compiles_to_deleted_at_is_null(self, model):
+        compiled = str(model.live().compile(compile_kwargs={"literal_binds": True}))
+        assert compiled == f"{model.__tablename__}.deleted_at IS NULL"
+
+    @pytest.mark.asyncio
+    async def test_live_excludes_tombstones(self, test_session: AsyncSession):
+        live = Domain(domain_name="live-filter-live.com", is_enabled=True)
+        dead = Domain(domain_name="live-filter-dead.com", is_enabled=True)
+        test_session.add_all([live, dead])
+        await test_session.commit()
+
+        dead.deleted_at = datetime.now(UTC)
+        await test_session.commit()
+
+        result = await test_session.execute(
+            select(Domain.domain_name).where(
+                Domain.live(),
+                Domain.domain_name.like("live-filter-%"),
+            )
+        )
+        assert result.scalars().all() == ["live-filter-live.com"]
 
 
 class TestSoftDeleteMixinIntegrity:
@@ -392,6 +424,84 @@ class TestNamedLocalPartIndexWithSoftDelete:
             is_enabled=True,
         )
         test_session.add(second)
+        with pytest.raises(IntegrityError):
+            await test_session.commit()
+        await test_session.rollback()
+
+
+class TestUsernameIndexWithSoftDelete:
+    """The username unique index must not count soft-deleted rows.
+
+    ``ix_users_username`` exists to allow at most one *live* user per
+    username. A tombstoned user (deleted_at set) must not block recreating
+    the same username - deleting alice and creating alice again is a routine
+    admin operation, and until users are soft-deleted through the API the
+    tombstone would otherwise stay in the way forever. Same defect class as
+    the two recipient indexes above (migration 008).
+    """
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_user_does_not_block_replacement(self, test_session: AsyncSession):
+        """The same username can be recreated after soft-deleting the old one."""
+        old = User(username="alice-replace", is_active=True)
+        test_session.add(old)
+        await test_session.commit()
+
+        old.deleted_at = datetime.now(UTC)
+        await test_session.commit()
+
+        replacement = User(username="alice-replace", is_active=True)
+        test_session.add(replacement)
+        await test_session.commit()
+
+        await test_session.refresh(replacement)
+        assert replacement.deleted_at is None
+        assert replacement.id != old.id
+
+    @pytest.mark.asyncio
+    async def test_second_live_user_still_rejected(self, test_session: AsyncSession):
+        """Two live users with the same username must still violate the index."""
+        test_session.add(User(username="alice-unique", is_active=True))
+        await test_session.commit()
+
+        test_session.add(User(username="alice-unique", is_active=True))
+        with pytest.raises(IntegrityError):
+            await test_session.commit()
+        await test_session.rollback()
+
+
+class TestDomainNameIndexWithSoftDelete:
+    """The domain-name unique index must not count soft-deleted rows.
+
+    ``ix_domains_domain_name`` exists to allow at most one *live* domain per
+    name; a tombstoned domain must not block recreating it (migration 008).
+    """
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_domain_does_not_block_replacement(self, test_session: AsyncSession):
+        """The same domain name can be recreated after soft-deleting the old one."""
+        old = Domain(domain_name="replace-me.com", is_enabled=True)
+        test_session.add(old)
+        await test_session.commit()
+
+        old.deleted_at = datetime.now(UTC)
+        await test_session.commit()
+
+        replacement = Domain(domain_name="replace-me.com", is_enabled=True)
+        test_session.add(replacement)
+        await test_session.commit()
+
+        await test_session.refresh(replacement)
+        assert replacement.deleted_at is None
+        assert replacement.id != old.id
+
+    @pytest.mark.asyncio
+    async def test_second_live_domain_still_rejected(self, test_session: AsyncSession):
+        """Two live domains with the same name must still violate the index."""
+        test_session.add(Domain(domain_name="still-unique.com", is_enabled=True))
+        await test_session.commit()
+
+        test_session.add(Domain(domain_name="still-unique.com", is_enabled=True))
         with pytest.raises(IntegrityError):
             await test_session.commit()
         await test_session.rollback()

@@ -10,6 +10,10 @@ class DeliveryStatus(str, Enum):
     DELIVERED = "delivered"
     FAILED = "failed"
     EXHAUSTED = "exhausted"
+    # Terminal: set when the delivery's recipient or domain is soft-deleted.
+    # Never retried by the worker and never sent to the DLQ; only the retry
+    # endpoint re-arms it, once both are live again.
+    CANCELLED = "cancelled"
 
 
 class DomainRole(str, Enum):

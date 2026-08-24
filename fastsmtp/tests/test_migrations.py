@@ -27,6 +27,7 @@ from alembic.migration import MigrationContext
 from anyio import to_thread
 from fastsmtp.db.models import Base
 from sqlalchemy import Connection, make_url, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 pytestmark = pytest.mark.migrations
@@ -158,3 +159,86 @@ async def test_migrated_schema_matches_models(
     assert not differences, "migrated schema differs from Base.metadata:\n" + "\n".join(
         f"  {difference!r}" for difference in differences
     )
+
+
+# (table, name column, sample value) for the two name indexes 008 rebuilds as
+# partial unique indexes over live rows only.
+NAME_INDEX_CASES = [
+    pytest.param("users", "username", "alice", id="users"),
+    pytest.param("domains", "domain_name", "example.com", id="domains"),
+]
+
+
+def _insert_named_row(table: str, column: str, tombstoned: bool) -> str:
+    """Raw INSERT of a live or tombstoned row; every other column has a default."""
+    deleted_at = "now()" if tombstoned else "NULL"
+    return (
+        f"INSERT INTO {table} (id, {column}, deleted_at) "
+        f"VALUES (gen_random_uuid(), :name, {deleted_at})"
+    )
+
+
+async def _insert_live_and_tombstone(database_url: str, table: str, column: str, name: str) -> None:
+    async with connected(database_url) as connection:
+        for tombstoned in (True, False):
+            await connection.execute(
+                text(_insert_named_row(table, column, tombstoned)), {"name": name}
+            )
+        await connection.commit()
+
+
+@pytest.mark.parametrize(("table", "column", "name"), NAME_INDEX_CASES)
+async def test_008_allows_live_after_tombstone_names(
+    scrubbed_environ: dict[str, str],
+    migration_database_url: str,
+    table: str,
+    column: str,
+    name: str,
+) -> None:
+    """At head, a live row may share its name with a tombstone, but not with a live row.
+
+    This is the property 008 exists for: deleting alice / example.com and
+    recreating the name is a routine admin operation, and the database - not
+    only the API pre-check - has to allow it while still rejecting duplicates
+    among live rows.
+    """
+    await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+    await _insert_live_and_tombstone(migration_database_url, table, column, name)
+
+    async with connected(migration_database_url) as connection:
+        with pytest.raises(IntegrityError):
+            await connection.execute(
+                text(_insert_named_row(table, column, tombstoned=False)), {"name": name}
+            )
+        await connection.rollback()
+
+
+@pytest.mark.parametrize(("table", "column", "name"), NAME_INDEX_CASES)
+async def test_008_downgrade_refuses_live_and_tombstone_pair(
+    scrubbed_environ: dict[str, str],
+    migration_database_url: str,
+    table: str,
+    column: str,
+    name: str,
+) -> None:
+    """Downgrading past 008 with a live/tombstone name pair fails loudly.
+
+    The old, unconditional unique index cannot hold both rows. As with
+    005-007, the migration refuses rather than deduplicating: silently
+    deleting a user or a domain to make an index fit is not a rollback.
+    The failure is transactional, so the database is left at 008 and a
+    subsequent ``upgrade head`` is a clean no-op.
+    """
+    await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+    await _insert_live_and_tombstone(migration_database_url, table, column, name)
+
+    result = await to_thread.run_sync(
+        partial(_run_alembic, scrubbed_environ, migration_database_url, "downgrade", "007")
+    )
+    assert result.returncode != 0, "downgrade 007 succeeded over a live/tombstone name pair"
+
+    async with connected(migration_database_url) as connection:
+        version = await connection.execute(text("SELECT version_num FROM alembic_version"))
+        assert version.scalar_one() == "008"
+
+    await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")

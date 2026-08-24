@@ -55,6 +55,7 @@ class DomainResponse(DomainBase):
     preserve_raw_message: bool | None
     created_at: datetime
     updated_at: datetime
+    deleted_at: datetime | None = None
 
 
 class DomainBriefResponse(BaseModel):
