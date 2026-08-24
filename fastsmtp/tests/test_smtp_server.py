@@ -1,7 +1,7 @@
 """Tests for SMTP server functionality."""
 
 from email import message_from_bytes
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -9,7 +9,6 @@ from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Domain, Recipient
 from fastsmtp.db.soft_delete import soft_delete_domain, soft_delete_recipient
-from fastsmtp.rules.engine import RuleEvaluationResult
 from fastsmtp.smtp.server import (
     FastSMTPHandler,
     extract_email_payload,
@@ -24,7 +23,7 @@ from fastsmtp.smtp.validation import (
     EmailAuthResult,
 )
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class TestExtractEmailPayload:
@@ -333,54 +332,19 @@ class TestLookupRecipientTombstones:
 
     # -- handler: RCPT and the DATA-phase re-lookup ----------------------
 
-    @staticmethod
-    def _session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-        return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
     async def _rcpt(
-        self, handler: FastSMTPHandler, engine: AsyncEngine, envelope: Envelope, address: str
+        self,
+        handler: FastSMTPHandler,
+        session_factory: async_sessionmaker[AsyncSession],
+        envelope: Envelope,
+        address: str,
     ) -> str:
-        with patch("fastsmtp.smtp.server.async_session", self._session_factory(engine)):
+        with patch("fastsmtp.smtp.server.async_session", session_factory):
             return await handler.handle_RCPT(MagicMock(), MagicMock(), envelope, address, [])
-
-    async def _data(
-        self, handler: FastSMTPHandler, engine: AsyncEngine, envelope: Envelope
-    ) -> tuple[int, AsyncMock, AsyncMock]:
-        """Run the DATA-phase persist step; return (deliveries, rules spy, enqueue spy)."""
-        raw = (
-            b"From: sender@external.com\r\n"
-            b"Subject: After RCPT\r\n"
-            b"Message-ID: <after-rcpt@external.com>\r\n\r\n"
-            b"Body\r\n"
-        )
-        envelope.content = raw
-        rules_spy = AsyncMock(return_value=RuleEvaluationResult())
-        enqueue_spy = AsyncMock()
-        with (
-            patch("fastsmtp.smtp.server.async_session", self._session_factory(engine)),
-            patch("fastsmtp.rules.engine.evaluate_rules", rules_spy),
-            patch("fastsmtp.webhook.queue.enqueue_delivery", enqueue_spy),
-        ):
-            created = await handler._process_and_persist_message(
-                envelope=envelope,
-                message=message_from_bytes(raw),
-                message_id="<after-rcpt@external.com>",
-                auth_result=EmailAuthResult(
-                    dkim_result=RESULT_NONE,
-                    dkim_domain=None,
-                    dkim_selector=None,
-                    spf_result=RESULT_NONE,
-                    spf_domain=None,
-                    client_ip="203.0.113.10",
-                ),
-                client_ip="203.0.113.10",
-                raw_content=raw,
-            )
-        return created, rules_spy, enqueue_spy
 
     @pytest.mark.asyncio
     async def test_rcpt_rejects_tombstoned_domain(
-        self, test_session: AsyncSession, test_engine: AsyncEngine, test_settings: Settings, domain
+        self, test_session: AsyncSession, session_factory, test_settings: Settings, domain
     ):
         """RCPT answers 550 for a tombstoned domain and leaves the envelope alone."""
         await soft_delete_domain(test_session, domain)
@@ -388,7 +352,7 @@ class TestLookupRecipientTombstones:
         envelope = Envelope()
 
         reply = await self._rcpt(
-            FastSMTPHandler(test_settings), test_engine, envelope, f"sales@{self.DOMAIN}"
+            FastSMTPHandler(test_settings), session_factory, envelope, f"sales@{self.DOMAIN}"
         )
 
         assert reply == f"550 Domain {self.DOMAIN} not configured"
@@ -396,25 +360,30 @@ class TestLookupRecipientTombstones:
 
     @pytest.mark.asyncio
     async def test_data_delivers_to_live_recipient(
-        self, test_session: AsyncSession, test_engine: AsyncEngine, test_settings: Settings, domain
+        self, session_factory, test_settings: Settings, run_smtp_handler, domain
     ):
         """Control for the skip tests: a live recipient reaches the rules engine and the queue."""
         handler = FastSMTPHandler(test_settings)
         envelope = Envelope()
         address = f"sales@{self.DOMAIN}"
-        assert await self._rcpt(handler, test_engine, envelope, address) == "250 OK"
+        assert await self._rcpt(handler, session_factory, envelope, address) == "250 OK"
 
-        created, rules_spy, enqueue_spy = await self._data(handler, test_engine, envelope)
+        run = await run_smtp_handler(handler, envelope)
 
-        assert created == 1
-        rules_spy.assert_awaited_once()
-        assert rules_spy.await_args.kwargs["domain_id"] == domain.id
-        enqueue_spy.assert_awaited_once()
-        assert enqueue_spy.await_args.kwargs["webhook_url"] == "https://example.com/sales"
+        assert run.created == 1
+        run.rules.assert_awaited_once()
+        assert run.rules.await_args.kwargs["domain_id"] == domain.id
+        run.enqueue.assert_awaited_once()
+        assert run.enqueue.await_args.kwargs["webhook_url"] == "https://example.com/sales"
 
     @pytest.mark.asyncio
     async def test_data_skips_recipient_tombstoned_after_rcpt(
-        self, test_session: AsyncSession, test_engine: AsyncEngine, test_settings: Settings, domain
+        self,
+        test_session: AsyncSession,
+        session_factory,
+        test_settings: Settings,
+        run_smtp_handler,
+        domain,
     ):
         """A recipient tombstoned between RCPT and DATA gets no delivery.
 
@@ -425,33 +394,38 @@ class TestLookupRecipientTombstones:
         handler = FastSMTPHandler(test_settings)
         envelope = Envelope()
         address = f"sales@{self.DOMAIN}"
-        assert await self._rcpt(handler, test_engine, envelope, address) == "250 OK"
+        assert await self._rcpt(handler, session_factory, envelope, address) == "250 OK"
         await self._tombstone_recipient(test_session, domain, "sales")
         await self._tombstone_recipient(test_session, domain, None)
 
-        created, rules_spy, enqueue_spy = await self._data(handler, test_engine, envelope)
+        run = await run_smtp_handler(handler, envelope)
 
-        assert created == 0
-        rules_spy.assert_not_awaited()
-        enqueue_spy.assert_not_awaited()
+        assert run.created == 0
+        run.rules.assert_not_awaited()
+        run.enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_data_never_evaluates_rules_for_domain_tombstoned_after_rcpt(
-        self, test_session: AsyncSession, test_engine: AsyncEngine, test_settings: Settings, domain
+        self,
+        test_session: AsyncSession,
+        session_factory,
+        test_settings: Settings,
+        run_smtp_handler,
+        domain,
     ):
         """A domain tombstoned between RCPT and DATA never reaches the rules engine."""
         handler = FastSMTPHandler(test_settings)
         envelope = Envelope()
         address = f"sales@{self.DOMAIN}"
-        assert await self._rcpt(handler, test_engine, envelope, address) == "250 OK"
+        assert await self._rcpt(handler, session_factory, envelope, address) == "250 OK"
         await soft_delete_domain(test_session, domain)
         await test_session.commit()
 
-        created, rules_spy, enqueue_spy = await self._data(handler, test_engine, envelope)
+        run = await run_smtp_handler(handler, envelope)
 
-        assert created == 0
-        rules_spy.assert_not_awaited()
-        enqueue_spy.assert_not_awaited()
+        assert run.created == 0
+        run.rules.assert_not_awaited()
+        run.enqueue.assert_not_awaited()
 
 
 class TestLookupRecipientSubaddress:
