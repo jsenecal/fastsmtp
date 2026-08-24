@@ -386,9 +386,12 @@ class FastSMTPClient:
 
     # Recipient endpoints
 
-    def list_recipients(self, domain_id: UUID | str) -> list[dict]:
-        """List recipients for a domain."""
-        return self.get(f"/api/v1/domains/{domain_id}/recipients")
+    def list_recipients(self, domain_id: UUID | str, include_deleted: bool = False) -> list[dict]:
+        """List recipients for a domain. ``include_deleted`` also returns soft-deleted ones."""
+        return self.get(
+            f"/api/v1/domains/{domain_id}/recipients",
+            params=_flags(include_deleted=include_deleted),
+        )
 
     def create_recipient(
         self,
@@ -405,9 +408,14 @@ class FastSMTPClient:
             data["webhook_headers"] = webhook_headers
         return self.post(f"/api/v1/domains/{domain_id}/recipients", json=data)
 
-    def get_recipient(self, domain_id: UUID | str, recipient_id: UUID | str) -> dict:
-        """Get a recipient by ID."""
-        return self.get(f"/api/v1/domains/{domain_id}/recipients/{recipient_id}")
+    def get_recipient(
+        self, domain_id: UUID | str, recipient_id: UUID | str, include_deleted: bool = False
+    ) -> dict:
+        """Get a recipient by ID. A soft-deleted recipient is 404 unless ``include_deleted``."""
+        return self.get(
+            f"/api/v1/domains/{domain_id}/recipients/{recipient_id}",
+            params=_flags(include_deleted=include_deleted),
+        )
 
     def update_recipient(
         self,
@@ -435,9 +443,18 @@ class FastSMTPClient:
             data["webhook_headers"] = webhook_headers
         return self.put(f"/api/v1/domains/{domain_id}/recipients/{recipient_id}", json=data)
 
-    def delete_recipient(self, domain_id: UUID | str, recipient_id: UUID | str) -> None:
-        """Delete a recipient."""
-        self.delete(f"/api/v1/domains/{domain_id}/recipients/{recipient_id}")
+    def delete_recipient(
+        self, domain_id: UUID | str, recipient_id: UUID | str, purge: bool = False
+    ) -> None:
+        """Soft-delete a recipient; ``purge`` permanently removes an already-deleted one."""
+        self.delete(
+            f"/api/v1/domains/{domain_id}/recipients/{recipient_id}",
+            params=_flags(purge=purge),
+        )
+
+    def restore_recipient(self, domain_id: UUID | str, recipient_id: UUID | str) -> dict:
+        """Restore a soft-deleted recipient. Cancelled deliveries stay cancelled."""
+        return self.post(f"/api/v1/domains/{domain_id}/recipients/{recipient_id}/restore")
 
     # RuleSet endpoints
 
