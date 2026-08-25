@@ -56,8 +56,17 @@ A domain carries four tri-state authentication fields: `verify_dkim`, `verify_sp
 `reject_dkim_fail` and `reject_spf_fail`. `null` (the default) inherits the matching
 `FASTSMTP_SMTP_*` server setting; `true` or `false` overrides it for mail addressed to
 that domain and takes effect at receive time. Send `null` on a `PUT` to go back to
-inheriting. See [Per-domain overrides](configuration.md#per-domain-overrides) for what
-they do when a message has recipients on several domains.
+inheriting.
+
+Setting them is **superuser only**: they are the operator's mail policy, and a domain
+admin could otherwise turn off a check the server rejects on. `PUT /domains/{id}`
+otherwise needs only the admin role, so a payload that sets any of them without
+superuser rights is answered `403` naming the fields, and nothing is written; an
+absent field, or an explicit `null` to inherit, is not an override and stays open to
+domain admins. (`POST /domains` is superuser-only in full, so it answers the generic
+`403` first.) See
+[Per-domain overrides](configuration.md#per-domain-overrides) for what they do when a
+message has recipients on several domains.
 
 ### Members
 

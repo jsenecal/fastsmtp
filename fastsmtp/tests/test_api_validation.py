@@ -7,9 +7,17 @@ import pytest
 from fastapi import HTTPException
 from fastapi.params import Query
 from fastsmtp.api import validation
-from fastsmtp.api.validation import IncludeDeleted, Purge, require_tombstoned
+from fastsmtp.api.validation import (
+    SUPERUSER_ONLY_DOMAIN_FIELDS,
+    IncludeDeleted,
+    Purge,
+    require_superuser_for_auth_overrides,
+    require_tombstoned,
+)
+from fastsmtp.auth import AuthContext
 from fastsmtp.db.integrity import is_unique_violation, live_value_taken
 from fastsmtp.db.models import Domain, User
+from fastsmtp.schemas import DomainCreate, DomainUpdate
 from pydantic_core import PydanticUndefined
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,6 +142,61 @@ class TestRequireTombstoned:
             require_tombstoned(domain, "Domain must be deleted before it can be purged")
         assert exc_info.value.status_code == 409
         assert exc_info.value.detail == "Domain must be deleted before it can be purged"
+
+
+class TestRequireSuperuserForAuthOverrides:
+    """The four domain authentication columns are the operator's, not a tenant's."""
+
+    @staticmethod
+    def _auth(is_superuser: bool) -> AuthContext:
+        return AuthContext(
+            user=User(username="u", email="u@example.com", is_superuser=is_superuser),
+            api_key=None,
+            is_root=False,
+            scopes=set(),
+        )
+
+    @pytest.mark.parametrize("field", SUPERUSER_ONLY_DOMAIN_FIELDS)
+    def test_a_regular_user_setting_a_field_is_refused(self, field: str):
+        with pytest.raises(HTTPException) as exc_info:
+            require_superuser_for_auth_overrides(self._auth(False), {field: True})
+        assert exc_info.value.status_code == 403
+        assert field in exc_info.value.detail
+        assert "superuser only" in exc_info.value.detail
+
+    def test_the_detail_names_every_field_the_payload_set(self):
+        with pytest.raises(HTTPException) as exc_info:
+            require_superuser_for_auth_overrides(
+                self._auth(False), {"verify_dkim": False, "reject_spf_fail": True}
+            )
+        assert "verify_dkim" in exc_info.value.detail
+        assert "reject_spf_fail" in exc_info.value.detail
+
+    def test_an_explicit_null_means_inherit_and_is_allowed(self):
+        """``exclude_unset`` keeps a null in the payload; inheriting is not an opt-out."""
+        require_superuser_for_auth_overrides(self._auth(False), {"verify_dkim": None})
+
+    def test_other_fields_are_none_of_its_business(self):
+        require_superuser_for_auth_overrides(self._auth(False), {"is_enabled": False})
+
+    @pytest.mark.parametrize("field", SUPERUSER_ONLY_DOMAIN_FIELDS)
+    def test_a_superuser_may_set_every_field(self, field: str):
+        require_superuser_for_auth_overrides(self._auth(True), {field: False})
+
+    @pytest.mark.parametrize("field", SUPERUSER_ONLY_DOMAIN_FIELDS)
+    def test_every_guarded_field_is_one_the_domain_payloads_carry(self, field: str):
+        """A renamed column must break here, not silently stop being guarded."""
+        assert field in DomainCreate.model_fields
+        assert field in DomainUpdate.model_fields
+
+    def test_the_root_key_is_a_superuser(self):
+        auth = AuthContext(
+            user=User(username="u", email="u@example.com", is_superuser=False),
+            api_key=None,
+            is_root=True,
+            scopes=set(),
+        )
+        require_superuser_for_auth_overrides(auth, {"verify_dkim": True})
 
 
 class TestSoftDeleteQueryAliases:

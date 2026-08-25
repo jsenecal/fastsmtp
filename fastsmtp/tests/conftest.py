@@ -167,7 +167,39 @@ async def test_session(
 
 
 @dataclass
-class SMTPHandlerRun:
+class EnqueuedDeliveries:
+    """What the ``enqueue_delivery`` spy of one handler run captured.
+
+    Both run helpers below replace the same function with the same kind of
+    spy, so the accessors over what it recorded live here once.
+    """
+
+    enqueue: AsyncMock
+    """Spy over ``enqueue_delivery``; nothing reaches the queue table."""
+
+    @property
+    def payloads(self) -> list[dict]:
+        """Webhook payloads in enqueue order."""
+        return [call.kwargs["payload"] for call in self.enqueue.await_args_list]
+
+    @property
+    def recipients(self) -> list[str]:
+        """Addresses a delivery was enqueued for, in enqueue order."""
+        return [payload["recipient"] for payload in self.payloads]
+
+    def call_for(self, address: str):
+        """The single ``enqueue_delivery`` call made for one recipient address."""
+        matching = [
+            call
+            for call in self.enqueue.await_args_list
+            if call.kwargs["payload"]["recipient"] == address
+        ]
+        assert len(matching) == 1, f"expected one delivery for {address}, got {len(matching)}"
+        return matching[0]
+
+
+@dataclass
+class SMTPHandlerRun(EnqueuedDeliveries):
     """What one DATA-phase run of the SMTP handler produced."""
 
     created: int
@@ -176,13 +208,6 @@ class SMTPHandlerRun:
     """The exact bytes the handler received, for archive assertions."""
     rules: AsyncMock
     """Spy wrapping the real ``evaluate_rules``; the rules did run."""
-    enqueue: AsyncMock
-    """Spy over ``enqueue_delivery``; nothing reaches the queue table."""
-
-    @property
-    def payloads(self) -> list[dict]:
-        """Webhook payloads in enqueue order."""
-        return [call.kwargs["payload"] for call in self.enqueue.await_args_list]
 
 
 @pytest.fixture
@@ -245,7 +270,7 @@ def run_smtp_handler(session_factory: async_sessionmaker[AsyncSession]):
 
 
 @dataclass
-class SMTPDataRun:
+class SMTPDataRun(EnqueuedDeliveries):
     """What one full DATA phase of the SMTP handler produced."""
 
     reply: str
@@ -254,13 +279,6 @@ class SMTPDataRun:
     """Spy over ``verify_dkim``; never awaited means DKIM was not verified."""
     spf: AsyncMock
     """Spy over ``verify_spf``; never awaited means SPF was not verified."""
-    enqueue: AsyncMock
-    """Spy over ``enqueue_delivery``; nothing reaches the queue table."""
-
-    @property
-    def recipients(self) -> list[str]:
-        """Addresses a delivery was enqueued for, in enqueue order."""
-        return [call.kwargs["payload"]["recipient"] for call in self.enqueue.await_args_list]
 
 
 @pytest.fixture

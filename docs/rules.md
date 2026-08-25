@@ -7,8 +7,9 @@ The rule engine allows conditional processing of emails based on various attribu
 - `from`, `to`, `subject`, `body`
 - `header:<name>` (e.g., `header:X-Priority`)
 - `has_attachment`
-- `dkim_result`, `spf_result` - a mechanism no recipient domain verified reads as
-  `none`; see [Per-domain overrides](configuration.md#per-domain-overrides)
+- `dkim_result`, `spf_result` - a mechanism this rule's own domain does not verify
+  reads as `none`, whatever another recipient's domain asked for; see
+  [Per-domain overrides](configuration.md#per-domain-overrides)
 
 ## Rule Operators
 

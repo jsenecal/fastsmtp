@@ -237,12 +237,12 @@ All configuration is via environment variables with the `FASTSMTP_` prefix.
 | `FASTSMTP_SMTP_REJECT_SPF_FAIL` | `false` | Reject emails on SPF failure |
 
 These four are defaults a domain can override: `verify_dkim`, `verify_spf`,
-`reject_dkim_fail` and `reject_spf_fail` are unset (`inherit`) until you set them, and
-apply at receive time. A check runs once for a message if any recipient's domain
-verifies that mechanism, and a domain can only reject on a mechanism it also verifies.
-With recipients on several domains, only some of them rejecting means the message is
-accepted and those recipients get no delivery; the `550` is answered only when every
-recipient refuses it. See
+`reject_dkim_fail` and `reject_spf_fail` are unset (`inherit`) until a superuser sets
+them, and apply at receive time. A check runs once for a message if any recipient's
+domain verifies that mechanism, and only the domains that asked for it see the result;
+a domain can only reject on a mechanism it also verifies. With recipients on several
+domains the strictest policy wins: one domain refusing the message refuses it for
+everyone, because a `250` followed by a silent drop would be mail loss. See
 [Per-domain overrides](docs/configuration.md#per-domain-overrides).
 
 ### API Server
@@ -965,10 +965,11 @@ fsmtp domain member update <domain-id> <user-id> --role member
 fsmtp domain member remove <domain-id> <user-id>
 ```
 
-`--verify-dkim`, `--verify-spf`, `--reject-dkim-fail` and `--reject-spf-fail` each take
-`true`, `false` or `inherit`, and apply at receive time: `inherit` follows the
-server-wide `FASTSMTP_SMTP_*` setting, and a domain only rejects on a mechanism it also
-verifies.
+`--verify-dkim`, `--verify-spf`, `--reject-dkim-fail` and `--reject-spf-fail` are
+**superuser only** and each take `true`, `false` or `inherit`, applying at receive
+time: `inherit` follows the server-wide `FASTSMTP_SMTP_*` setting, and a domain only
+rejects on a mechanism it also verifies. One recipient domain refusing a message
+refuses it for every recipient.
 
 `--preserve-raw-message true` is rejected with a 422 when the server has no S3 storage
 configured; the CLI prints the missing settings.

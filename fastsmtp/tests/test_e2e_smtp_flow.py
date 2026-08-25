@@ -213,8 +213,15 @@ class TestSMTPServerWithMockedDatabase:
                 return mock_domain, mock_recipient, None
             return None, None, "Domain not configured"
 
+        async def mock_policy_lookup(session, domain_name):
+            # The DATA path resolves each recipient's auth policy through its
+            # own query rather than the full recipient lookup, so it needs
+            # mocking out too or it would reach for a database.
+            return mock_domain if domain_name == mock_domain.domain_name else None
+
         with (
             patch("fastsmtp.smtp.server.lookup_recipient", side_effect=mock_lookup),
+            patch("fastsmtp.smtp.server.load_domain_for_policy", side_effect=mock_policy_lookup),
             patch(
                 "fastsmtp.smtp.server.FastSMTPHandler._process_and_persist_message",
                 new_callable=AsyncMock,

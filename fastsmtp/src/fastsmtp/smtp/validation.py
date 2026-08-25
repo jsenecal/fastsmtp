@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, TypeVar
 
@@ -24,10 +24,22 @@ RESULT_NONE = "none"
 RESULT_TEMPERROR = "temperror"
 RESULT_PERMERROR = "permerror"
 
+# Mechanism names, as they are reported to an operator and to a sender: they
+# are part of the "550 <mechanism> verification failed" reply, so they are
+# spelled once here rather than in every module that names one.
+MECHANISM_DKIM = "DKIM"
+MECHANISM_SPF = "SPF"
 
-@dataclass
+
+@dataclass(frozen=True)
 class EmailAuthResult:
-    """Results of email authentication validation."""
+    """Results of email authentication validation.
+
+    Frozen because one result is computed for the whole message and then
+    shared: :meth:`EffectiveAuthPolicy.masked` hands the same instance to
+    every recipient whose domain verifies both mechanisms, so a mutation
+    would follow the message to recipients that never asked for it.
+    """
 
     dkim_result: str  # pass, fail, none, temperror, permerror
     dkim_domain: str | None
@@ -65,21 +77,47 @@ class EffectiveAuthPolicy:
     reject_dkim_fail: bool
     reject_spf_fail: bool
 
+    def masked(self, auth_result: EmailAuthResult) -> EmailAuthResult:
+        """``auth_result`` as this domain is entitled to see it.
+
+        A mechanism is verified once for the whole message if *any* recipient
+        domain asks for it, so a domain that set ``verify_dkim`` to false can
+        be handed a DKIM decision it never asked for. Everything such a
+        mechanism produced is blanked back to "not checked" here, so the
+        domain's rules match ``dkim_result`` as ``none`` and its webhook
+        payload and delivery log record the same.
+
+        Returns ``auth_result`` itself when the domain verifies both
+        mechanisms; nothing mutates it.
+        """
+        if self.verify_dkim and self.verify_spf:
+            return auth_result
+        return replace(
+            auth_result,
+            dkim_result=auth_result.dkim_result if self.verify_dkim else RESULT_NONE,
+            dkim_domain=auth_result.dkim_domain if self.verify_dkim else None,
+            dkim_selector=auth_result.dkim_selector if self.verify_dkim else None,
+            spf_result=auth_result.spf_result if self.verify_spf else RESULT_NONE,
+            spf_domain=auth_result.spf_domain if self.verify_spf else None,
+        )
+
     def refused_mechanism(self, auth_result: EmailAuthResult) -> str | None:
         """Name the mechanism this policy refuses the message on, if any.
 
-        A domain that does not verify a mechanism cannot reject on it: the
-        result it would be judging was never computed, and ``fail`` there
-        would mean "another recipient's domain asked for this check", not
-        anything this domain decided.
+        The decision is made on what this domain is shown (:meth:`masked`),
+        which is why a domain that does not verify a mechanism cannot reject
+        on it: the result it would be judging was never computed for it, and
+        ``fail`` there would mean "another recipient's domain asked for this
+        check", not anything this domain decided.
 
         DKIM is reported ahead of SPF when both refuse, so a message that
         fails everything is refused with the reply it always was.
         """
-        if self.verify_dkim and self.reject_dkim_fail and auth_result.dkim_result == RESULT_FAIL:
-            return "DKIM"
-        if self.verify_spf and self.reject_spf_fail and auth_result.spf_result == RESULT_FAIL:
-            return "SPF"
+        visible = self.masked(auth_result)
+        if self.reject_dkim_fail and visible.dkim_result == RESULT_FAIL:
+            return MECHANISM_DKIM
+        if self.reject_spf_fail and visible.spf_result == RESULT_FAIL:
+            return MECHANISM_SPF
         return None
 
 

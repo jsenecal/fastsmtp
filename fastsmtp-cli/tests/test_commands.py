@@ -1630,6 +1630,21 @@ class TestSoftDeleteCommands:
         assert "--purge" in output
         assert "superuser only" in output
 
+    @pytest.mark.parametrize("command", ["create", "update"])
+    @pytest.mark.parametrize(
+        "option", ["--verify-dkim", "--verify-spf", "--reject-dkim-fail", "--reject-spf-fail"]
+    )
+    def test_authentication_flag_help_names_the_superuser_restriction(
+        self, command: str, option: str
+    ):
+        """The server answers 403 to a domain admin setting these; say so up front."""
+        result = runner.invoke(app, ["domain", command, "--help"])
+
+        assert result.exit_code == 0
+        output = flat(result.output)
+        assert option in output
+        assert "superuser only" in output
+
 
 class TestUserErrorPaths:
     """Tests for user command error paths."""

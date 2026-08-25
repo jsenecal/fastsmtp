@@ -28,19 +28,28 @@ These four are defaults, not the final word. Every domain has a matching
 `verify_dkim`, `verify_spf`, `reject_dkim_fail` and `reject_spf_fail` field, unset
 by default (`inherit`) so the domain follows the setting above; set to `true` or
 `false` it overrides that setting for mail addressed to the domain, at receive
-time. Set them with `fsmtp domain create/update` or `PUT /domains/{id}`.
+time. They are **superuser only**: `POST /domains` and `PUT /domains/{id}` answer
+`403` to anyone else, since a domain admin could otherwise opt out of the
+server-wide reject policy. Set them with `fsmtp domain create/update` or
+`PUT /domains/{id}`; send `null` (`inherit`) to go back to following the server.
 
-Two rules make this predictable when a message has recipients on more than one
+Three rules make this predictable when a message has recipients on more than one
 domain:
 
 - A check runs once for the message if **any** recipient's domain verifies that
-  mechanism, and the result is recorded for every recipient. A domain that sets
-  `verify_dkim` to `false` never rejects on DKIM and never sees a DKIM decision of
-  its own.
-- A domain can only reject on a mechanism it also verifies. If only some
-  recipients' domains reject the message, it is accepted (`250`) and those
-  recipients get no delivery; it is refused with `550 DKIM verification failed`
-  or `550 SPF verification failed` only when every recipient refuses it.
+  mechanism. The result is shown only to the domains that asked for it: for a
+  domain with `verify_dkim` set to `false`, `dkim_result` is `none` in its rules,
+  its webhook payload and its delivery log, whatever the check found.
+- A domain can only reject on a mechanism it also verifies, so
+  `reject_dkim_fail: true` with `verify_dkim: false` rejects nothing.
+- **The strictest recipient policy wins.** If any one recipient's domain refuses
+  the message, the whole message is refused with `550 DKIM verification failed`
+  or `550 SPF verification failed` (DKIM is named when the refusals mix
+  mechanisms) and nobody is delivered to. Accepting for the other recipients
+  would mean answering `250` and then discarding the message for the refusing
+  one, which is silent mail loss - after a `250` this server owns the delivery
+  or has to bounce it itself. The `550` makes the sender's MTA bounce to a
+  human, who can resend to the lenient address alone.
 
 ## API Server
 

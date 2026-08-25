@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from fastsmtp.storage.s3 import S3Storage
 from aiosmtpd.controller import UnthreadedController
 from aiosmtpd.smtp import SMTP, Envelope, Session, syntax
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -34,6 +34,8 @@ from fastsmtp.metrics.definitions import (
 )
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import (
+    MECHANISM_DKIM,
+    MECHANISM_SPF,
     EffectiveAuthPolicy,
     EmailAuthResult,
     resolve_auth_policy,
@@ -75,12 +77,63 @@ def address_domain(address: str) -> str | None:
     return address.rsplit("@", 1)[1].lower()
 
 
+def encoded_domain_name(domain_name: str) -> str | None:
+    """A domain part spelled the way the ``domains`` table stores it.
+
+    International domain names are normalised to ASCII punycode, so
+    ``example.com`` and its Cyrillic lookalike are different rows. None when
+    idna rejects the name, which no configured domain can match either.
+
+    Every path that resolves a domain from a recipient address goes through
+    this, so the receive-time policy lookup and :func:`lookup_recipient`
+    cannot disagree about which row an address belongs to.
+
+    ``IDNAError`` is the base of everything idna raises, and catching only the
+    codepoint subclasses left the rest -- an empty domain, an empty label
+    (``a..b``), a leading hyphen, an over-long label -- propagating out of a
+    recipient lookup as an unhandled exception.
+    """
+    try:
+        return idna.encode(domain_name.lower()).decode("ascii")
+    except idna.IDNAError:
+        return None
+
+
+def select_live_domain(domain_name: str) -> Select[tuple[Domain]]:
+    """Select the live, enabled domain owning ``domain_name`` (already encoded).
+
+    The single predicate deciding whether a domain exists for incoming mail.
+    Shared so no caller can accept mail for a domain another caller would
+    consider gone.
+    """
+    return select(Domain).where(
+        Domain.domain_name == domain_name,
+        Domain.is_enabled.is_(True),
+        Domain.live(),
+    )
+
+
+async def load_domain_for_policy(session: AsyncSession, domain_name: str) -> Domain | None:
+    """Load the domain a recipient's auth policy comes from, and nothing else.
+
+    ``lookup_recipient`` answers the same question but ``selectinload``s the
+    domain's entire recipients collection, which resolving a policy has no use
+    for: it reads four booleans off the domain row. Same predicate, one query,
+    no collection.
+    """
+    result = await session.execute(select_live_domain(domain_name))
+    return result.scalar_one_or_none()
+
+
 @dataclass(frozen=True)
 class RecipientAuthPolicy:
-    """One envelope recipient paired with the auth policy of its domain."""
+    """One envelope recipient paired with the auth policy of its domain.
 
-    address: str
-    """The address exactly as the envelope carries it."""
+    The address itself is not kept: a refusal now decides the whole message,
+    so what a reply and a log line need is the domain that refused it, not
+    which of its addresses the envelope named.
+    """
+
     domain_name: str
     """The domain the policy came from; the address's own domain if none resolved."""
     policy: EffectiveAuthPolicy
@@ -103,28 +156,15 @@ async def lookup_recipient(
     if "@" not in address:
         return None, None, "Invalid recipient address"
 
-    local_part, domain_name = address.rsplit("@", 1)
+    local_part, raw_domain_name = address.rsplit("@", 1)
     local_part_lower = local_part.lower()
 
-    # Normalize international domain names (IDN) to ASCII punycode
-    # This ensures "example.com" and "example.com" (with Cyrillic chars) are handled correctly
-    try:
-        domain_name = idna.encode(domain_name.lower()).decode("ascii")
-    except idna.core.InvalidCodepoint:
-        return None, None, "Invalid domain name encoding"
-    except idna.core.InvalidCodepointContext:
+    domain_name = encoded_domain_name(raw_domain_name)
+    if domain_name is None:
         return None, None, "Invalid domain name encoding"
 
     # Look up domain with recipients (excluding soft-deleted)
-    stmt = (
-        select(Domain)
-        .options(selectinload(Domain.recipients))
-        .where(
-            Domain.domain_name == domain_name,
-            Domain.is_enabled.is_(True),
-            Domain.live(),
-        )
-    )
+    stmt = select_live_domain(domain_name).options(selectinload(Domain.recipients))
     result = await session.execute(stmt)
     domain = result.scalar_one_or_none()
 
@@ -219,6 +259,15 @@ class FastSMTPHandler:
         Messages are persisted to the database before returning 250 OK to ensure
         no data loss if the server crashes. The webhook worker will then process
         the deliveries asynchronously.
+
+        With recipients on several domains the strictest policy wins: if any
+        one of them refuses the message on a failed DKIM or SPF check, the
+        whole message is refused. Accepting for the others would mean
+        answering 250 and then discarding the message for the refusing
+        addresses - and after a 250 this server owns the delivery or must
+        bounce it itself, so a silent discard is mail loss. The 550 hands the
+        decision back to the sending MTA, which bounces to a human who can see
+        it and can resend to the lenient address alone.
         """
         client_ip = session.peer[0] if session.peer else "unknown"
         mail_from = envelope.mail_from or ""
@@ -314,31 +363,27 @@ class FastSMTPHandler:
 
         # Rejection is per recipient domain: a domain rejects on a mechanism
         # only if it both verifies it and asked for failures to be rejected.
+        # One domain refusing refuses the message for every recipient - see
+        # the docstring for why a partial acceptance is not on offer.
         refusals = [
             (entry, refused_on)
             for entry in rcpt_policies
             if (refused_on := entry.policy.refused_mechanism(auth_result)) is not None
         ]
 
-        if refusals and len(refusals) == len(rcpt_policies):
-            # Nobody would receive this message, so refuse it outright - the
-            # reply the global settings alone used to produce.
-            mechanism = "DKIM" if any(m == "DKIM" for _, m in refusals) else "SPF"
-            logger.warning(f"Rejecting message {message_id}: {mechanism} failed")
+        if refusals:
+            # Refusals that mix mechanisms report DKIM: it is the stricter
+            # signal (the message was signed and the signature did not hold),
+            # and a message failing both keeps the reply it always had.
+            mechanism = (
+                MECHANISM_DKIM if any(m == MECHANISM_DKIM for _, m in refusals) else MECHANISM_SPF
+            )
+            refused_by = ", ".join(sorted({entry.domain_name for entry, _ in refusals}))
+            logger.warning(
+                f"Rejecting message {message_id}: {mechanism} failed, refused by {refused_by}"
+            )
             SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
             return f"550 {mechanism} verification failed"
-
-        # Some recipients still want the message, so it is accepted and only
-        # the refused ones are skipped. A 5xx here would deny delivery to
-        # recipients whose domains never asked for rejection.
-        refused_recipients: set[str] = set()
-        for entry, mechanism in refusals:
-            refused_recipients.add(entry.address)
-            logger.warning(
-                f"Message {message_id}: refusing recipient {entry.address} "
-                f"(domain {entry.domain_name}): {mechanism} verification failed"
-            )
-            SMTP_MESSAGES_TOTAL.labels(result="recipient_refused").inc()
 
         # Process message and persist to database BEFORE returning 250 OK
         # This ensures no data loss if the server crashes
@@ -350,7 +395,6 @@ class FastSMTPHandler:
                 auth_result=auth_result,
                 client_ip=client_ip,
                 raw_content=content,
-                refused_recipients=refused_recipients,
             )
         except Exception as e:
             logger.exception(f"Failed to persist message {message_id}: {e}")
@@ -378,36 +422,37 @@ class FastSMTPHandler:
         empty envelope should not reach here, but if one does the global policy
         still decides the message rather than nothing verifying it.
         """
+        if not rcpt_tos:
+            return [
+                RecipientAuthPolicy(
+                    # Nothing to name in a refusal log line; say so rather
+                    # than leaving it blank.
+                    domain_name="(no recipients)",
+                    policy=resolve_auth_policy(None, self.settings),
+                )
+            ]
+
         policies: list[RecipientAuthPolicy] = []
-        # The policy is a property of the domain, and lookup_recipient resolves
-        # the domain from the address's domain part alone, so recipients that
-        # share one need only one query.
+        # The policy is a property of the domain, so recipients that share one
+        # need only one query.
         by_domain_part: dict[str | None, Domain | None] = {}
         async with async_session() as db_session:
             for rcpt_to in rcpt_tos:
                 domain_part = address_domain(rcpt_to)
                 if domain_part not in by_domain_part:
-                    found, _recipient, _error = await lookup_recipient(rcpt_to, db_session)
+                    lookup_name = encoded_domain_name(domain_part) if domain_part else None
+                    found = None
+                    if lookup_name is not None:
+                        found = await load_domain_for_policy(db_session, lookup_name)
                     by_domain_part[domain_part] = found
                 domain = by_domain_part[domain_part]
                 policies.append(
                     RecipientAuthPolicy(
-                        address=rcpt_to,
-                        domain_name=(
-                            domain.domain_name if domain else (address_domain(rcpt_to) or rcpt_to)
-                        ),
+                        domain_name=domain.domain_name if domain else (domain_part or rcpt_to),
                         policy=resolve_auth_policy(domain, self.settings),
                     )
                 )
 
-        if not policies:
-            policies.append(
-                RecipientAuthPolicy(
-                    address="",
-                    domain_name="",
-                    policy=resolve_auth_policy(None, self.settings),
-                )
-            )
         return policies
 
     async def _process_and_persist_message(
@@ -418,22 +463,22 @@ class FastSMTPHandler:
         auth_result: EmailAuthResult,
         client_ip: str,
         raw_content: bytes,
-        refused_recipients: set[str] | None = None,
     ) -> int:
         """Process message for each recipient and persist deliveries to database.
+
+        Every recipient here is one the message was accepted for: a domain
+        that refuses it refuses it for everyone, in handle_DATA, before any of
+        this runs.
 
         Args:
             envelope: SMTP envelope
             message: Parsed email message
             message_id: Message-ID header value
-            auth_result: Email authentication result
+            auth_result: Email authentication result, as computed for the
+                message. Each recipient sees only the mechanisms its own
+                domain verifies (:meth:`EffectiveAuthPolicy.masked`)
             client_ip: Client IP address
             raw_content: Complete raw MIME message as received
-            refused_recipients: Addresses whose domain rejected the message on a
-                failed DKIM or SPF check. handle_DATA has already logged and
-                counted them; they get no delivery. None means no refusals, so
-                a caller that made no authentication decision keeps every
-                recipient.
 
         Returns:
             Number of deliveries created
@@ -470,26 +515,28 @@ class FastSMTPHandler:
             message_id=message_id,
         )
         base_payload["client_ip"] = client_ip
-        base_payload["dkim_result"] = auth_result.dkim_result
-        base_payload["dkim_domain"] = auth_result.dkim_domain
-        base_payload["spf_result"] = auth_result.spf_result
-        base_payload["spf_domain"] = auth_result.spf_domain
 
         deliveries_created = 0
 
         async with async_session() as db_session:
             # Process each recipient
             for rcpt_to in envelope.rcpt_tos:
-                if refused_recipients and rcpt_to in refused_recipients:
-                    # Its domain rejects the message on a failed check; the
-                    # refusal is already logged and counted in handle_DATA.
-                    continue
-
                 domain, recipient, error = await lookup_recipient(rcpt_to, db_session)
 
                 if error or not domain or not recipient:
                     logger.warning(f"Message {message_id}: skipping recipient {rcpt_to}: {error}")
                     continue
+
+                # A mechanism runs for the message as soon as one recipient
+                # domain asks for it, so blank out the ones this domain did
+                # not: its rules, its payload and its delivery log must not
+                # carry a decision it opted out of.
+                recipient_auth = resolve_auth_policy(domain, self.settings).masked(auth_result)
+                payload = base_payload.copy()
+                payload["dkim_result"] = recipient_auth.dkim_result
+                payload["dkim_domain"] = recipient_auth.dkim_domain
+                payload["spf_result"] = recipient_auth.spf_result
+                payload["spf_domain"] = recipient_auth.spf_domain
 
                 # Evaluate the rules of the domain the lookup just accepted the
                 # message for. That lookup is the one liveness decision for
@@ -499,8 +546,8 @@ class FastSMTPHandler:
                     session=db_session,
                     domain=domain,
                     message=message,
-                    payload=base_payload,
-                    auth_result=auth_result,
+                    payload=payload,
+                    auth_result=recipient_auth,
                 )
 
                 # Archive before honouring a drop so a rule can preserve and discard
@@ -513,8 +560,7 @@ class FastSMTPHandler:
                     logger.info(f"Message {message_id}: dropped for {rcpt_to} by rules")
                     continue
 
-                # Build recipient-specific payload
-                payload = base_payload.copy()
+                # Finish the recipient-specific payload
                 payload["tags"] = rule_result.tags
                 payload["recipient"] = rcpt_to
                 if raw_info is not None:
@@ -531,7 +577,7 @@ class FastSMTPHandler:
                     message_id=message_id,
                     webhook_url=webhook_url,
                     payload=payload,
-                    auth_result=auth_result,
+                    auth_result=recipient_auth,
                     settings=self.settings,
                 )
                 deliveries_created += 1

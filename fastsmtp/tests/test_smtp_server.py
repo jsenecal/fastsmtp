@@ -2,7 +2,7 @@
 
 import logging
 from email import message_from_bytes
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -10,11 +10,11 @@ from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Domain, Recipient, Rule, RuleSet
 from fastsmtp.db.soft_delete import soft_delete_domain, soft_delete_recipient
-from fastsmtp.metrics.definitions import SMTP_MESSAGES_TOTAL
 from fastsmtp.smtp.server import (
     FastSMTPHandler,
     extract_email_payload,
     find_recipient_for_address,
+    load_domain_for_policy,
     lookup_recipient,
 )
 from fastsmtp.smtp.validation import (
@@ -181,6 +181,26 @@ class TestLookupRecipient:
         assert domain is None
         assert recipient is None
         assert "Invalid recipient" in error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "address",
+        ["user@", "user@a..b", "user@-foo.example", "user@" + "x" * 70 + ".example"],
+        ids=["empty domain", "empty label", "leading hyphen", "label too long"],
+    )
+    async def test_lookup_rejects_a_domain_idna_cannot_encode(
+        self, test_session: AsyncSession, address: str
+    ):
+        """idna raises more than the two codepoint errors, and none may escape.
+
+        Each of these is an ``IDNAError`` that is not ``InvalidCodepoint``, so
+        catching only the codepoint subclasses let it propagate out of a
+        recipient lookup as an unhandled exception.
+        """
+        domain, recipient, error = await lookup_recipient(address, test_session)
+        assert domain is None
+        assert recipient is None
+        assert error == "Invalid domain name encoding"
 
     @pytest_asyncio.fixture
     async def test_domain_no_catchall(self, test_session: AsyncSession) -> Domain:
@@ -761,11 +781,6 @@ class TestEmailAuthResult:
         assert result.spf_failed is False
 
 
-def _refused_recipients_total() -> float:
-    """Current value of the per-recipient authentication refusal counter."""
-    return SMTP_MESSAGES_TOTAL.labels(result="recipient_refused")._value.get()
-
-
 class TestPerDomainAuthPolicy:
     """The DKIM/SPF overrides of a recipient's domain, applied at receive time.
 
@@ -805,6 +820,24 @@ class TestPerDomainAuthPolicy:
         envelope.mail_from = "sender@external.com"
         envelope.rcpt_tos = list(addresses)
         return envelope
+
+    @staticmethod
+    async def _drop_on_dkim_fail(session: AsyncSession, domain: Domain) -> None:
+        """Give ``domain`` a rule that drops whatever its rules see DKIM fail on."""
+        ruleset = RuleSet(domain_id=domain.id, name="DKIM", priority=10, is_enabled=True)
+        session.add(ruleset)
+        await session.flush()
+        session.add(
+            Rule(
+                ruleset_id=ruleset.id,
+                order=0,
+                field="dkim_result",
+                operator="equals",
+                value=RESULT_FAIL,
+                action="drop",
+            )
+        )
+        await session.commit()
 
     # -- which checks run ------------------------------------------------
 
@@ -886,16 +919,21 @@ class TestPerDomainAuthPolicy:
         assert run.recipients == [f"user@{self.STRICT}"]
 
     @pytest.mark.asyncio
-    async def test_refusal_is_per_recipient_when_another_recipient_accepts(
+    async def test_one_refusing_domain_refuses_the_whole_message(
         self, make_smtp_settings, make_domain, run_smtp_data, caplog
     ):
-        """A strict domain refusing does not deny delivery to a domain that inherits."""
+        """The strictest recipient policy wins: nobody is delivered to.
+
+        The lenient recipient gets no delivery either, and must not: a 250
+        followed by a silent drop for the strict one is mail loss, while this
+        550 lets the sending MTA bounce and resend to the lenient address
+        alone.
+        """
         await make_domain(self.STRICT, reject_dkim_fail=True)
         await make_domain(self.INHERIT)
         handler = FastSMTPHandler(
             make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=False)
         )
-        before = _refused_recipients_total()
 
         with caplog.at_level(logging.WARNING, logger="fastsmtp.smtp.server"):
             run = await run_smtp_data(
@@ -904,29 +942,28 @@ class TestPerDomainAuthPolicy:
                 dkim=RESULT_FAIL,
             )
 
-        assert run.reply == "250 Message accepted for delivery"
-        assert run.recipients == [f"user@{self.INHERIT}"]
+        assert run.reply == "550 DKIM verification failed"
+        run.enqueue.assert_not_awaited()
         refusals = [
             record.getMessage()
             for record in caplog.records
-            if "refusing recipient" in record.getMessage()
+            if "Rejecting message" in record.getMessage()
         ]
         assert len(refusals) == 1
         assert self.STRICT in refusals[0]
+        assert self.INHERIT not in refusals[0]
         assert "DKIM" in refusals[0]
-        assert _refused_recipients_total() - before == 1
 
     @pytest.mark.asyncio
-    async def test_every_recipient_refusing_answers_the_message_level_550(
+    async def test_every_recipient_refusing_answers_the_same_550(
         self, make_smtp_settings, make_domain, run_smtp_data
     ):
-        """Two strict domains, both refusing, refuse the message instead of accepting it."""
+        """Two strict domains, both refusing, get the reply one of them does."""
         await make_domain(self.STRICT, reject_dkim_fail=True)
         await make_domain(self.INHERIT, reject_dkim_fail=True)
         handler = FastSMTPHandler(
             make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=False)
         )
-        before = _refused_recipients_total()
 
         run = await run_smtp_data(
             handler,
@@ -936,7 +973,32 @@ class TestPerDomainAuthPolicy:
 
         assert run.reply == "550 DKIM verification failed"
         run.enqueue.assert_not_awaited()
-        assert _refused_recipients_total() == before
+
+    @pytest.mark.asyncio
+    async def test_dkim_is_named_when_the_refusals_mix_mechanisms(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """One domain refusing on SPF and another on DKIM answers the DKIM reply."""
+        await make_domain(self.STRICT, verify_dkim=True, reject_dkim_fail=True)
+        await make_domain(self.INHERIT, verify_spf=True, reject_spf_fail=True)
+        handler = FastSMTPHandler(
+            make_smtp_settings(
+                smtp_verify_dkim=False,
+                smtp_verify_spf=False,
+                smtp_reject_dkim_fail=False,
+                smtp_reject_spf_fail=False,
+            )
+        )
+
+        run = await run_smtp_data(
+            handler,
+            self._envelope(f"user@{self.INHERIT}", f"user@{self.STRICT}"),
+            dkim=RESULT_FAIL,
+            spf=RESULT_FAIL,
+        )
+
+        assert run.reply == "550 DKIM verification failed"
+        run.enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_two_recipients_on_one_domain_share_its_policy(
@@ -956,6 +1018,102 @@ class TestPerDomainAuthPolicy:
 
         assert run.reply == "550 DKIM verification failed"
         run.enqueue.assert_not_awaited()
+
+    # -- what each recipient is shown of the result ----------------------
+
+    @pytest.mark.asyncio
+    async def test_a_domain_that_does_not_verify_dkim_never_sees_the_result(
+        self, make_smtp_settings, make_domain, run_smtp_data, test_session: AsyncSession
+    ):
+        """The one message-level DKIM result is masked for the domain that opted out.
+
+        Both domains carry the same "drop when dkim_result is fail" rule, so
+        the rule engine reports what each was shown: the verifying domain
+        drops on the failure, and the one that opted out is delivered to, with
+        ``none`` on its payload and its delivery log.
+        """
+        opted_out = await make_domain(self.INHERIT, verify_dkim=False)
+        verifying = await make_domain(self.STRICT, verify_dkim=True)
+        for domain in (opted_out, verifying):
+            await self._drop_on_dkim_fail(test_session, domain)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=False, smtp_reject_dkim_fail=False)
+        )
+
+        run = await run_smtp_data(
+            handler,
+            self._envelope(f"user@{self.INHERIT}", f"user@{self.STRICT}"),
+            dkim=RESULT_FAIL,
+        )
+
+        assert run.reply == "250 Message accepted for delivery"
+        assert run.recipients == [f"user@{self.INHERIT}"]
+        call = run.call_for(f"user@{self.INHERIT}")
+        assert call.kwargs["payload"]["dkim_result"] == RESULT_NONE
+        assert call.kwargs["payload"]["dkim_domain"] is None
+        assert call.kwargs["auth_result"].dkim_result == RESULT_NONE
+
+    @pytest.mark.asyncio
+    async def test_a_verifying_domain_sees_the_result_unchanged(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """Masking only blanks the mechanisms a domain opted out of."""
+        await make_domain(self.STRICT, verify_dkim=True, verify_spf=False)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_reject_dkim_fail=False, smtp_reject_spf_fail=False)
+        )
+
+        run = await run_smtp_data(
+            handler, self._envelope(f"user@{self.STRICT}"), dkim=RESULT_FAIL, spf=RESULT_FAIL
+        )
+
+        payload = run.call_for(f"user@{self.STRICT}").kwargs["payload"]
+        assert payload["dkim_result"] == RESULT_FAIL
+        assert payload["dkim_domain"] == "external.com"
+        assert payload["spf_result"] == RESULT_NONE
+        assert payload["spf_domain"] is None
+
+    # -- how the policy is looked up -------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_recipients_sharing_a_domain_cost_one_policy_query(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """The per-domain cache is what keeps the resolution off the hot path."""
+        await make_domain(self.STRICT)
+        handler = FastSMTPHandler(make_smtp_settings())
+        spy = AsyncMock(wraps=load_domain_for_policy)
+
+        with patch("fastsmtp.smtp.server.load_domain_for_policy", spy):
+            run = await run_smtp_data(
+                handler, self._envelope(f"sales@{self.STRICT}", f"support@{self.STRICT}")
+            )
+
+        assert spy.await_count == 1
+        assert run.reply == "250 Message accepted for delivery"
+
+    @pytest.mark.asyncio
+    async def test_an_internationalised_address_resolves_its_domain_policy(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """The policy lookup encodes the domain part the way lookup_recipient does.
+
+        ``domains`` stores punycode, so an IDN recipient whose domain part was
+        only lowercased would match no row and quietly fall back to the global
+        policy - while the delivery path found the domain and its overrides.
+        """
+        await make_domain("xn--bcher-kva.example", reject_dkim_fail=True)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=False)
+        )
+
+        # "user@bucher.example" with u-umlaut, spelled as an escape so this
+        # file stays ASCII like every other surface in the repo.
+        run = await run_smtp_data(
+            handler, self._envelope("user@b\u00fccher.example"), dkim=RESULT_FAIL
+        )
+
+        assert run.reply == "550 DKIM verification failed"
 
     # -- a domain that inherits everything answers exactly as before ------
 

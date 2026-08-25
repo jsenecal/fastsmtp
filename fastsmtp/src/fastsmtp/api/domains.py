@@ -27,6 +27,7 @@ from fastsmtp.api.validation import (
     flush_or_http_conflict,
     live_value_taken,
     require_s3_for_preservation,
+    require_superuser_for_auth_overrides,
     require_tombstoned,
 )
 from fastsmtp.auth import Auth, get_domain_with_access
@@ -142,6 +143,9 @@ async def create_domain(
 ) -> DomainResponse:
     """Create a new domain (superuser only)."""
     auth.require_superuser()
+    # Redundant while the whole route is superuser-only, and deliberately so:
+    # the guard travels with the fields, not with today's role on this route.
+    require_superuser_for_auth_overrides(auth, data.model_dump(exclude_unset=True))
 
     if data.preserve_raw_message:
         require_s3_for_preservation(settings)
@@ -190,11 +194,12 @@ async def update_domain(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> DomainResponse:
-    """Update a domain (admin or higher)."""
+    """Update a domain (admin or higher; the authentication fields superuser only)."""
     domain = await get_domain_with_access(domain_id, auth, session, required_role="admin")
 
     update_data = data.model_dump(exclude_unset=True)
 
+    require_superuser_for_auth_overrides(auth, update_data)
     if update_data.get("preserve_raw_message"):
         require_s3_for_preservation(settings)
     for field, value in update_data.items():
