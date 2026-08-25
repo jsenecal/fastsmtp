@@ -201,10 +201,6 @@ class Settings(DatabaseSettings):
         description="Root API key for initial superuser access",
     )
     api_key_hash_algorithm: str = "sha256"
-    encryption_key: str | None = Field(
-        default=None,
-        description="32-byte key for encrypting sensitive data at rest (e.g., webhook headers)",
-    )
 
     # K8s/Operations
     instance_id: str = Field(default_factory=lambda: os.getenv("HOSTNAME", uuid4().hex[:8]))

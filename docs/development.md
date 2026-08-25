@@ -25,8 +25,13 @@ covers it separately: it applies the chain to a throwaway database, rolls it bac
 re-applies it, then diffs the result against `Base.metadata` and fails on any difference. A model
 change merged without its migration fails there instead of on deploy.
 
+The chain is driven through `fastsmtp db upgrade|downgrade` in a child process, which is the
+only supported way to run it - the migrations ship inside the package and there is no
+`alembic.ini` for the Alembic CLI to read. The tests therefore exercise the documented upgrade
+path rather than a private one.
+
 Those tests are marked `migrations` and always run in CI. Each one needs its own database and
-shells out to `alembic`, so deselect them when that overhead is not worth it locally:
+its own child process, so deselect them when that overhead is not worth it locally:
 
 ```bash
 uv run pytest -m "not migrations"

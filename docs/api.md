@@ -10,6 +10,30 @@ All API requests require an API key in the header:
 curl -H "X-API-Key: your-api-key" https://fastsmtp.example.com/api/v1/domains
 ```
 
+### Key scopes
+
+An API key carries a list of scopes, **empty by default**. Two independent checks then
+guard a route: the caller's role on the domain (or superuser status), and the scope.
+
+| Scope | Guards |
+|---|---|
+| `recipients:read` / `recipients:write` | the recipient routes. `POST /test-webhook` needs `recipients:write` unless the caller is a superuser |
+| `rules:read` / `rules:write` | the ruleset and rule routes |
+| `logs:read` | every delivery-log route, `POST /delivery-log/{id}/retry` included |
+| `admin` | satisfies every scope check |
+
+!!! warning "A key with no scopes cannot reach those routes"
+
+    `POST /auth/keys` and `fsmtp auth create-key` default to no scopes, and a missing
+    scope is `403 Missing required scope: recipients:read`. Create keys with the scopes
+    they need, or with `admin`. The scopes on an existing key cannot be edited: rotate it
+    (`POST /auth/keys/{id}/rotate` keeps the old key's scopes) or create a new one.
+
+The domain, member and user routes are gated by role and superuser status only - the
+`domains:*`, `members:*` and `users:*` names the server accepts on a key are not checked
+by any route today, so granting them changes nothing. `FASTSMTP_ROOT_API_KEY` bypasses
+every check, scopes included.
+
 ## Endpoints
 
 Routes marked `?include_deleted` and `?purge` take those boolean query parameters;

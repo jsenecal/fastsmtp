@@ -14,6 +14,13 @@ from pydantic import BaseModel, Field
 DEFAULT_CONFIG_DIR = Path.home() / ".fastsmtp"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.toml"
 
+# The config file holds API keys in clear, so its mode is set explicitly rather
+# than left to the umask: the common 022 would leave it world-readable. This is
+# what every comparable tool does - ~/.aws/credentials, ~/.docker/config.json,
+# ~/.netrc - and ssh refuses outright to use a key file others can read.
+CONFIG_FILE_MODE = 0o600
+CONFIG_DIR_MODE = 0o700
+
 
 class Profile(BaseModel):
     """A server profile configuration."""
@@ -60,14 +67,35 @@ def load_config() -> CLIConfig:
 
 
 def save_config(config: CLIConfig) -> None:
-    """Save configuration to file."""
+    """Save configuration to file, readable only by its owner.
+
+    The mode is applied before the content, not chmod-ed after it, so an API key
+    never sits on disk in a file others can read. A file an older version left
+    permissive is repaired here, since someone whose key already leaked that way
+    should not have to notice and fix it by hand.
+
+    Only a directory this function *creates* gets ``CONFIG_DIR_MODE``. An existing
+    one is left alone deliberately: ``FSMTP_CONFIG`` can point anywhere, and
+    tightening, say, ``/etc`` because a config lives under it would be worse than
+    the problem being solved.
+    """
     config_path = get_config_path()
 
-    # Ensure directory exists
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.parent.mkdir(parents=True, exist_ok=True, mode=CONFIG_DIR_MODE)
+
+    fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CONFIG_FILE_MODE)
+    try:
+        # O_CREAT applies the mode only to a file it creates, so an existing one
+        # keeps whatever it had. Truncation has already dropped the old content;
+        # this lands before the new key does.
+        os.fchmod(fd, CONFIG_FILE_MODE)
+        handle = os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        raise
 
     # Exclude None values from the dump (TOML can't serialize None)
-    with open(config_path, "wb") as f:
+    with handle as f:
         tomli_w.dump(config.model_dump(exclude_none=True), f)
 
 

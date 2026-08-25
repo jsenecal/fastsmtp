@@ -71,8 +71,11 @@ fastsmtp user list --include-deleted
 fastsmtp user set-superuser alice --enable
 fastsmtp user set-superuser alice --disable
 
-# Generate API key for user (refused for a deleted user)
-fastsmtp user generate-key alice
+# Generate API key for user (refused for a deleted user). Without --scopes the key
+# cannot reach the recipient, rule or delivery-log routes; see the scope table in
+# the API reference
+fastsmtp user generate-key alice --scopes admin
+fastsmtp user generate-key alice --name ci --scopes recipients:read,logs:read
 
 # Delete a user (prompts; -f skips the prompt). Soft: the user's API keys are
 # revoked for good, memberships come back on restore
@@ -154,6 +157,10 @@ fastsmtp show-config
 # Show version
 fastsmtp version
 ```
+
+`generate-key` takes its scopes as one comma-separated string, where the remote CLI
+repeats `--scope` instead. Both default to no scopes at all - see
+[Key scopes](../api.md#key-scopes).
 
 `purge-deleted` is the manual form of the retention job described in
 [Retention](../configuration.md#retention). Without `FASTSMTP_SOFT_DELETE_RETENTION_DAYS`
