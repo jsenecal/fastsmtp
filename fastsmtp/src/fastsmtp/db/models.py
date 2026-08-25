@@ -20,6 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from fastsmtp.db.encrypted_types import EncryptedJSON
+
 if TYPE_CHECKING:
     pass
 
@@ -254,7 +256,10 @@ class Recipient(Base, TimestampMixin, SoftDeleteMixin):
     )
     local_part: Mapped[str | None] = mapped_column(String(255), nullable=True)  # NULL = catch-all
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
-    webhook_headers: Mapped[dict] = mapped_column(default=dict)
+    # Encrypted at rest when a key is configured: these are the customer's own
+    # credentials for their endpoint. See db/encrypted_types.py; the stored type
+    # is unchanged, so this needs no migration.
+    webhook_headers: Mapped[dict] = mapped_column(EncryptedJSON, default=dict)
     is_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
 
     # Relationships

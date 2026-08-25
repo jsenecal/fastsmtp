@@ -167,3 +167,29 @@ repeats `--scope` instead. Both default to no scopes at all - see
 and without `--older-than` it exits with
 `No retention configured. Set FASTSMTP_SOFT_DELETE_RETENTION_DAYS or pass --older-than.`
 `cleanup` stays delivery-log only.
+
+### Converting webhook headers to encrypted storage
+
+```bash
+fastsmtp encrypt-existing
+fastsmtp encrypt-existing --dry-run
+fastsmtp encrypt-existing --batch-size 200
+```
+
+Backfills [webhook header encryption](../configuration.md#webhook-header-encryption)
+onto recipients that already existed before a key was configured, and carries a key
+rotation once the new key is in place. See that section for the required rollout and
+rotation order.
+
+- With no key configured it exits `1`, naming `FASTSMTP_ENCRYPTION_KEYS`.
+- Default batch size 500, one transaction per batch.
+- `--dry-run` reports what it would write and writes nothing.
+- It re-encrypts **every** row on every run - it has no way to tell which key an
+  existing envelope was written under without decrypting it first. Safe to repeat, but
+  not a cheap no-op on a large table, and it bumps `updated_at` on every row it rewrites,
+  so anything watching that column sees the whole table move.
+- It converts soft-deleted recipients too: their headers are still in the database, and
+  restoring one hands them back.
+- If it hits a row that no configured key can decrypt, it stops, reports how many rows
+  it got through, leaves the earlier batches committed, and exits `1`. It is safe to
+  re-run once the missing key is back in `FASTSMTP_ENCRYPTION_KEYS`.

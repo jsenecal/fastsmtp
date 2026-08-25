@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from fastsmtp import __version__
 from fastsmtp.api.router import api_router
 from fastsmtp.config import Settings, get_settings
+from fastsmtp.db.encryption_guard import verify_encryption_key_is_configured
 from fastsmtp.db.migrations import verify_schema_is_current
 from fastsmtp.db.session import close_engine
 from fastsmtp.metrics import MetricsMiddleware
@@ -32,10 +33,17 @@ async def lifespan(app: FastAPI):
     # uses it, so the shared engine can point somewhere else entirely. Checking
     # the wrong database would be worse than not checking.
     settings = getattr(app.state, "settings", None) or get_settings()
-    if settings.verify_schema_on_startup:
+    if settings.verify_schema_on_startup or settings.verify_encryption_on_startup:
         engine = create_async_engine(settings.database_url)
         try:
-            await verify_schema_is_current(engine)
+            if settings.verify_schema_on_startup:
+                await verify_schema_is_current(engine)
+            # Refuse a database holding encrypted columns this process has no key
+            # for. Without this the failure lands later and far worse: every read
+            # of the column raises inside a SELECT, so the delivery worker cannot
+            # reach the webhook auth headers it is supposed to send.
+            if settings.verify_encryption_on_startup:
+                await verify_encryption_key_is_configured(engine)
         finally:
             await engine.dispose()
     yield

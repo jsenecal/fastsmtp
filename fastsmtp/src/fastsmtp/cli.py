@@ -32,7 +32,7 @@ from rich.console import Console
 from rich.table import Table
 from sqlalchemy import CursorResult, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp import __version__
@@ -123,6 +123,10 @@ def serve(
     import uvicorn
 
     from fastsmtp.config import get_settings
+    from fastsmtp.db.encryption_guard import (
+        EncryptionKeyMissingError,
+        verify_encryption_key_is_configured,
+    )
     from fastsmtp.smtp import SMTPServer
     from fastsmtp.webhook import WebhookWorker
 
@@ -190,6 +194,22 @@ def serve(
         except NotImplementedError:
             # Windows doesn't support add_signal_handler
             pass
+
+        # Refuse a database holding encrypted columns this process cannot read,
+        # before any component starts. This lives here rather than only in the
+        # API lifespan because the lifespan runs only when uvicorn does: a
+        # --worker-only process would otherwise skip the check entirely, and the
+        # worker is the component that most needs those headers, since it is what
+        # sends them. (The same gap applies to the schema check; see issue #138.)
+        if settings.verify_encryption_on_startup:
+            guard_engine = create_async_engine(settings.database_url)
+            try:
+                await verify_encryption_key_is_configured(guard_engine)
+            except EncryptionKeyMissingError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(1) from e
+            finally:
+                await guard_engine.dispose()
 
         tasks = []
 
@@ -1038,6 +1058,112 @@ def purge_deleted(dry_run: DryRun = False, older_than: OlderThan = None):
         f"[{colour}]{verb} {result.total} soft-deleted rows older than "
         f"{_format_timestamp(result.cutoff_date)} ({result.breakdown})[/{colour}]"
     )
+
+
+@app.command("encrypt-existing")
+def encrypt_existing(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be written without writing anything"
+    ),
+    batch_size: int = typer.Option(
+        500, "--batch-size", min=1, help="Recipients to convert per transaction"
+    ),
+):
+    """Store every recipient's webhook headers encrypted under the current key.
+
+    Two jobs, one pass. A row only takes the encrypted form when it is
+    rewritten, so a recipient nobody edits keeps its headers in clear
+    indefinitely; this converts them deliberately. And once a new key has been
+    prepended to FASTSMTP_ENCRYPTION_KEYS, the same pass re-encrypts every row
+    under it, which is what lets the superseded key be dropped.
+
+    Deleted (restorable) recipients are converted too: their headers are still
+    in the database, and a restore hands them back.
+    """
+    from sqlalchemy import JSON, type_coerce
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from fastsmtp.crypto import DecryptionError, is_encrypted
+    from fastsmtp.db.models import Recipient
+    from fastsmtp.db.session import async_session
+    from fastsmtp.encryption import get_cipher
+
+    if get_cipher() is None:
+        raise _fail(
+            "No encryption key is configured, so there is nothing to encrypt with. "
+            "Set FASTSMTP_ENCRYPTION_KEYS first."
+        )
+
+    async def convert() -> tuple[int, int, int]:
+        """Walk every recipient in id order; returns (examined, in clear, already encrypted)."""
+        examined = in_clear = encrypted = 0
+        after: uuid.UUID | None = None
+
+        async with async_session() as session:
+            while True:
+                # The column is selected twice on purpose. The entity load
+                # decrypts it, which is what the rewrite needs; the type_coerce
+                # copy comes back exactly as stored, and that is the only way
+                # to tell a row that was never encrypted from one written under
+                # an older key - the ORM sees plaintext either way.
+                stmt = (
+                    # The label keeps it a column of its own: an unlabelled
+                    # copy renders as the same SQL as the entity's column and
+                    # is deduplicated out of the result.
+                    select(Recipient, type_coerce(Recipient.webhook_headers, JSON).label("stored"))
+                    .order_by(Recipient.id)
+                    .limit(batch_size)
+                )
+                if after is not None:
+                    stmt = stmt.where(Recipient.id > after)
+
+                try:
+                    rows = (await session.execute(stmt)).all()
+                except DecryptionError as exc:
+                    raise _fail(
+                        f"{exc}\nStopped after {examined} recipient(s); the ones already "
+                        "converted are committed, so this can be run again once the "
+                        "missing key is back in FASTSMTP_ENCRYPTION_KEYS."
+                    ) from exc
+
+                if not rows:
+                    return examined, in_clear, encrypted
+
+                for recipient, stored in rows:
+                    examined += 1
+                    after = recipient.id
+                    if is_encrypted(stored):
+                        encrypted += 1
+                    else:
+                        in_clear += 1
+                    if not dry_run:
+                        # The column type decrypts on load and encrypts on
+                        # flush, so the value the ORM holds is the same
+                        # plaintext before and after: assigning it back changes
+                        # nothing and SQLAlchemy emits no UPDATE at all.
+                        # Marking the attribute dirty is what makes the flush
+                        # write - and therefore re-encrypt - the row.
+                        flag_modified(recipient, "webhook_headers")
+
+                if not dry_run:
+                    # Per batch, so a large estate is not one long transaction.
+                    await session.commit()
+                # Nothing below refers to these rows again, and the identity map
+                # would otherwise hold every recipient in the table by the end.
+                session.expunge_all()
+
+    examined, in_clear, encrypted = run_async(convert())
+
+    if dry_run:
+        console.print(
+            f"[yellow]Would encrypt {in_clear} recipient(s) stored in clear and re-encrypt "
+            f"{encrypted} under the current key ({examined} examined)[/yellow]"
+        )
+    else:
+        console.print(
+            f"[green]Encrypted {in_clear} recipient(s) stored in clear and re-encrypted "
+            f"{encrypted} under the current key ({examined} examined)[/green]"
+        )
 
 
 def _parse_duration_to_days(duration: str) -> int | None:

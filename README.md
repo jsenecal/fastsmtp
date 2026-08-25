@@ -25,7 +25,7 @@ platforms.
 - **Multi-tenant**: Domain-based isolation with role-based access control
 - **Rate Limiting**: Configurable limits for both API and SMTP (per-IP connection/message limits)
 - **Prometheus Metrics**: `/metrics` endpoint with SMTP, webhook, queue and auth metrics, with optional IP allowlisting
-- **Security**: SSRF protection for webhook URLs, salted API key hashing, scoped API keys
+- **Security**: SSRF protection for webhook URLs, salted API key hashing, scoped API keys, optional encryption at rest for webhook headers
 - **Queue Backpressure**: Configurable limits to prevent unbounded queue growth
 - **Soft Delete**: Deleted users, API keys, domains and recipients are restorable; delivery history survives, permanent removal is a separate superuser step or an optional retention job
 - **Automatic Cleanup**: Background worker for delivery-log and soft-delete retention

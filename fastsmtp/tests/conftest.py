@@ -20,6 +20,7 @@ import anyio
 import pytest_asyncio
 import uvicorn
 from aiosmtpd.smtp import Envelope
+from cli_harness import Db, strip_ansi
 from fastapi import FastAPI
 from fastsmtp.config import Settings, clear_settings_cache, get_settings
 from fastsmtp.db.models import Base
@@ -34,6 +35,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 
 @pytest.fixture(scope="session")
@@ -479,3 +481,44 @@ Content-Type: text/html; charset="utf-8"
 
 --boundary123--
 """
+
+
+# --- CLI harness --------------------------------------------------------------
+#
+# The CLI opens its own sessions through ``fastsmtp.db.session.async_session``
+# and drives them with ``asyncio.run``, so a test cannot hand it the suite's
+# session. These point that factory at the test database with a NullPool engine
+# per session -- the connection must not outlive the loop that made it.
+
+
+@pytest.fixture
+def db(test_engine, test_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Db:
+    """Point the CLI's session factory at the test database."""
+
+    def make_session() -> AsyncSession:
+        engine = create_async_engine(test_settings.database_url, poolclass=NullPool)
+        return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)()
+
+    monkeypatch.setattr("fastsmtp.db.session.async_session", make_session)
+    # Rich wraps at the terminal width; CliRunner has no terminal, so pin it wide
+    # enough that a table row, a UUID or a summary line never breaks across lines.
+    monkeypatch.setenv("COLUMNS", "200")
+    return Db(make_session)
+
+
+@pytest.fixture
+def run(db: Db) -> Callable[..., tuple[int, str]]:
+    """Invoke the ``fastsmtp`` CLI; returns ``(exit_code, output without ANSI)``."""
+    from typer.testing import CliRunner
+
+    from fastsmtp import cli
+
+    runner = CliRunner()
+
+    def invoke(*args: str, input: str | None = None) -> tuple[int, str]:
+        result = runner.invoke(cli.app, list(args), input=input)
+        if result.exception and not isinstance(result.exception, SystemExit):
+            raise result.exception
+        return result.exit_code, strip_ansi(result.output)
+
+    return invoke
