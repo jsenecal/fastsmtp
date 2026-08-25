@@ -24,7 +24,9 @@ SCANNED_ROOTS = (
     "fastsmtp-cli/src",
     "docs",
     "README.md",
-    "fastsmtp/alembic",
+    # The two package readmes are the PyPI project pages.
+    "fastsmtp/README.md",
+    "fastsmtp-cli/README.md",
     ".github",
 )
 

@@ -64,6 +64,7 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["fastsmtp/tests", "fastsmtp-cli/tests"]
 markers = [
     "migrations: runs the Alembic chain against a throwaway database (deselect with -m 'not migrations')",
+    "packaging: builds the distributions and inspects them (deselect with -m 'not packaging')",
 ]
 # Turn a silent hang into a stack trace naming the test. The suite drives real
 # servers, sockets and containers, so a hang is a realistic failure mode, and

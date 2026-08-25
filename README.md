@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/jsenecal/fastsmtp/branch/main/graph/badge.svg)](https://codecov.io/gh/jsenecal/fastsmtp)
 [![Release](https://img.shields.io/github/v/release/jsenecal/fastsmtp)](https://github.com/jsenecal/fastsmtp/releases/latest)
 [![ghcr.io](https://img.shields.io/badge/ghcr.io-fastsmtp-2496ED?logo=docker&logoColor=white)](https://github.com/jsenecal/fastsmtp/pkgs/container/fastsmtp)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 
 A TLS-capable, async SMTP server that receives emails and forwards them to webhooks. Built with Python 3.12+ for integration with n8n and other webhook-based workflow platforms.
 
@@ -37,7 +37,18 @@ A TLS-capable, async SMTP server that receives emails and forwards them to webho
 ### Installation
 
 ```bash
-# Clone the repository
+# From PyPI
+pip install fastsmtp        # the server
+pip install fastsmtp-cli    # the remote CLI, `fsmtp`
+```
+
+`fastsmtp-cli` is a separate distribution that talks to a server over HTTP, so it
+installs on a workstation without any of the server's dependencies. On Alpine and other
+musl-based systems note that `google-re2` ships no musllinux wheels, so pip builds it
+from source there; use the container image unless you have a compiler and RE2 available.
+
+```bash
+# From source
 git clone https://github.com/jsenecal/fastsmtp.git
 cd fastsmtp
 
@@ -1138,4 +1149,7 @@ uv run ruff format .
 
 ## License
 
-AGPL-3.0 - see [LICENSE](LICENSE) file for details.
+AGPL-3.0-or-later - this program is free software: you can redistribute it and/or
+modify it under the terms of the GNU Affero General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your option) any later
+version. See the [LICENSE](LICENSE) file for details.

@@ -8,6 +8,36 @@
 
 ## Installation
 
+### From PyPI
+
+```bash
+pip install fastsmtp        # the server
+pip install fastsmtp-cli    # the remote CLI, `fsmtp`; independent of the server
+```
+
+The CLI is a separate distribution that talks to a server over HTTP, so it installs on a
+workstation without any of the server's dependencies.
+
+!!! warning "musl-based distributions"
+
+    `google-re2` publishes manylinux wheels but **no musllinux wheels**. On Alpine and
+    other musl systems pip has to build it from source, which needs a compiler and the
+    RE2 library. Use the container image there unless you have a reason not to.
+
+The migrations ship inside the package, so `fastsmtp db upgrade head` works from a pip
+install exactly as it does from a checkout. Nothing applies them for you: run it before
+starting a newer version, or the server refuses to start against a database behind it.
+
+```bash
+export FASTSMTP_DATABASE_URL="postgresql+asyncpg://user:pass@localhost/fastsmtp"
+export FASTSMTP_ROOT_API_KEY="your-secure-root-key"
+
+fastsmtp db upgrade head
+fastsmtp serve
+```
+
+### From source
+
 ```bash
 # Clone the repository
 git clone https://github.com/jsenecal/fastsmtp.git

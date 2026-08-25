@@ -2,7 +2,23 @@
 name = "fastsmtp"
 version = "0.5.2"
 description = "TLS-capable async SMTP server that receives emails, validates DKIM/SPF, and forwards contents to configurable webhooks"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Jonathan Senecal" }]
+keywords = ["smtp", "email", "webhook", "dkim", "spf", "n8n", "mail"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Communications :: Email :: Mail Transport Agents",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -33,6 +49,13 @@ dev = [
     "ruff>=0.8",
     "coverage>=7.0",
 ]
+
+[project.urls]
+Homepage = "https://jsenecal.github.io/fastsmtp/"
+Documentation = "https://jsenecal.github.io/fastsmtp/"
+Source = "https://github.com/jsenecal/fastsmtp"
+Issues = "https://github.com/jsenecal/fastsmtp/issues"
+Changelog = "https://github.com/jsenecal/fastsmtp/releases"
 
 [project.scripts]
 fastsmtp = "fastsmtp.cli:app"

@@ -6,16 +6,17 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-# Copy workspace files for dependency resolution
+# Copy workspace files for dependency resolution. README.md and LICENSE are
+# build inputs, not documentation: `readme` and `license-files` in the package
+# metadata name them, and hatchling fails the build outright if either is
+# missing.
 COPY pyproject.toml uv.lock ./
-COPY fastsmtp/pyproject.toml fastsmtp/
+COPY fastsmtp/pyproject.toml fastsmtp/README.md fastsmtp/LICENSE fastsmtp/
 COPY fastsmtp/src fastsmtp/src
-COPY fastsmtp/alembic fastsmtp/alembic
-COPY fastsmtp/alembic.ini fastsmtp/
 # Need empty fastsmtp-cli for workspace resolution
 RUN mkdir -p fastsmtp-cli/src/fastsmtp_cli && \
     echo '"""Stub for Docker build."""' > fastsmtp-cli/src/fastsmtp_cli/__init__.py
-COPY fastsmtp-cli/pyproject.toml fastsmtp-cli/
+COPY fastsmtp-cli/pyproject.toml fastsmtp-cli/README.md fastsmtp-cli/LICENSE fastsmtp-cli/
 
 # Install fastsmtp package and dependencies
 RUN uv sync --frozen --no-dev --package fastsmtp
@@ -29,9 +30,9 @@ WORKDIR /app
 
 # Copy virtual environment and fastsmtp package from builder
 COPY --from=builder --chown=fastsmtp:fastsmtp /app/.venv /app/.venv
+# The migrations ship inside the package (src/fastsmtp/alembic), so the src
+# tree is the whole of what has to be copied for `fastsmtp db upgrade` to work.
 COPY --from=builder --chown=fastsmtp:fastsmtp /app/fastsmtp/src /app/fastsmtp/src
-COPY --from=builder --chown=fastsmtp:fastsmtp /app/fastsmtp/alembic /app/fastsmtp/alembic
-COPY --from=builder --chown=fastsmtp:fastsmtp /app/fastsmtp/alembic.ini /app/fastsmtp/alembic.ini
 
 # Set environment
 ENV PATH="/app/.venv/bin:$PATH"

@@ -17,7 +17,6 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,10 +31,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 pytestmark = pytest.mark.migrations
 
-# alembic.ini lives in the package directory and its script_location is relative
-# to it, so alembic has to be invoked from there rather than from the repo root.
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-
 # The session container's default database holds the create_all schema the rest
 # of the suite drops and rebuilds per test, so the chain gets its own.
 MIGRATION_DATABASE = "fastsmtp_migration_test"
@@ -44,33 +39,40 @@ MIGRATION_DATABASE = "fastsmtp_migration_test"
 def _run_alembic(
     environ: dict[str, str], database_url: str, *args: str
 ) -> subprocess.CompletedProcess[str]:
-    """Run one alembic command against ``database_url`` in a child process.
+    """Run one ``fastsmtp db`` command against ``database_url`` in a child process.
 
     ``alembic/env.py`` drives the migrations with ``asyncio.run``, which makes
     it hostile to in-process invocation from an async test; a child process
     also matches how migrations are applied for real.
+
+    The command is the operator's, not Alembic's own CLI: the migrations ship
+    inside the package with no ini file, so ``fastsmtp db`` is the only
+    supported way to run them, and driving the chain through it means the
+    documented upgrade path is what these tests exercise.
 
     ``environ`` is the ``scrubbed_environ`` fixture: no ``FASTSMTP_*`` variable
     from the session leaks in, so the chain runs the way a migration Job does,
     with the database URL and nothing else.
     """
     return subprocess.run(
-        [sys.executable, "-m", "alembic", *args],
-        cwd=PACKAGE_ROOT,
+        [sys.executable, "-m", "fastsmtp.cli", "db", *args],
         env={**environ, "FASTSMTP_DATABASE_URL": database_url},
         capture_output=True,
         text=True,
     )
 
 
-async def alembic(environ: dict[str, str], database_url: str, *args: str) -> None:
-    """Run an alembic command off the event loop, failing on a non-zero exit."""
+async def alembic(
+    environ: dict[str, str], database_url: str, *args: str
+) -> subprocess.CompletedProcess[str]:
+    """Run a migration command off the event loop, failing on a non-zero exit."""
     result = await to_thread.run_sync(partial(_run_alembic, environ, database_url, *args))
     if result.returncode != 0:
         pytest.fail(
-            f"`alembic {' '.join(args)}` exited {result.returncode}\n"
+            f"`fastsmtp db {' '.join(args)}` exited {result.returncode}\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
         )
+    return result
 
 
 @asynccontextmanager
@@ -140,6 +142,24 @@ async def test_migration_chain_is_reversible(
     assert not left_behind, f"downgrade base left tables behind: {sorted(left_behind)}"
 
     await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+
+
+async def test_upgrade_reports_the_revisions_it_applied(
+    scrubbed_environ: dict[str, str], migration_database_url: str
+) -> None:
+    """An operator has to be able to see what ran, not just that it exited 0.
+
+    Alembic announces each revision through its own logger, which the CLI has
+    to give a handler now that alembic.ini is gone. It nearly did not: the
+    library attaches a NullHandler to that logger at import, so a guard that
+    only asked whether the logger had handlers left the output going nowhere
+    and the chain applied in complete silence.
+    """
+    result = await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+
+    reported = result.stdout + result.stderr
+    assert "Running upgrade" in reported, f"upgrade said nothing:\n{reported!r}"
+    assert "008" in reported
 
 
 async def test_migrated_schema_matches_models(

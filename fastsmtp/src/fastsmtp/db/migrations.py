@@ -1,4 +1,4 @@
-"""Locating Alembic, and checking the database against the code that connects.
+"""Locating the migrations, and checking the database against the code that connects.
 
 The schema only ever advances when someone runs it, so the two things that keep
 a deployment honest are that the migration command works and that a stale
@@ -22,34 +22,31 @@ class SchemaRevisionError(RuntimeError):
     """Raised when the database is older than the code connecting to it."""
 
 
-def alembic_ini_path() -> Path:
-    """Absolute path to alembic.ini, which ships beside the package's src tree.
-
-    Layout, in the repo and in the image alike::
-
-        <root>/alembic.ini
-        <root>/alembic/versions/
-        <root>/src/fastsmtp/db/migrations.py   <- this file
-
-    so the root is three levels up from this module's directory.
-    """
-    return Path(__file__).resolve().parents[3] / "alembic.ini"
-
-
 def alembic_script_location() -> Path:
-    """Absolute path to the migration scripts.
+    """Absolute path to the migration scripts, which ship inside the package::
 
-    alembic.ini says ``script_location = alembic``, and Alembic resolves that
-    against the current working directory rather than against the ini file. Any
-    caller that is not sitting in the package root therefore has to override it
-    with an absolute path.
+        fastsmtp/alembic/versions/
+        fastsmtp/db/migrations.py   <- this file
+
+    Being inside the package is what makes them survive a wheel build, and it
+    is what lets this path be derived from ``__file__`` alone. The scripts used
+    to sit beside the src tree and be found by walking three directories up,
+    which held only in a source checkout and in an image that reproduced that
+    layout; from site-packages it resolved to nowhere.
     """
-    return alembic_ini_path().parent / "alembic"
+    return Path(__file__).resolve().parent.parent / "alembic"
 
 
 def alembic_config() -> Config:
-    """An Alembic config that works regardless of the caller's directory."""
-    config = Config(str(alembic_ini_path()))
+    """An Alembic config built in code, with no ini file to locate.
+
+    ``script_location`` is absolute, so nothing depends on the caller's
+    directory. Everything else alembic.ini used to carry is either irrelevant
+    here (``prepend_sys_path``, needed only to import an uninstalled package)
+    or set by the caller: the URL comes from ``env.py``, and logging from
+    whoever is running the command.
+    """
+    config = Config()
     config.set_main_option("script_location", str(alembic_script_location()))
     return config
 
