@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from email import message_from_bytes
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from testcontainers.community.postgres import PostgresContainer
@@ -240,6 +240,76 @@ def run_smtp_handler(session_factory: async_sessionmaker[AsyncSession]):
             )
 
         return SMTPHandlerRun(created=created, raw=raw, rules=rules_spy, enqueue=enqueue_spy)
+
+    return run
+
+
+@dataclass
+class SMTPDataRun:
+    """What one full DATA phase of the SMTP handler produced."""
+
+    reply: str
+    """The SMTP reply the handler answered the client with."""
+    dkim: AsyncMock
+    """Spy over ``verify_dkim``; never awaited means DKIM was not verified."""
+    spf: AsyncMock
+    """Spy over ``verify_spf``; never awaited means SPF was not verified."""
+    enqueue: AsyncMock
+    """Spy over ``enqueue_delivery``; nothing reaches the queue table."""
+
+    @property
+    def recipients(self) -> list[str]:
+        """Addresses a delivery was enqueued for, in enqueue order."""
+        return [call.kwargs["payload"]["recipient"] for call in self.enqueue.await_args_list]
+
+
+@pytest.fixture
+def run_smtp_data(session_factory: async_sessionmaker[AsyncSession]):
+    """Return a helper that drives the whole DATA phase against the test database.
+
+    ``run_smtp_handler`` starts at the persist step, with an authentication
+    result already decided. Which checks run at all, and whom a failed check
+    refuses, is decided before that in ``handle_DATA`` from the recipients'
+    domains -- so it can only be observed through the real handler. Only the
+    two leaf verifiers are replaced, with the results the test asks for; the
+    gating, the aggregation across recipients and the reply are the handler's
+    own.
+
+    Exposed as a fixture rather than a module-level function because the tests
+    directory is not an importable package.
+    """
+
+    async def run(
+        handler: FastSMTPHandler,
+        envelope: Envelope,
+        *,
+        dkim: str = RESULT_NONE,
+        spf: str = RESULT_NONE,
+        subject: str = "Data run",
+    ) -> SMTPDataRun:
+        envelope.mail_from = envelope.mail_from or "sender@external.com"
+        envelope.content = (
+            b"From: sender@external.com\r\n"
+            b"Subject: " + subject.encode() + b"\r\n"
+            b"Message-ID: <data-run@external.com>\r\n\r\n"
+            b"Body\r\n"
+        )
+        dkim_spy = AsyncMock(return_value=(dkim, "external.com", "selector"))
+        spf_spy = AsyncMock(return_value=(spf, "external.com"))
+        enqueue_spy = AsyncMock()
+        smtp_session = MagicMock()
+        smtp_session.peer = ("203.0.113.10", 54321)
+        smtp_session.host_name = "external.com"
+
+        with (
+            patch("fastsmtp.smtp.server.async_session", session_factory),
+            patch("fastsmtp.smtp.validation.verify_dkim", dkim_spy),
+            patch("fastsmtp.smtp.validation.verify_spf", spf_spy),
+            patch("fastsmtp.webhook.queue.enqueue_delivery", enqueue_spy),
+        ):
+            reply = await handler.handle_DATA(MagicMock(), smtp_session, envelope)
+
+        return SMTPDataRun(reply=reply, dkim=dkim_spy, spf=spf_spy, enqueue=enqueue_spy)
 
     return run
 

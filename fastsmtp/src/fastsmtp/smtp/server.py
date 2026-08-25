@@ -6,6 +6,7 @@ import contextlib
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email import message_from_bytes
 from email.message import Message
@@ -32,7 +33,12 @@ from fastsmtp.metrics.definitions import (
     SMTP_RATE_LIMITED,
 )
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
-from fastsmtp.smtp.validation import EmailAuthResult, validate_email_auth
+from fastsmtp.smtp.validation import (
+    EffectiveAuthPolicy,
+    EmailAuthResult,
+    resolve_auth_policy,
+    validate_email_auth,
+)
 from fastsmtp.storage.raw_message import RawMessagePreserver, should_preserve_raw
 from fastsmtp.storage.s3 import sanitize_key_component
 
@@ -60,6 +66,24 @@ def key_safe_message_id(raw_message_id: str | None) -> str:
     if raw_message_id and sanitize_key_component(raw_message_id, fallback=""):
         return raw_message_id
     return f"<{uuid.uuid4()}@fastsmtp>"
+
+
+def address_domain(address: str) -> str | None:
+    """Lowercased domain part of an email address, or None if it has none."""
+    if "@" not in address:
+        return None
+    return address.rsplit("@", 1)[1].lower()
+
+
+@dataclass(frozen=True)
+class RecipientAuthPolicy:
+    """One envelope recipient paired with the auth policy of its domain."""
+
+    address: str
+    """The address exactly as the envelope carries it."""
+    domain_name: str
+    """The domain the policy came from; the address's own domain if none resolved."""
+    policy: EffectiveAuthPolicy
 
 
 async def lookup_recipient(
@@ -257,14 +281,27 @@ class FastSMTPHandler:
         # Get Message-ID (use UUID if unusable, for reliable deduplication)
         message_id = key_safe_message_id(message.get("Message-ID"))
 
-        # Run email authentication
+        # Each recipient domain decides which checks apply to its own mail, so
+        # the recipients have to be resolved before anything is verified. This
+        # lookup selects policy only: _process_and_persist_message re-resolves
+        # every address inside its own transaction and remains the one liveness
+        # decision for a recipient.
+        try:
+            rcpt_policies = await self._resolve_recipient_policies(envelope.rcpt_tos)
+        except Exception as e:
+            logger.exception(f"Failed to resolve recipients for message {message_id}: {e}")
+            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
+            return "451 Temporary failure, please retry"
+
+        # A mechanism is verified once for the message if any recipient domain
+        # asks for it; recipients that did not ask simply ignore the result.
         auth_result = await validate_email_auth(
             message=content,
             client_ip=client_ip,
             mail_from=mail_from,
             helo=helo,
-            verify_dkim_enabled=self.settings.smtp_verify_dkim,
-            verify_spf_enabled=self.settings.smtp_verify_spf,
+            verify_dkim_enabled=any(entry.policy.verify_dkim for entry in rcpt_policies),
+            verify_spf_enabled=any(entry.policy.verify_spf for entry in rcpt_policies),
         )
 
         logger.info(
@@ -275,16 +312,33 @@ class FastSMTPHandler:
         AUTH_RESULTS.labels(type="dkim", result=auth_result.dkim_result).inc()
         AUTH_RESULTS.labels(type="spf", result=auth_result.spf_result).inc()
 
-        # Check if we should reject based on auth results (global settings)
-        if self.settings.smtp_reject_dkim_fail and auth_result.dkim_result == "fail":
-            logger.warning(f"Rejecting message {message_id}: DKIM failed")
-            SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
-            return "550 DKIM verification failed"
+        # Rejection is per recipient domain: a domain rejects on a mechanism
+        # only if it both verifies it and asked for failures to be rejected.
+        refusals = [
+            (entry, refused_on)
+            for entry in rcpt_policies
+            if (refused_on := entry.policy.refused_mechanism(auth_result)) is not None
+        ]
 
-        if self.settings.smtp_reject_spf_fail and auth_result.spf_result == "fail":
-            logger.warning(f"Rejecting message {message_id}: SPF failed")
+        if refusals and len(refusals) == len(rcpt_policies):
+            # Nobody would receive this message, so refuse it outright - the
+            # reply the global settings alone used to produce.
+            mechanism = "DKIM" if any(m == "DKIM" for _, m in refusals) else "SPF"
+            logger.warning(f"Rejecting message {message_id}: {mechanism} failed")
             SMTP_MESSAGES_TOTAL.labels(result="rejected").inc()
-            return "550 SPF verification failed"
+            return f"550 {mechanism} verification failed"
+
+        # Some recipients still want the message, so it is accepted and only
+        # the refused ones are skipped. A 5xx here would deny delivery to
+        # recipients whose domains never asked for rejection.
+        refused_recipients: set[str] = set()
+        for entry, mechanism in refusals:
+            refused_recipients.add(entry.address)
+            logger.warning(
+                f"Message {message_id}: refusing recipient {entry.address} "
+                f"(domain {entry.domain_name}): {mechanism} verification failed"
+            )
+            SMTP_MESSAGES_TOTAL.labels(result="recipient_refused").inc()
 
         # Process message and persist to database BEFORE returning 250 OK
         # This ensures no data loss if the server crashes
@@ -296,6 +350,7 @@ class FastSMTPHandler:
                 auth_result=auth_result,
                 client_ip=client_ip,
                 raw_content=content,
+                refused_recipients=refused_recipients,
             )
         except Exception as e:
             logger.exception(f"Failed to persist message {message_id}: {e}")
@@ -312,6 +367,41 @@ class FastSMTPHandler:
         logger.info(f"Message {message_id}: {deliveries_created} deliveries queued")
         return "250 Message accepted for delivery"
 
+    async def _resolve_recipient_policies(self, rcpt_tos: list[str]) -> list[RecipientAuthPolicy]:
+        """Pair every envelope recipient with the auth policy of its domain.
+
+        An address that resolves to no configured domain keeps the global
+        policy: it is judged exactly as it was before domains could override
+        anything, and the delivery path skips it either way.
+
+        The result is never empty. aiosmtpd refuses DATA without a RCPT, so an
+        empty envelope should not reach here, but if one does the global policy
+        still decides the message rather than nothing verifying it.
+        """
+        policies: list[RecipientAuthPolicy] = []
+        async with async_session() as db_session:
+            for rcpt_to in rcpt_tos:
+                domain, _recipient, _error = await lookup_recipient(rcpt_to, db_session)
+                policies.append(
+                    RecipientAuthPolicy(
+                        address=rcpt_to,
+                        domain_name=(
+                            domain.domain_name if domain else (address_domain(rcpt_to) or rcpt_to)
+                        ),
+                        policy=resolve_auth_policy(domain, self.settings),
+                    )
+                )
+
+        if not policies:
+            policies.append(
+                RecipientAuthPolicy(
+                    address="",
+                    domain_name="",
+                    policy=resolve_auth_policy(None, self.settings),
+                )
+            )
+        return policies
+
     async def _process_and_persist_message(
         self,
         envelope: Envelope,
@@ -320,6 +410,7 @@ class FastSMTPHandler:
         auth_result: EmailAuthResult,
         client_ip: str,
         raw_content: bytes,
+        refused_recipients: set[str] | None = None,
     ) -> int:
         """Process message for each recipient and persist deliveries to database.
 
@@ -330,6 +421,11 @@ class FastSMTPHandler:
             auth_result: Email authentication result
             client_ip: Client IP address
             raw_content: Complete raw MIME message as received
+            refused_recipients: Addresses whose domain rejected the message on a
+                failed DKIM or SPF check. handle_DATA has already logged and
+                counted them; they get no delivery. None means no refusals, so
+                a caller that made no authentication decision keeps every
+                recipient.
 
         Returns:
             Number of deliveries created
@@ -339,11 +435,7 @@ class FastSMTPHandler:
         from fastsmtp.webhook.queue import enqueue_delivery
 
         # Determine domain for S3 storage key (use first recipient's domain)
-        recipient_domain = None
-        if envelope.rcpt_tos:
-            first_rcpt = envelope.rcpt_tos[0]
-            if "@" in first_rcpt:
-                recipient_domain = first_rcpt.rsplit("@", 1)[1].lower()
+        recipient_domain = address_domain(envelope.rcpt_tos[0]) if envelope.rcpt_tos else None
 
         # Attachment offloading stays gated on attachment_storage
         s3_storage = None
@@ -380,6 +472,11 @@ class FastSMTPHandler:
         async with async_session() as db_session:
             # Process each recipient
             for rcpt_to in envelope.rcpt_tos:
+                if refused_recipients and rcpt_to in refused_recipients:
+                    # Its domain rejects the message on a failed check; the
+                    # refusal is already logged and counted in handle_DATA.
+                    continue
+
                 domain, recipient, error = await lookup_recipient(rcpt_to, db_session)
 
                 if error or not domain or not recipient:

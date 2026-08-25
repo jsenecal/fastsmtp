@@ -11,7 +11,7 @@ mocking. These tests focus on SMTP protocol behavior.
 
 import asyncio
 from collections.abc import Callable
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import aiosmtplib
 import pytest
@@ -196,18 +196,17 @@ class TestSMTPServerWithMockedDatabase:
     @pytest_asyncio.fixture
     async def smtp_server_with_mock(self, smtp_settings: Settings):
         """Start SMTP server with mocked database lookups."""
-        # Mock the lookup_recipient function to simulate domain/recipient
-        mock_domain = MagicMock()
-        mock_domain.id = 1
-        mock_domain.domain_name = "mock-test.example.com"
-        mock_domain.is_enabled = True
-
-        mock_recipient = MagicMock()
-        mock_recipient.id = 1
-        mock_recipient.domain_id = 1
-        mock_recipient.local_part = "user"
-        mock_recipient.webhook_url = "https://webhook.example.com/mock"
-        mock_recipient.is_enabled = True
+        # Mock the lookup_recipient function to simulate domain/recipient.
+        # Unsaved model instances, not MagicMocks: the handler reads the
+        # domain's tri-state override columns, and every attribute of a
+        # MagicMock is truthy - which would turn "inherit" into "true" and
+        # send the DATA path off doing real DKIM and SPF lookups.
+        mock_domain = Domain(domain_name="mock-test.example.com", is_enabled=True)
+        mock_recipient = Recipient(
+            local_part="user",
+            webhook_url="https://webhook.example.com/mock",
+            is_enabled=True,
+        )
 
         async def mock_lookup(address, session):
             if address.endswith("@mock-test.example.com"):

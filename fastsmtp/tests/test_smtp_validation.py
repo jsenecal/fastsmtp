@@ -3,15 +3,18 @@
 import asyncio
 
 import pytest
+from fastsmtp.db.models import Domain
 from fastsmtp.smtp.validation import (
     RESULT_FAIL,
     RESULT_NONE,
     RESULT_PASS,
     RESULT_PERMERROR,
+    RESULT_SOFTFAIL,
     RESULT_TEMPERROR,
     EmailAuthResult,
     _verify_dkim_sync,
     _verify_spf_sync,
+    resolve_auth_policy,
     validate_email_auth,
     verify_dkim,
     verify_spf,
@@ -384,3 +387,134 @@ class TestSPFEdgeCases:
         )
         # Should use helo as domain since mail_from has no @
         assert domain == "mail.example.com"
+
+
+FLAGS = ("verify_dkim", "verify_spf", "reject_dkim_fail", "reject_spf_fail")
+
+
+def _auth_result(dkim: str = RESULT_NONE, spf: str = RESULT_NONE) -> EmailAuthResult:
+    return EmailAuthResult(
+        dkim_result=dkim,
+        dkim_domain=None,
+        dkim_selector=None,
+        spf_result=spf,
+        spf_domain=None,
+        client_ip="203.0.113.10",
+    )
+
+
+class TestResolveAuthPolicy:
+    """Tests for resolving a domain's tri-state auth columns against the globals."""
+
+    @pytest.mark.parametrize("global_value", [True, False])
+    @pytest.mark.parametrize("flag", FLAGS)
+    def test_null_column_inherits_the_global_setting(
+        self, make_smtp_settings, flag: str, global_value: bool
+    ):
+        """A column left NULL follows the server-wide setting, whatever it is."""
+        settings = make_smtp_settings(**{f"smtp_{flag}": global_value})
+
+        policy = resolve_auth_policy(Domain(domain_name="inherit.test"), settings)
+
+        assert getattr(policy, flag) is global_value
+
+    @pytest.mark.parametrize("override", [True, False])
+    @pytest.mark.parametrize("flag", FLAGS)
+    def test_column_overrides_the_global_setting(
+        self, make_smtp_settings, flag: str, override: bool
+    ):
+        """A column that is set wins over the global setting in both directions."""
+        settings = make_smtp_settings(**{f"smtp_{flag}": not override})
+
+        policy = resolve_auth_policy(
+            Domain(domain_name="override.test", **{flag: override}), settings
+        )
+
+        assert getattr(policy, flag) is override
+
+    def test_flags_are_resolved_independently(self, make_smtp_settings):
+        """Overriding one flag leaves the other three inheriting."""
+        settings = make_smtp_settings(
+            smtp_verify_dkim=True,
+            smtp_verify_spf=True,
+            smtp_reject_dkim_fail=False,
+            smtp_reject_spf_fail=False,
+        )
+
+        policy = resolve_auth_policy(
+            Domain(domain_name="mixed.test", verify_spf=False, reject_dkim_fail=True), settings
+        )
+
+        assert policy.verify_dkim is True
+        assert policy.verify_spf is False
+        assert policy.reject_dkim_fail is True
+        assert policy.reject_spf_fail is False
+
+    def test_no_domain_is_the_global_policy(self, make_smtp_settings):
+        """An address with no configured domain keeps the server-wide settings."""
+        settings = make_smtp_settings(
+            smtp_verify_dkim=True,
+            smtp_verify_spf=False,
+            smtp_reject_dkim_fail=True,
+            smtp_reject_spf_fail=False,
+        )
+
+        policy = resolve_auth_policy(None, settings)
+
+        assert policy.verify_dkim is True
+        assert policy.verify_spf is False
+        assert policy.reject_dkim_fail is True
+        assert policy.reject_spf_fail is False
+
+
+class TestRefusedMechanism:
+    """Tests for the per-recipient refusal decision."""
+
+    @staticmethod
+    def _policy(make_smtp_settings, **overrides: bool):
+        return resolve_auth_policy(
+            Domain(domain_name="policy.test", **overrides), make_smtp_settings()
+        )
+
+    def test_verified_and_rejecting_refuses_a_failure(self, make_smtp_settings):
+        """A domain that verifies DKIM and rejects failures refuses a fail."""
+        policy = self._policy(make_smtp_settings, verify_dkim=True, reject_dkim_fail=True)
+
+        assert policy.refused_mechanism(_auth_result(dkim=RESULT_FAIL)) == "DKIM"
+
+    def test_unverified_mechanism_cannot_refuse(self, make_smtp_settings):
+        """reject_dkim_fail is inert while the domain does not verify DKIM."""
+        policy = self._policy(make_smtp_settings, verify_dkim=False, reject_dkim_fail=True)
+
+        assert policy.refused_mechanism(_auth_result(dkim=RESULT_FAIL)) is None
+
+    def test_verified_without_rejecting_does_not_refuse(self, make_smtp_settings):
+        """Verifying a mechanism does not by itself refuse anything."""
+        policy = self._policy(make_smtp_settings, verify_dkim=True, reject_dkim_fail=False)
+
+        assert policy.refused_mechanism(_auth_result(dkim=RESULT_FAIL)) is None
+
+    @pytest.mark.parametrize("spf_result", [RESULT_SOFTFAIL, RESULT_NONE, RESULT_PASS])
+    def test_only_a_hard_fail_refuses(self, make_smtp_settings, spf_result: str):
+        """softfail, none and pass are not failures."""
+        policy = self._policy(make_smtp_settings, verify_spf=True, reject_spf_fail=True)
+
+        assert policy.refused_mechanism(_auth_result(spf=spf_result)) is None
+
+    def test_spf_refusal_is_named(self, make_smtp_settings):
+        """An SPF-only refusal names SPF."""
+        policy = self._policy(make_smtp_settings, verify_spf=True, reject_spf_fail=True)
+
+        assert policy.refused_mechanism(_auth_result(spf=RESULT_FAIL)) == "SPF"
+
+    def test_dkim_is_named_when_both_mechanisms_refuse(self, make_smtp_settings):
+        """With both failing, DKIM is the mechanism reported, as before."""
+        policy = self._policy(
+            make_smtp_settings,
+            verify_dkim=True,
+            reject_dkim_fail=True,
+            verify_spf=True,
+            reject_spf_fail=True,
+        )
+
+        assert policy.refused_mechanism(_auth_result(dkim=RESULT_FAIL, spf=RESULT_FAIL)) == "DKIM"

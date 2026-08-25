@@ -52,6 +52,13 @@ Superuser only.
 - `DELETE /domains/{id}?purge` - Delete domain (owner; soft), or purge an already-deleted one (superuser)
 - `POST /domains/{id}/restore` - Restore a deleted domain (owner)
 
+A domain carries four tri-state authentication fields: `verify_dkim`, `verify_spf`,
+`reject_dkim_fail` and `reject_spf_fail`. `null` (the default) inherits the matching
+`FASTSMTP_SMTP_*` server setting; `true` or `false` overrides it for mail addressed to
+that domain and takes effect at receive time. Send `null` on a `PUT` to go back to
+inheriting. See [Per-domain overrides](configuration.md#per-domain-overrides) for what
+they do when a message has recipients on several domains.
+
 ### Members
 
 - `GET /domains/{id}/members` - List members (memberships of deleted users are omitted)

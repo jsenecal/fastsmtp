@@ -1,5 +1,6 @@
 """Tests for SMTP server functionality."""
 
+import logging
 from email import message_from_bytes
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +10,7 @@ from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
 from fastsmtp.db.models import Domain, Recipient, Rule, RuleSet
 from fastsmtp.db.soft_delete import soft_delete_domain, soft_delete_recipient
+from fastsmtp.metrics.definitions import SMTP_MESSAGES_TOTAL
 from fastsmtp.smtp.server import (
     FastSMTPHandler,
     extract_email_payload,
@@ -757,3 +759,250 @@ class TestEmailAuthResult:
             client_ip="192.168.1.1",
         )
         assert result.spf_failed is False
+
+
+def _refused_recipients_total() -> float:
+    """Current value of the per-recipient authentication refusal counter."""
+    return SMTP_MESSAGES_TOTAL.labels(result="recipient_refused")._value.get()
+
+
+class TestPerDomainAuthPolicy:
+    """The DKIM/SPF overrides of a recipient's domain, applied at receive time.
+
+    Every assertion here goes through ``handle_DATA``: the policy is resolved
+    from the recipients' domains, so none of it can be observed by driving the
+    validator or the persist step on their own.
+    """
+
+    STRICT = "strict-auth-test.com"
+    INHERIT = "inherit-auth-test.com"
+
+    @pytest_asyncio.fixture
+    async def make_domain(self, test_session: AsyncSession):
+        """Create a live domain with a catch-all and the given auth overrides."""
+
+        async def make(domain_name: str, **overrides: bool | None) -> Domain:
+            domain = Domain(domain_name=domain_name, is_enabled=True, **overrides)
+            test_session.add(domain)
+            await test_session.flush()
+            test_session.add(
+                Recipient(
+                    domain_id=domain.id,
+                    local_part=None,
+                    webhook_url=f"https://example.com/{domain_name}",
+                    is_enabled=True,
+                )
+            )
+            await test_session.commit()
+            await test_session.refresh(domain)
+            return domain
+
+        return make
+
+    @staticmethod
+    def _envelope(*addresses: str) -> Envelope:
+        envelope = Envelope()
+        envelope.mail_from = "sender@external.com"
+        envelope.rcpt_tos = list(addresses)
+        return envelope
+
+    # -- which checks run ------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_domain_opting_out_of_dkim_is_never_verified(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """verify_dkim=false suppresses the check the global setting asks for."""
+        await make_domain(self.STRICT, verify_dkim=False)
+        handler = FastSMTPHandler(make_smtp_settings(smtp_verify_dkim=True))
+
+        run = await run_smtp_data(handler, self._envelope(f"user@{self.STRICT}"), dkim=RESULT_FAIL)
+
+        run.dkim.assert_not_awaited()
+        assert run.reply == "250 Message accepted for delivery"
+
+    @pytest.mark.asyncio
+    async def test_domain_opting_in_verifies_for_the_whole_message(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """One recipient domain asking for SPF is enough to run the check, once."""
+        await make_domain(self.STRICT, verify_spf=True)
+        await make_domain(self.INHERIT)
+        handler = FastSMTPHandler(make_smtp_settings(smtp_verify_spf=False))
+
+        run = await run_smtp_data(
+            handler, self._envelope(f"user@{self.STRICT}", f"user@{self.INHERIT}")
+        )
+
+        run.spf.assert_awaited_once()
+        assert run.reply == "250 Message accepted for delivery"
+
+    # -- whom a failed check refuses -------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_domain_rejects_dkim_fail_with_the_global_reject_off(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """reject_dkim_fail=true refuses a message the server default would accept."""
+        await make_domain(self.STRICT, reject_dkim_fail=True)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=False)
+        )
+
+        run = await run_smtp_data(handler, self._envelope(f"user@{self.STRICT}"), dkim=RESULT_FAIL)
+
+        assert run.reply == "550 DKIM verification failed"
+        run.enqueue.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_domain_rejects_spf_fail_with_the_global_reject_off(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """reject_spf_fail=true refuses a message the server default would accept."""
+        await make_domain(self.STRICT, reject_spf_fail=True)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_spf=True, smtp_reject_spf_fail=False)
+        )
+
+        run = await run_smtp_data(handler, self._envelope(f"user@{self.STRICT}"), spf=RESULT_FAIL)
+
+        assert run.reply == "550 SPF verification failed"
+        run.enqueue.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_domain_cannot_reject_on_a_mechanism_it_does_not_verify(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """reject_dkim_fail=true is inert under verify_dkim=false: no result to judge."""
+        await make_domain(self.STRICT, verify_dkim=False, reject_dkim_fail=True)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=True)
+        )
+
+        run = await run_smtp_data(handler, self._envelope(f"user@{self.STRICT}"), dkim=RESULT_FAIL)
+
+        run.dkim.assert_not_awaited()
+        assert run.reply == "250 Message accepted for delivery"
+        assert run.recipients == [f"user@{self.STRICT}"]
+
+    @pytest.mark.asyncio
+    async def test_refusal_is_per_recipient_when_another_recipient_accepts(
+        self, make_smtp_settings, make_domain, run_smtp_data, caplog
+    ):
+        """A strict domain refusing does not deny delivery to a domain that inherits."""
+        await make_domain(self.STRICT, reject_dkim_fail=True)
+        await make_domain(self.INHERIT)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=False)
+        )
+        before = _refused_recipients_total()
+
+        with caplog.at_level(logging.WARNING, logger="fastsmtp.smtp.server"):
+            run = await run_smtp_data(
+                handler,
+                self._envelope(f"user@{self.STRICT}", f"user@{self.INHERIT}"),
+                dkim=RESULT_FAIL,
+            )
+
+        assert run.reply == "250 Message accepted for delivery"
+        assert run.recipients == [f"user@{self.INHERIT}"]
+        refusals = [
+            record.getMessage()
+            for record in caplog.records
+            if "refusing recipient" in record.getMessage()
+        ]
+        assert len(refusals) == 1
+        assert self.STRICT in refusals[0]
+        assert "DKIM" in refusals[0]
+        assert _refused_recipients_total() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_every_recipient_refusing_answers_the_message_level_550(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """Two strict domains, both refusing, refuse the message instead of accepting it."""
+        await make_domain(self.STRICT, reject_dkim_fail=True)
+        await make_domain(self.INHERIT, reject_dkim_fail=True)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=False)
+        )
+        before = _refused_recipients_total()
+
+        run = await run_smtp_data(
+            handler,
+            self._envelope(f"user@{self.STRICT}", f"user@{self.INHERIT}"),
+            dkim=RESULT_FAIL,
+        )
+
+        assert run.reply == "550 DKIM verification failed"
+        run.enqueue.assert_not_awaited()
+        assert _refused_recipients_total() == before
+
+    # -- a domain that inherits everything answers exactly as before ------
+
+    @pytest.mark.asyncio
+    async def test_inheriting_domain_is_rejected_by_the_global_dkim_setting(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """With every column NULL the global reject still decides the message."""
+        await make_domain(self.INHERIT)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=True)
+        )
+
+        run = await run_smtp_data(handler, self._envelope(f"user@{self.INHERIT}"), dkim=RESULT_FAIL)
+
+        assert run.reply == "550 DKIM verification failed"
+        run.enqueue.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_inheriting_domain_is_rejected_by_the_global_spf_setting(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """Same for SPF: nothing changes for a domain that overrides nothing."""
+        await make_domain(self.INHERIT)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_spf=True, smtp_reject_spf_fail=True)
+        )
+
+        run = await run_smtp_data(handler, self._envelope(f"user@{self.INHERIT}"), spf=RESULT_FAIL)
+
+        assert run.reply == "550 SPF verification failed"
+        run.enqueue.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_inheriting_domain_is_accepted_when_the_global_reject_is_off(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """A failed check with rejection off is recorded, not refused."""
+        await make_domain(self.INHERIT)
+        handler = FastSMTPHandler(
+            make_smtp_settings(
+                smtp_verify_dkim=True,
+                smtp_verify_spf=True,
+                smtp_reject_dkim_fail=False,
+                smtp_reject_spf_fail=False,
+            )
+        )
+
+        run = await run_smtp_data(
+            handler, self._envelope(f"user@{self.INHERIT}"), dkim=RESULT_FAIL, spf=RESULT_FAIL
+        )
+
+        assert run.reply == "250 Message accepted for delivery"
+        assert run.recipients == [f"user@{self.INHERIT}"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_recipient_domain_keeps_the_global_policy(
+        self, make_smtp_settings, run_smtp_data
+    ):
+        """An address with no configured domain is judged by the global settings alone."""
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=True)
+        )
+
+        run = await run_smtp_data(
+            handler, self._envelope("user@never-configured.test"), dkim=RESULT_FAIL
+        )
+
+        assert run.reply == "550 DKIM verification failed"

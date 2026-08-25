@@ -22,6 +22,26 @@ All configuration is via environment variables with the `FASTSMTP_` prefix.
 | `FASTSMTP_SMTP_REJECT_DKIM_FAIL` | `false` | Reject emails on DKIM failure |
 | `FASTSMTP_SMTP_REJECT_SPF_FAIL` | `false` | Reject emails on SPF failure |
 
+### Per-domain overrides
+
+These four are defaults, not the final word. Every domain has a matching
+`verify_dkim`, `verify_spf`, `reject_dkim_fail` and `reject_spf_fail` field, unset
+by default (`inherit`) so the domain follows the setting above; set to `true` or
+`false` it overrides that setting for mail addressed to the domain, at receive
+time. Set them with `fsmtp domain create/update` or `PUT /domains/{id}`.
+
+Two rules make this predictable when a message has recipients on more than one
+domain:
+
+- A check runs once for the message if **any** recipient's domain verifies that
+  mechanism, and the result is recorded for every recipient. A domain that sets
+  `verify_dkim` to `false` never rejects on DKIM and never sees a DKIM decision of
+  its own.
+- A domain can only reject on a mechanism it also verifies. If only some
+  recipients' domains reject the message, it is accepted (`250`) and those
+  recipients get no delivery; it is refused with `550 DKIM verification failed`
+  or `550 SPF verification failed` only when every recipient refuses it.
+
 ## API Server
 
 | Variable | Default | Description |

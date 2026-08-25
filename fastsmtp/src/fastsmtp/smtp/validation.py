@@ -4,10 +4,14 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from functools import partial
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import dkim
 import spf
+
+if TYPE_CHECKING:
+    from fastsmtp.config import Settings
+    from fastsmtp.db.models import Domain
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,65 @@ class EmailAuthResult:
     def spf_failed(self) -> bool:
         """Check if SPF verification explicitly failed (not softfail/neutral/none)."""
         return self.spf_result == RESULT_FAIL
+
+
+@dataclass(frozen=True)
+class EffectiveAuthPolicy:
+    """The DKIM and SPF policy in force for one recipient domain.
+
+    Every flag is already resolved: the domain's own override where it has
+    one, the server-wide setting where the column is NULL.
+    """
+
+    verify_dkim: bool
+    verify_spf: bool
+    reject_dkim_fail: bool
+    reject_spf_fail: bool
+
+    def refused_mechanism(self, auth_result: EmailAuthResult) -> str | None:
+        """Name the mechanism this policy refuses the message on, if any.
+
+        A domain that does not verify a mechanism cannot reject on it: the
+        result it would be judging was never computed, and ``fail`` there
+        would mean "another recipient's domain asked for this check", not
+        anything this domain decided.
+
+        DKIM is reported ahead of SPF when both refuse, so a message that
+        fails everything is refused with the reply it always was.
+        """
+        if self.verify_dkim and self.reject_dkim_fail and auth_result.dkim_result == RESULT_FAIL:
+            return "DKIM"
+        if self.verify_spf and self.reject_spf_fail and auth_result.spf_result == RESULT_FAIL:
+            return "SPF"
+        return None
+
+
+def resolve_auth_policy(domain: "Domain | None", settings: "Settings") -> EffectiveAuthPolicy:
+    """Resolve a recipient domain's auth policy against the global settings.
+
+    The four ``Domain`` columns are tri-state: NULL inherits the matching
+    ``FASTSMTP_SMTP_*`` setting, true and false override it. ``domain`` is
+    None for an address that resolves to no configured domain -- never
+    configured, or tombstoned between RCPT and DATA -- which keeps the global
+    policy, exactly as before domains could override anything.
+
+    Takes the loaded row rather than an id so the receive path, which already
+    holds it, does not pay for a second query.
+    """
+
+    def resolve(override: bool | None, default: bool) -> bool:
+        return default if override is None else bool(override)
+
+    return EffectiveAuthPolicy(
+        verify_dkim=resolve(domain.verify_dkim if domain else None, settings.smtp_verify_dkim),
+        verify_spf=resolve(domain.verify_spf if domain else None, settings.smtp_verify_spf),
+        reject_dkim_fail=resolve(
+            domain.reject_dkim_fail if domain else None, settings.smtp_reject_dkim_fail
+        ),
+        reject_spf_fail=resolve(
+            domain.reject_spf_fail if domain else None, settings.smtp_reject_spf_fail
+        ),
+    )
 
 
 def _verify_dkim_sync(message: bytes) -> tuple[str, str | None, str | None]:

@@ -33,7 +33,7 @@ absent from the OpenAPI schema - Prometheus text output is not a JSON API.
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `fastsmtp_smtp_messages_total` | Counter | `result` = `accepted`/`rejected`/`dropped` | Messages received. `dropped` means accepted then discarded by rules |
+| `fastsmtp_smtp_messages_total` | Counter | `result` = `accepted`/`rejected`/`dropped`/`recipient_refused` | Messages received. `dropped` means accepted then discarded by rules. `recipient_refused` counts recipients, not messages: one per recipient skipped because its domain rejects the failed DKIM or SPF check while the message was still accepted for someone else (a message every recipient refuses is one `rejected` instead) |
 | `fastsmtp_smtp_message_size_bytes` | Histogram | - | Message size (buckets 1KB-10MB) |
 | `fastsmtp_smtp_rate_limited_total` | Counter | `type` = `connection`/`message`/`recipient` | SMTP requests refused by rate limiting |
 
@@ -157,8 +157,11 @@ Add `metrics_path` only if you front the service with a path prefix; the default
 ### Queries worth having
 
 ```promql
-# Message intake by outcome
-sum by (result) (rate(fastsmtp_smtp_messages_total[5m]))
+# Message intake by outcome (recipient_refused counts recipients, not messages)
+sum by (result) (rate(fastsmtp_smtp_messages_total{result!="recipient_refused"}[5m]))
+
+# Recipients skipped because their domain rejects a failed DKIM or SPF check
+rate(fastsmtp_smtp_messages_total{result="recipient_refused"}[5m])
 
 # Webhook failure ratio (excludes cancelled: those were never attempted)
 sum(rate(fastsmtp_webhook_deliveries_total{status=~"failed|exhausted"}[5m]))
