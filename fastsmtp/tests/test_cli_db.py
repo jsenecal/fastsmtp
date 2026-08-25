@@ -17,6 +17,7 @@ These tests run the real command in a child process with the
 carries is dropped, and only what the test sets is passed through.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +26,10 @@ import pytest
 
 
 def _run_cli(
-    environ: dict[str, str], env: dict[str, str], *args: str
+    environ: dict[str, str],
+    env: dict[str, str],
+    *args: str,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``fastsmtp <args>`` with ``env`` as the only FastSMTP configuration.
 
@@ -34,10 +38,14 @@ def _run_cli(
     path, the way a cron job or systemd unit would, so the venv's ``bin`` is
     not on PATH and Alembic has to be found through the interpreter rather
     than by name.
+
+    ``cwd`` is the operator's working directory, which is where a ``.env``
+    is looked up.
     """
     return subprocess.run(
         [sys.executable, "-m", "fastsmtp.cli", *args],
         env={**environ, "PATH": "/usr/bin:/bin", **env},
+        cwd=cwd,
         capture_output=True,
         text=True,
     )
@@ -125,3 +133,126 @@ def test_db_current_is_not_subject_to_the_s3_cross_field_validation(
         "current",
     )
     _assert_succeeded(result)
+
+
+class TestDotenvInTheWorkingDirectory:
+    """``fastsmtp db`` and ``fastsmtp serve`` must read the same configuration
+    from the same shell (issue #114).
+
+    ``_run_alembic`` spawns Alembic with ``cwd`` set to the package directory
+    so ``alembic.ini`` resolves, and settings are loaded from ``.env``
+    relative to the working directory. Without the resolved URL being handed
+    to the child, ``db upgrade head`` migrated the default database while
+    ``serve`` in the same shell used the one the operator configured.
+    """
+
+    @staticmethod
+    def _workdir(tmp_path: Path, database_url: str) -> Path:
+        """An operator working directory holding a ``.env``."""
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        (workdir / ".env").write_text(
+            f"FASTSMTP_DATABASE_URL={database_url}\nFASTSMTP_ROOT_API_KEY=from-dotenv\n"
+        )
+        return workdir
+
+    def test_db_uses_the_database_url_from_the_dotenv(
+        self, scrubbed_environ: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Connecting creates the SQLite file, so its existence proves which
+        database Alembic actually opened."""
+        database_path = tmp_path / "from-dotenv.db"
+        workdir = self._workdir(tmp_path, f"sqlite+aiosqlite:///{database_path}")
+
+        result = _run_cli(scrubbed_environ, {}, "db", "current", cwd=workdir)
+
+        _assert_succeeded(result)
+        assert database_path.exists()
+
+    def test_db_and_show_config_resolve_the_same_url(
+        self, scrubbed_environ: dict[str, str], tmp_path: Path
+    ) -> None:
+        """``show-config`` is what ``serve`` loads; both must name one database."""
+        database_url = f"sqlite+aiosqlite:///{tmp_path}/agreed.db"
+        workdir = self._workdir(tmp_path, database_url)
+
+        # Rich truncates a cell wider than the console, so the table is given
+        # room rather than the assertion being loosened.
+        shown = _run_cli(scrubbed_environ, {"COLUMNS": "250"}, "show-config", cwd=workdir)
+        _assert_succeeded(shown)
+
+        assert database_url in shown.stdout
+
+    def test_an_explicit_environment_variable_still_wins(
+        self, scrubbed_environ: dict[str, str], tmp_path: Path
+    ) -> None:
+        """The usual pydantic-settings precedence: the environment beats ``.env``."""
+        database_path = tmp_path / "from-environ.db"
+        workdir = self._workdir(tmp_path, f"sqlite+aiosqlite:///{tmp_path}/from-dotenv.db")
+
+        result = _run_cli(
+            scrubbed_environ,
+            {"FASTSMTP_DATABASE_URL": f"sqlite+aiosqlite:///{database_path}"},
+            "db",
+            "current",
+            cwd=workdir,
+        )
+
+        _assert_succeeded(result)
+        assert database_path.exists()
+        assert not (tmp_path / "from-dotenv.db").exists()
+
+
+class TestAlembicEnvironment:
+    """The same contract as the class above, in process.
+
+    Everything above proves it end to end through a child process, which is
+    where the bug lived and the only place it can be shown; none of it
+    executes a line of ``fastsmtp.cli`` in the test interpreter. These pin the
+    two pieces directly: what the environment is built from, and that
+    ``_run_alembic`` actually hands it to Alembic.
+    """
+
+    def test_the_url_is_resolved_from_the_working_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastsmtp import cli
+
+        (tmp_path / ".env").write_text("FASTSMTP_DATABASE_URL=sqlite+aiosqlite:///from-dotenv.db\n")
+        monkeypatch.delenv("FASTSMTP_DATABASE_URL", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        environ = cli._alembic_environ()
+
+        assert environ["FASTSMTP_DATABASE_URL"] == "sqlite+aiosqlite:///from-dotenv.db"
+        # The rest of the environment is carried through, not replaced.
+        assert environ["PATH"] == os.environ["PATH"]
+
+    def test_run_alembic_hands_that_environment_to_the_child(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastsmtp.db.migrations import alembic_ini_path
+
+        from fastsmtp import cli
+
+        (tmp_path / ".env").write_text("FASTSMTP_DATABASE_URL=sqlite+aiosqlite:///child.db\n")
+        monkeypatch.delenv("FASTSMTP_DATABASE_URL", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        recorded: dict[str, object] = {}
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            recorded["cmd"] = cmd
+            recorded.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+        cli._run_alembic("current")
+
+        # The child still runs from the package directory, so alembic.ini and
+        # the script location resolve; only the environment is new.
+        assert recorded["cwd"] == alembic_ini_path().parent
+        env = recorded["env"]
+        assert isinstance(env, dict)
+        assert env["FASTSMTP_DATABASE_URL"] == "sqlite+aiosqlite:///child.db"
