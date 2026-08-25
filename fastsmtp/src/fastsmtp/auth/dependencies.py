@@ -21,7 +21,6 @@ from fastsmtp.auth.keys import (
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import APIKey, Domain, DomainMember, User
 from fastsmtp.db.session import get_session
-from fastsmtp.db.soft_delete import visible
 
 # Domain role hierarchy
 ROLE_HIERARCHY = {"owner": 3, "admin": 2, "member": 1}
@@ -253,6 +252,19 @@ async def get_auth_context(
 Auth = Annotated[AuthContext, Depends(get_auth_context)]
 
 
+def _domain_not_found() -> HTTPException:
+    """The answer every branch that must not confirm a domain gives.
+
+    Three of them - an id that does not exist, and the two that hide a
+    tombstone - have to stay worded identically or the wording itself becomes
+    the oracle, so they share one constructor.
+    """
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Domain not found",
+    )
+
+
 async def get_domain_with_access(
     domain_id: uuid.UUID,
     auth: Auth,
@@ -269,9 +281,9 @@ async def get_domain_with_access(
         session: Database session
         required_role: Minimum role required (member, admin, or owner)
         include_deleted: Also resolve a soft-deleted domain. A tombstone is
-            only ever returned to a superuser or an owner; everyone else gets
-            the same 404 as for an id that does not exist, so the flag is not
-            an existence oracle. Routers that expose it must still raise
+            only ever returned to a superuser or an owner; members below that
+            get the same 404 as for an id that does not exist, so the flag is
+            not an existence oracle. Routers that expose it must still raise
             ``required_role`` up front so an insufficient role gets 403
             whether or not a tombstone exists.
 
@@ -281,22 +293,21 @@ async def get_domain_with_access(
     Raises:
         HTTPException: If domain not found or access denied
     """
-    stmt = (
-        select(Domain)
-        .options(selectinload(Domain.members))
-        .where(Domain.id == domain_id, visible(Domain, include_deleted))
-    )
+    # Deleted rows are loaded unconditionally and hidden below, after the
+    # membership check: filtering them out in SQL would answer a non-member
+    # 404 on a tombstone and 403 on a live domain, which is exactly the
+    # deletion oracle this helper must not be (#126).
+    stmt = select(Domain).options(selectinload(Domain.members)).where(Domain.id == domain_id)
     result = await session.execute(stmt)
     domain = result.scalar_one_or_none()
 
     if not domain:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Domain not found",
-        )
+        raise _domain_not_found()
 
     # Superusers have access to all domains
     if auth.is_superuser():
+        if domain.is_deleted and not include_deleted:
+            raise _domain_not_found()
         return domain
 
     # Check if user is a member of this domain
@@ -305,19 +316,18 @@ async def get_domain_with_access(
         None,
     )
 
-    # A tombstone (only loadable with include_deleted) is invisible below the
-    # delete role: non-members and non-owner members get 404, not 403.
-    if domain.is_deleted and (membership is None or membership.role != "owner"):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Domain not found",
-        )
-
+    # Non-members are refused before the tombstone is consulted, so they get
+    # the same 403 whether the domain is live or deleted.
     if not membership:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied to this domain",
         )
+
+    # A tombstone is invisible below the delete role, and to everyone without
+    # include_deleted: same 404 as for an id that does not exist.
+    if domain.is_deleted and (not include_deleted or membership.role != "owner"):
+        raise _domain_not_found()
 
     # Check role hierarchy
     user_role_level = ROLE_HIERARCHY.get(membership.role, 0)

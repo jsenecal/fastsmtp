@@ -97,8 +97,9 @@ message has recipients on several domains.
 - `DELETE /domains/{id}/rules/{rule_id}` - Delete rule
 
 Rulesets and rules have no soft delete of their own: deleting one is permanent. While
-their domain is deleted they are unreachable (every route above answers `404 Domain not
-found`) and they come back untouched when the domain is restored.
+their domain is deleted they are unreachable (every route above answers its members
+`404 Domain not found`, and a non-member the same `403` as on a live domain) and they
+come back untouched when the domain is restored.
 
 ### Delivery Logs
 
@@ -170,13 +171,24 @@ The flag requires the role that may delete the resource:
 
 Without the flag a deleted id is `404` with the ordinary "not found" detail. With it,
 the user routes check the superuser gate before looking anything up, so an insufficient
-caller gets `403` whether or not the row exists. The domain-scoped routes resolve the
-domain first: a **deleted** domain is `404` to everyone below owner, while a **live** one
-is `403` below the required role.
+caller gets `403` whether or not the row exists.
+
+The domain-scoped routes resolve the domain first, and answer in this order:
+
+| Caller | Live domain | Deleted domain |
+|---|---|---|
+| not a member | `403 Access denied to this domain` | `403 Access denied to this domain` |
+| member below owner | `200`, or `403` below the required role | `404 Domain not found` |
+| owner or superuser | `200` | `404` without the flag, `200` with it |
+
+A non-member is refused before the tombstone is consulted, so the status code never
+says whether a domain it cannot reach has been deleted. Its members do learn: for them
+a tombstone reads as `404` until an owner passes `include_deleted`.
 
 `GET /delivery-log/{id}` needs no flag: a log whose domain is live is readable by any
-member; one whose domain is deleted by its owners and superusers (`404` to anyone
-else); one whose domain was purged (`domain_id` is `null`) by superusers only.
+member; one whose domain is deleted by its owners and superusers (`404` to its other
+members, `403` to a non-member, as in the table above); one whose domain was purged
+(`domain_id` is `null`) by superusers only.
 
 ### Restore
 
