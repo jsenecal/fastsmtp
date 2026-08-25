@@ -35,7 +35,6 @@ dependencies = [
     "asyncpg>=0.30",
     "prometheus-client>=0.21",
     "redis>=5.0",
-    "cryptography>=46.0.3",
     "aiobotocore>=2.9.0",
     "google-re2>=1.1",
 ]
