@@ -201,6 +201,13 @@ class Settings(DatabaseSettings):
         description="Root API key for initial superuser access",
     )
     api_key_hash_algorithm: str = "sha256"
+    encryption_keys: list[str] = Field(
+        default_factory=list,
+        description="Keys for encrypting sensitive columns at rest, in priority order. "
+        "The first key encrypts; every key is tried when decrypting, which is what makes "
+        "rotation possible: prepend the new key and keep the old one until the estate is "
+        "converted. Empty (the default) stores those columns in clear, as before.",
+    )
 
     # K8s/Operations
     instance_id: str = Field(default_factory=lambda: os.getenv("HOSTNAME", uuid4().hex[:8]))
@@ -274,6 +281,15 @@ class Settings(DatabaseSettings):
         description="Maximum recipients per SMTP message",
     )
 
+    verify_encryption_on_startup: bool = Field(
+        default=True,
+        description=(
+            "Refuse to start when the database holds encrypted columns and no "
+            "encryption key is configured. Disable only if you are deliberately "
+            "running a process that must not read those columns."
+        ),
+    )
+
     verify_schema_on_startup: bool = Field(
         default=True,
         description=(
@@ -311,6 +327,21 @@ class Settings(DatabaseSettings):
                 parse_networks(getattr(self, field_name))
             except ValueError as e:
                 raise ValueError(f"{field_name}: {e}") from e
+        return self
+
+    @model_validator(mode="after")
+    def validate_encryption_keys(self) -> "Settings":
+        """Reject an unusable encryption key at startup rather than on first write.
+
+        A key that cannot build a cipher would otherwise surface as a failure on
+        the first row touched, long after the process reported itself healthy.
+        """
+        from fastsmtp.crypto import KeyConfigurationError, build_cipher
+
+        try:
+            build_cipher(self.encryption_keys)
+        except KeyConfigurationError as e:
+            raise ValueError(f"encryption_keys: {e}") from e
         return self
 
     @model_validator(mode="after")

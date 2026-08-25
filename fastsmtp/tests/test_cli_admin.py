@@ -20,16 +20,16 @@ opens a session, and no command writes ``deleted_at`` or calls
 ``session.delete`` itself.
 """
 
-import asyncio
 import inspect
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cli_harness import Db
 from fastsmtp.config import Settings
 from fastsmtp.db.enums import DeliveryStatus
 from fastsmtp.db.models import (
@@ -43,13 +43,9 @@ from fastsmtp.db.models import (
 )
 from fastsmtp.db.soft_delete import soft_delete_domain, soft_delete_user
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
-from typer.testing import CliRunner
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from fastsmtp import cli
-
-ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 OLDER = datetime(2020, 1, 1, tzinfo=UTC)
 NEWER = datetime(2021, 6, 15, 12, 30, 45, tzinfo=UTC)
@@ -57,10 +53,6 @@ NEWER = datetime(2021, 6, 15, 12, 30, 45, tzinfo=UTC)
 NEWER_TEXT = "2021-06-15 12:30:45 UTC"
 
 ID_NEEDS_PURGE = "--id only applies with --purge; delete addresses the live entry"
-
-
-def strip_ansi(text: str) -> str:
-    return ANSI_ESCAPE.sub("", text)
 
 
 async def name_is_free(
@@ -79,51 +71,6 @@ async def name_is_free(
     passes without exercising ``_commit_or_conflict`` at all.
     """
     return False
-
-
-class Db:
-    """Run a coroutine against a fresh session in its own loop and commit."""
-
-    def __init__(self, make_session: Callable[[], AsyncSession]):
-        self._make_session = make_session
-
-    def __call__(self, fn: Callable[[AsyncSession], Awaitable[Any]]) -> Any:
-        async def go() -> Any:
-            async with self._make_session() as session:
-                result = await fn(session)
-                await session.commit()
-                return result
-
-        return asyncio.run(go())
-
-
-@pytest.fixture
-def db(test_engine, test_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> Db:
-    """Point the CLI's session factory at the test database (see module docstring)."""
-
-    def make_session() -> AsyncSession:
-        engine = create_async_engine(test_settings.database_url, poolclass=NullPool)
-        return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)()
-
-    monkeypatch.setattr("fastsmtp.db.session.async_session", make_session)
-    # Rich wraps at the terminal width; CliRunner has no terminal, so pin it
-    # wide enough that a table row or a UUID never breaks across lines.
-    monkeypatch.setenv("COLUMNS", "200")
-    return Db(make_session)
-
-
-@pytest.fixture
-def run(db: Db) -> Callable[..., tuple[int, str]]:
-    """Invoke the ``fastsmtp`` CLI; returns ``(exit_code, output without ANSI)``."""
-    runner = CliRunner()
-
-    def invoke(*args: str, input: str | None = None) -> tuple[int, str]:
-        result = runner.invoke(cli.app, list(args), input=input)
-        if result.exception and not isinstance(result.exception, SystemExit):
-            raise result.exception
-        return result.exit_code, strip_ansi(result.output)
-
-    return invoke
 
 
 # --- seeding -----------------------------------------------------------------

@@ -405,3 +405,74 @@ keys are stored as a salted PBKDF2-HMAC-SHA256 hash and never in clear, so
 it only decides how a pre-salting key is verified, and changing it stops those keys from
 authenticating. Rotate the remaining unsalted keys (`fsmtp auth rotate-key`) rather than
 touching it.
+
+## Webhook Header Encryption
+
+`recipients.webhook_headers` holds the customer's own bearer tokens for their webhook
+endpoint. Configuring a key encrypts that column at rest, so a stolen database or backup
+does not hand over those credentials. It is a storage-layer feature only: API responses,
+payload shapes and CLI output are unchanged either way, and an authorised API caller can
+still read the headers back through the ordinary API - this defends the data at rest, not
+from the people already allowed to read it through the application.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_ENCRYPTION_KEYS` | *(empty)* | Keys in priority order. The first key encrypts; every key is tried when decrypting. Empty means the column is stored in clear, exactly as before |
+| `FASTSMTP_VERIFY_ENCRYPTION_ON_STARTUP` | `true` | Refuse to start when the database holds encrypted rows and no key is configured |
+
+It is a JSON list in the environment, the same shape as `FASTSMTP_METRICS_ALLOWED_IPS`:
+
+```bash
+export FASTSMTP_ENCRYPTION_KEYS='["your-key"]'
+```
+
+Generate the key rather than choosing a memorable one:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Any string is accepted and is stretched with PBKDF2-HMAC-SHA256 at 100,000 iterations -
+the same work factor used for API key hashes - but the salt is fixed, because the
+derivation has to be reproducible from the key alone with no per-deployment state to
+store. A generated key has enough entropy that the fixed salt does not matter; a
+memorable one would not.
+
+!!! warning "Losing the key loses the data"
+
+    There is no recovery path. A key removed from `FASTSMTP_ENCRYPTION_KEYS` before every
+    row written under it has been re-encrypted makes those rows permanently unreadable.
+    Keys belong in the same place as `FASTSMTP_ROOT_API_KEY`.
+
+### Rollout
+
+1. Generate a key, set `FASTSMTP_ENCRYPTION_KEYS`, restart. New writes are encrypted.
+2. Run `fastsmtp encrypt-existing` to convert the rows already there - see
+   [Maintenance](cli/fastsmtp.md#maintenance).
+
+Existing rows do **not** convert through ordinary traffic. SQLAlchemy emits no UPDATE
+when a value is written back equal to what was loaded, and in-place mutation of the
+dict is not tracked at all, so a recipient nobody edits keeps plaintext headers
+indefinitely. The backfill command is what carries the rollout, not time.
+
+### Rotation
+
+!!! warning "Getting this order wrong destroys data"
+
+    1. Prepend the new key while keeping the old one: `'["new-key", "old-key"]'`
+    2. Restart, so new writes use the new key.
+    3. Run `fastsmtp encrypt-existing`, which rewrites every row under the new key.
+    4. Only now remove the old key.
+
+    Dropping the old key before step 3 finishes makes every row still written under it
+    permanently unreadable. The command refuses to overwrite a row it cannot decrypt and
+    exits non-zero, so it will tell you before that happens - but it cannot undo an old
+    key that has already been removed.
+
+No migration is needed to adopt this feature: the ciphertext is wrapped in a JSON
+envelope, so the column stays `JSONB` (PostgreSQL) or `JSON` (elsewhere) and the schema
+is unchanged. Upgrading needs no `fastsmtp db upgrade` on its account.
+
+The startup guard behind `FASTSMTP_VERIFY_ENCRYPTION_ON_STARTUP` covers `fastsmtp serve`
+in every mode, including `--worker-only`, and refuses to boot rather than failing on the
+first row it cannot decrypt.
