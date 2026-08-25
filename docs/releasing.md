@@ -20,8 +20,8 @@ order.
 
 Release Drafter resolves the next version number from **PR labels**, not from commit
 messages. `breaking` bumps major; `feature` / `enhancement` bump minor; everything else
-(`fix`, `bug`, `performance`, `documentation`, `dependencies`, `chore`, `ci`,
-`refactor`) bumps patch, and *patch is also the default for a PR with no label at
+(`security`, `fix`, `bug`, `performance`, `documentation`, `dependencies`, `chore`,
+`ci`, `refactor`) bumps patch, and *patch is also the default for a PR with no label at
 all*. An unlabelled feature PR therefore silently yields a patch version.
 
 An autolabeler maps conventional-commit PR titles (`feat:`, `fix:`, ...) to labels, but
@@ -30,6 +30,22 @@ do not rely on it alone - label every PR explicitly at creation:
 ```bash
 gh pr create ... --label feature
 ```
+
+### Security fixes
+
+Label anything with a security impact `security`. It groups the change under a
+**Security** heading placed above every other section, including Breaking Changes,
+because the first question a reader has is whether they must upgrade now.
+
+The label is additive, not exclusive: Release Drafter lists a PR under *every* category
+whose labels it carries, so a PR labelled `security` and `fix` appears in both sections.
+The autolabeler adds `fix` on its own from a `fix(...)` title, so this is the normal case
+rather than the exception - if the repetition reads badly in a particular release, drop
+the extra label from the PR before publishing and the draft is rebuilt without it.
+
+A `security` PR is worth a paragraph in the hand-written notes at the top of the release,
+saying what was exposed, who is affected and what they should do about it. The generated
+bullet says what changed; it does not tell an operator whether to rotate a credential.
 
 ## 1. Bump the version
 

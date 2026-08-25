@@ -2,6 +2,11 @@ name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 
 categories:
+  # First, and above Breaking Changes: someone skimming release notes to decide
+  # whether they have to upgrade today should hit this before anything else.
+  - title: 'Security'
+    labels:
+      - 'security'
   - title: 'Breaking Changes'
     labels:
       - 'breaking'
@@ -71,6 +76,7 @@ version-resolver:
       - 'enhancement'
   patch:
     labels:
+      - 'security'
       - 'fix'
       - 'bug'
       - 'performance'
