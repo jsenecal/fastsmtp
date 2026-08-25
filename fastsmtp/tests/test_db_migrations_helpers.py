@@ -1,9 +1,11 @@
-"""Tests for locating Alembic and comparing the database against the code."""
+"""Tests for locating the migrations and comparing the database against the code."""
+
+from pathlib import Path
 
 import pytest
 from fastsmtp.db.migrations import (
     SchemaRevisionError,
-    alembic_ini_path,
+    alembic_config,
     alembic_script_location,
     current_db_revision,
     expected_head_revision,
@@ -14,24 +16,31 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 
 class TestAlembicDiscovery:
-    """The migration CLI is the documented upgrade path; it has to find its config."""
-
-    def test_alembic_ini_path_exists(self):
-        """Regression test: the resolved path must actually hold alembic.ini.
-
-        ``_run_alembic`` walked up four parents when the file sits three up, so
-        ``fastsmtp db upgrade head`` exited 1 with "alembic.ini not found" in
-        every layout -- including the container, where it looked for
-        /app/alembic.ini while the file was at /app/fastsmtp/alembic.ini.
-        """
-        assert alembic_ini_path().is_file()
+    """The migration CLI is the documented upgrade path; it has to find its scripts."""
 
     def test_script_location_holds_the_versions(self):
-        """The script directory must be absolute: Alembic resolves the ini's
-        relative ``script_location`` against the CWD, not against the ini."""
+        """The script directory must be absolute: a relative ``script_location``
+        is resolved by Alembic against the CWD, which is the caller's."""
         location = alembic_script_location()
         assert location.is_absolute()
         assert (location / "versions").is_dir()
+
+    def test_scripts_live_inside_the_package(self):
+        """What makes them survive a wheel build, and what lets the path be
+        derived from ``__file__`` instead of by walking three directories up -
+        a contract that held in a checkout and in the image, and resolved to
+        nowhere from site-packages.
+        """
+        import fastsmtp
+
+        package_root = Path(fastsmtp.__file__).resolve().parent
+        assert alembic_script_location().parent == package_root
+
+    def test_the_config_needs_no_ini_file(self):
+        """alembic.ini is gone: the config is built in code, so nothing has to
+        be located on disk beside the package."""
+        assert alembic_config().config_file_name is None
+        assert alembic_config().get_main_option("script_location") == str(alembic_script_location())
 
     def test_expected_head_is_the_newest_migration(self):
         """The head comes from the shipped scripts, not a hardcoded string."""

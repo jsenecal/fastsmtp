@@ -1,15 +1,18 @@
 # Releasing
 
-A FastSMTP release involves three distinct artifacts, and **none of them implies the
+A FastSMTP release involves four distinct artifacts, and **none of them implies the
 others**:
 
 - a **git tag** (`vX.Y.Z`), created by the version bump
 - a **GitHub release**, published from the draft that Release Drafter maintains
 - a set of **container images** on [ghcr.io](https://github.com/jsenecal/fastsmtp/pkgs/container/fastsmtp),
   built by the `Release` workflow
+- two **PyPI packages**, [`fastsmtp`](https://pypi.org/project/fastsmtp/) and
+  [`fastsmtp-cli`](https://pypi.org/project/fastsmtp-cli/), uploaded by the same
+  workflow
 
-Tagging alone builds nothing. Publishing the release is what triggers the image build.
-And an image can exist without any GitHub release at all (see
+Tagging alone builds nothing. Publishing the release is what triggers the image build
+and both uploads. And an image can exist without any GitHub release at all (see
 [Verify the images on ghcr](#4-verify-the-images-on-ghcr)). Follow the steps below in
 order.
 
@@ -63,7 +66,7 @@ publish. Before publishing, check whether the range since the last release adds 
 migration:
 
 ```bash
-git diff --name-only <last-release-tag>..HEAD -- fastsmtp/alembic/versions/
+git diff --name-only <last-release-tag>..HEAD -- fastsmtp/src/fastsmtp/alembic/versions/
 ```
 
 If it does, the release notes **must** say so and state the required order:
@@ -87,8 +90,25 @@ gh release edit v{version} --draft=false --latest
 ```
 
 Publishing triggers `.github/workflows/release.yml`, which checks that CI passed for
-the tagged commit (running the test suite itself if it has not), then builds multi-arch
-(amd64/arm64) images tagged `vX.Y.Z`, `vX.Y`, `vX`, and `latest`.
+the tagged commit (running the test suite itself if it has not), then in parallel:
+
+- builds multi-arch (amd64/arm64) images tagged `vX.Y.Z`, `vX.Y`, `vX`, and `latest`,
+- builds and uploads `fastsmtp` and `fastsmtp-cli` to PyPI.
+
+The two upload jobs authenticate with **PyPI Trusted Publishing** over GitHub's OIDC
+token, so there is no API token stored anywhere. Each names its own GitHub environment
+(`pypi` and `pypi-cli`) because PyPI mints a token per environment and each project's
+trusted publisher records the one it expects; a mismatch is rejected. They cannot share
+a reusable workflow either - PyPI does not accept one as a trusted publisher.
+
+A **PyPI upload cannot be undone**. A version can be yanked, but the same version
+number can never be uploaded again, so a mistake costs a version number. The two
+environments are where to put a required reviewer if you want a manual gate in front of
+that.
+
+Only a published release uploads. `workflow_dispatch` rebuilds images for a tag that
+already shipped, and re-uploading a version PyPI already holds would fail, so the
+publish jobs are skipped on that path.
 
 ## 4. Verify the images on ghcr
 
@@ -105,3 +125,14 @@ gh api user/packages/container/fastsmtp/versions \
 ```
 
 Confirm the new version appears with all four expected tags.
+
+## 5. Verify the packages on PyPI
+
+```bash
+pip index versions fastsmtp
+pip index versions fastsmtp-cli
+```
+
+Both should list the new version. A pip-installed server is not exempt from the
+migration discipline in step 2: `fastsmtp db upgrade head` before restarting onto newer
+code, exactly as for the image.

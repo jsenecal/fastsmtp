@@ -84,6 +84,71 @@ jobs:
     # Reusable workflows do not inherit secrets from the caller
     secrets: inherit
 
+  # One job per package, because PyPI mints a token per environment and each
+  # project's trusted publisher names its own. They cannot share a reusable
+  # workflow either: PyPI does not accept one as a trusted publisher
+  # (https://docs.pypi.org/trusted-publishers/troubleshooting/).
+  #
+  # Only a published release uploads. A workflow_dispatch rebuilds images for a
+  # tag that already shipped, and PyPI refuses a second upload of a version it
+  # already holds, so that path must not reach here.
+  publish-fastsmtp:
+    name: Publish fastsmtp to PyPI
+    runs-on: ubuntu-latest
+    needs: [prepare, check-ci, test]
+    if: >-
+      always() && github.event_name == 'release'
+      && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Build
+        run: uv build --package fastsmtp --out-dir dist
+
+      - name: Publish
+        # `always` rather than the default `automatic`: without an ambient OIDC
+        # token this must fail loudly, not fall back to looking for a password
+        # that is deliberately not configured.
+        run: uv publish --trusted-publishing always
+
+  publish-fastsmtp-cli:
+    name: Publish fastsmtp-cli to PyPI
+    runs-on: ubuntu-latest
+    needs: [prepare, check-ci, test]
+    if: >-
+      always() && github.event_name == 'release'
+      && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    environment: pypi-cli
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Build
+        run: uv build --package fastsmtp-cli --out-dir dist
+
+      - name: Publish
+        run: uv publish --trusted-publishing always
+
   build-and-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest

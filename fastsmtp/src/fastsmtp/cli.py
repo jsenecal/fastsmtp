@@ -17,16 +17,17 @@ needs inside its body.
 """
 
 import asyncio
-import os
-import subprocess
+import logging
 import sys
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from alembic import command as alembic_command
+from alembic.util.exc import CommandError
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import CursorResult, select
@@ -35,8 +36,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp import __version__
-from fastsmtp.config import DatabaseSettings, Settings, get_settings
+from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.integrity import is_unique_violation, live_value_taken
+from fastsmtp.db.migrations import alembic_config
 from fastsmtp.db.models import Domain, SoftDeleteMixin, User
 
 app = typer.Typer(
@@ -280,7 +282,7 @@ def db_upgrade(
     revision: str = typer.Argument("head", help="Revision to upgrade to"),
 ):
     """Upgrade database to a revision."""
-    _run_alembic("upgrade", revision)
+    _run_alembic(alembic_command.upgrade, revision)
 
 
 @db_app.command("downgrade")
@@ -288,7 +290,7 @@ def db_downgrade(
     revision: str = typer.Argument(..., help="Revision to downgrade to"),
 ):
     """Downgrade database to a revision."""
-    _run_alembic("downgrade", revision)
+    _run_alembic(alembic_command.downgrade, revision)
 
 
 @db_app.command("revision")
@@ -297,58 +299,68 @@ def db_revision(
     autogenerate: bool = typer.Option(True, "--autogenerate/--no-autogenerate"),
 ):
     """Create a new database revision."""
-    args = ["revision", "-m", message]
-    if autogenerate:
-        args.append("--autogenerate")
-    _run_alembic(*args)
+    _run_alembic(alembic_command.revision, message=message, autogenerate=autogenerate)
 
 
 @db_app.command("current")
 def db_current():
     """Show current database revision."""
-    _run_alembic("current")
+    _run_alembic(alembic_command.current)
 
 
 @db_app.command("history")
 def db_history():
     """Show revision history."""
-    _run_alembic("history")
+    _run_alembic(alembic_command.history)
 
 
-def _run_alembic(*args):
-    """Run alembic command."""
-    from fastsmtp.db.migrations import alembic_ini_path
+def _run_alembic(command: Callable[..., object], *args: object, **kwargs: object) -> None:
+    """Run one Alembic command in this process.
 
-    alembic_ini = alembic_ini_path()
-    package_dir = alembic_ini.parent
+    These used to be spawned as ``python -m alembic -c <ini>`` from the package
+    directory, because that is the only way the Alembic CLI can find its
+    config. The migrations ship inside the package now and the config is built
+    in code, so there is nothing left for a child process to solve - and two
+    problems it used to create go away with it: the ini had to be located by
+    walking up from ``__file__``, and the child resolved settings relative to
+    its own working directory rather than the operator's (issue #114). Running
+    here, ``env.py`` builds its settings in the process the operator started,
+    so ``db`` and ``serve`` read one ``.env`` by construction.
 
-    if not alembic_ini.exists():
-        console.print(f"[red]alembic.ini not found at {alembic_ini}[/red]")
-        raise typer.Exit(1)
-
-    # Run Alembic through the interpreter that runs this CLI rather than by
-    # name: it is installed beside us, and a cron job or systemd unit that
-    # starts .venv/bin/fastsmtp directly has no venv bin on PATH.
-    cmd = [sys.executable, "-m", "alembic", "-c", str(alembic_ini), *args]
-    result = subprocess.run(cmd, cwd=package_dir, env=_alembic_environ())
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
-
-
-def _alembic_environ() -> dict[str, str]:
-    """The environment for the Alembic child, with the database URL resolved here.
-
-    The child runs from the package directory so ``alembic.ini`` resolves, and
-    ``alembic/env.py`` builds ``DatabaseSettings`` there -- which looks for
-    ``.env`` relative to *its* working directory, not the operator's. A ``.env``
-    beside the shell that ``serve`` honours was therefore invisible to
-    ``fastsmtp db``, which silently migrated the default database instead
-    (issue #114). Resolving the URL in this process, whose working directory is
-    the operator's, and passing it explicitly keeps both commands on one
-    database. An exported ``FASTSMTP_DATABASE_URL`` still wins: it is what
-    ``DatabaseSettings`` here resolves to.
+    A bad revision id is a user error, not a crash, so Alembic's own
+    ``CommandError`` is reported and exits 1. Anything else - a database that
+    refuses the connection, a broken migration - keeps its traceback.
     """
-    return {**os.environ, "FASTSMTP_DATABASE_URL": DatabaseSettings().database_url}
+    _configure_migration_logging()
+    try:
+        command(alembic_config(), *args, **kwargs)
+    except CommandError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _configure_migration_logging() -> None:
+    """Attach the handler alembic.ini used to configure for the child process.
+
+    Alembic announces each revision it applies through its own logger at INFO.
+    With nothing listening that output is dropped and ``db upgrade head``
+    applies the chain in silence, which an operator cannot tell from a no-op.
+    Everything else keeps the default WARNING and reaches stderr through
+    logging's last-resort handler.
+
+    The ``NullHandler`` is the catch: ``alembic.util.messaging`` attaches one
+    to this logger at import time, the library convention for staying quiet by
+    default. It is already there before this runs, so "does the logger have
+    handlers" is the wrong question - only a handler that actually emits
+    counts, or this returns early and configures nothing.
+    """
+    logger = logging.getLogger("alembic")
+    if any(not isinstance(handler, logging.NullHandler) for handler in logger.handlers):
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)-5.5s [%(name)s] %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 # Soft-delete helpers shared by the user and domain commands

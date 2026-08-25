@@ -17,12 +17,15 @@ These tests run the real command in a child process with the
 carries is dropped, and only what the test sets is passed through.
 """
 
-import os
+import logging
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import typer
+from alembic.config import Config
+from alembic.util.exc import CommandError
 
 
 def _run_cli(
@@ -139,11 +142,12 @@ class TestDotenvInTheWorkingDirectory:
     """``fastsmtp db`` and ``fastsmtp serve`` must read the same configuration
     from the same shell (issue #114).
 
-    ``_run_alembic`` spawns Alembic with ``cwd`` set to the package directory
-    so ``alembic.ini`` resolves, and settings are loaded from ``.env``
-    relative to the working directory. Without the resolved URL being handed
-    to the child, ``db upgrade head`` migrated the default database while
-    ``serve`` in the same shell used the one the operator configured.
+    Settings are loaded from a ``.env`` relative to the working directory.
+    Alembic used to run in a child process started from the package directory,
+    where that lookup found nothing, so ``db upgrade head`` migrated the
+    default database while ``serve`` in the same shell used the one the
+    operator configured. Alembic runs in this process now, which is what makes
+    the two agree; these hold that end result whatever moves underneath.
     """
 
     @staticmethod
@@ -203,56 +207,103 @@ class TestDotenvInTheWorkingDirectory:
         assert not (tmp_path / "from-dotenv.db").exists()
 
 
-class TestAlembicEnvironment:
-    """The same contract as the class above, in process.
+class TestAlembicInvocation:
+    """``fastsmtp db`` drives Alembic in process against the packaged scripts.
 
-    Everything above proves it end to end through a child process, which is
-    where the bug lived and the only place it can be shown; none of it
-    executes a line of ``fastsmtp.cli`` in the test interpreter. These pin the
-    two pieces directly: what the environment is built from, and that
-    ``_run_alembic`` actually hands it to Alembic.
+    The commands used to be spawned as ``python -m alembic -c <ini>`` from the
+    package directory, which is what forced the ini to be located by walking up
+    from ``__file__`` and what made the child resolve settings against the
+    wrong working directory. The class above proves the end result end to end;
+    these pin the two pieces the CLI is now responsible for.
     """
 
-    def test_the_url_is_resolved_from_the_working_directory(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from fastsmtp import cli
+    def test_the_config_names_the_packaged_scripts(self) -> None:
+        from fastsmtp.db.migrations import alembic_config, alembic_script_location
 
-        (tmp_path / ".env").write_text("FASTSMTP_DATABASE_URL=sqlite+aiosqlite:///from-dotenv.db\n")
-        monkeypatch.delenv("FASTSMTP_DATABASE_URL", raising=False)
-        monkeypatch.chdir(tmp_path)
+        location = Path(alembic_config().get_main_option("script_location") or "")
 
-        environ = cli._alembic_environ()
+        assert location == alembic_script_location()
+        assert (location / "versions" / "001_initial_schema.py").is_file()
+        # Inside the package, which is what puts it in a wheel.
+        assert location.parent.name == "fastsmtp"
 
-        assert environ["FASTSMTP_DATABASE_URL"] == "sqlite+aiosqlite:///from-dotenv.db"
-        # The rest of the environment is carried through, not replaced.
-        assert environ["PATH"] == os.environ["PATH"]
-
-    def test_run_alembic_hands_that_environment_to_the_child(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from fastsmtp.db.migrations import alembic_ini_path
+    def test_run_alembic_passes_that_config_and_the_arguments(self) -> None:
+        from fastsmtp.db.migrations import alembic_script_location
 
         from fastsmtp import cli
-
-        (tmp_path / ".env").write_text("FASTSMTP_DATABASE_URL=sqlite+aiosqlite:///child.db\n")
-        monkeypatch.delenv("FASTSMTP_DATABASE_URL", raising=False)
-        monkeypatch.chdir(tmp_path)
 
         recorded: dict[str, object] = {}
 
-        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-            recorded["cmd"] = cmd
-            recorded.update(kwargs)
-            return subprocess.CompletedProcess(cmd, 0)
+        def fake_command(config: Config, *args: object, **kwargs: object) -> None:
+            recorded["script_location"] = config.get_main_option("script_location")
+            recorded["args"] = args
+            recorded["kwargs"] = kwargs
 
-        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+        cli._run_alembic(fake_command, "head")
 
-        cli._run_alembic("current")
+        assert recorded["script_location"] == str(alembic_script_location())
+        assert recorded["args"] == ("head",)
+        assert recorded["kwargs"] == {}
 
-        # The child still runs from the package directory, so alembic.ini and
-        # the script location resolve; only the environment is new.
-        assert recorded["cwd"] == alembic_ini_path().parent
-        env = recorded["env"]
-        assert isinstance(env, dict)
-        assert env["FASTSMTP_DATABASE_URL"] == "sqlite+aiosqlite:///child.db"
+    def test_a_bad_revision_exits_1_rather_than_raising(self) -> None:
+        """Alembic reports an unknown revision as a CommandError. That is a
+        typo, not a crash, so it is printed and exits 1 - the same shape the
+        child process's non-zero exit used to produce."""
+        from fastsmtp import cli
+
+        def fake_command(config: Config, *args: object, **kwargs: object) -> None:
+            raise CommandError("Can't locate revision identified by 'nope'")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            cli._run_alembic(fake_command, "nope")
+
+        assert exc_info.value.exit_code == 1
+
+
+class TestMigrationLogging:
+    """``db upgrade`` must say what it applied.
+
+    Alembic reports each revision through the ``alembic`` logger at INFO. The
+    ini used to configure a console handler for it, and ``fileConfig`` wiped
+    the library's own handlers on the way; with the ini gone the CLI attaches
+    that handler itself, and an operator who gets no output cannot tell a
+    successful chain from a no-op.
+    """
+
+    @staticmethod
+    def _reset() -> logging.Logger:
+        """The ``alembic`` logger as a fresh process would see it: importing
+        ``alembic`` installs a ``NullHandler`` on it and nothing else."""
+        logger = logging.getLogger("alembic")
+        logger.handlers = [logging.NullHandler()]
+        return logger
+
+    def test_a_real_handler_is_attached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The trap: ``alembic/util/messaging.py`` adds a ``NullHandler`` at
+        import time, so "does this logger already have handlers" is true before
+        anything useful is attached, and a guard written that way silently
+        leaves the output going nowhere."""
+        from fastsmtp import cli
+
+        logger = self._reset()
+        monkeypatch.setattr(logger, "handlers", logger.handlers, raising=False)
+
+        cli._configure_migration_logging()
+
+        emitting = [h for h in logger.handlers if not isinstance(h, logging.NullHandler)]
+        assert emitting, "only a NullHandler is attached; migration output goes nowhere"
+        assert logger.getEffectiveLevel() <= logging.INFO
+
+    def test_it_does_not_stack_handlers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every db command calls it, and a process that runs two would
+        otherwise print each line twice."""
+        from fastsmtp import cli
+
+        logger = self._reset()
+        monkeypatch.setattr(logger, "handlers", logger.handlers, raising=False)
+
+        cli._configure_migration_logging()
+        cli._configure_migration_logging()
+
+        emitting = [h for h in logger.handlers if not isinstance(h, logging.NullHandler)]
+        assert len(emitting) == 1

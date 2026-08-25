@@ -14,7 +14,7 @@ coverage:
 # Mirrors [tool.coverage.run] omit in pyproject.toml. Migrations are never
 # executed by the suite, so they are not meaningful coverage.
 ignore:
-  - "fastsmtp/alembic/**"
+  - "fastsmtp/src/fastsmtp/alembic/**"
   - "**/tests/**"
 
 # Per-package breakdown in the UI without splitting the upload into flags.
