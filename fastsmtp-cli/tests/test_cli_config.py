@@ -170,6 +170,38 @@ class TestConfigPermissions:
                 f"key written into a group/world accessible file: {stat.filemode(mode)}"
             )
 
+    def test_failing_to_secure_the_file_releases_the_descriptor(self, temp_config_dir):
+        """If the mode cannot be applied, the error propagates and no fd leaks.
+
+        The descriptor exists before the file object that would own it does, so the
+        failure path has to close it by hand. Without that, every failed
+        `fsmtp config set` leaks one.
+        """
+        opened: list[int] = []
+        closed: list[int] = []
+        real_open, real_close = os.open, os.close
+
+        def open_spy(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if str(path) == str(temp_config_dir):
+                opened.append(fd)
+            return fd
+
+        def close_spy(fd):
+            closed.append(fd)
+            return real_close(fd)
+
+        with (
+            mock.patch.object(os, "open", open_spy),
+            mock.patch.object(os, "close", close_spy),
+            mock.patch.object(os, "fchmod", side_effect=OSError("cannot chmod")),
+            pytest.raises(OSError, match="cannot chmod"),
+        ):
+            save_config(CLIConfig(profiles={"p": Profile(api_key="fsmtp_secret")}))
+
+        assert opened, "config file was never opened"
+        assert opened[-1] in closed, "descriptor leaked when securing the file failed"
+
 
 class TestProfileManagement:
     """Tests for profile management functions."""
