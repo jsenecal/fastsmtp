@@ -478,21 +478,22 @@ class TestGetDomainWithAccessTombstones:
         assert exc_info.value.status_code == 404
         assert exc_info.value.detail == "Domain not found"
 
+    @pytest.mark.parametrize("include_deleted", [False, True])
     @pytest.mark.asyncio
-    async def test_include_deleted_hides_tombstone_from_non_member(
-        self, test_session: AsyncSession
+    async def test_non_member_gets_403_on_a_tombstone(
+        self, test_session: AsyncSession, include_deleted: bool
     ):
-        """A live domain answers 403 to outsiders; a tombstoned one must not confirm it exists."""
+        """A non-member gets the same 403 as on a live domain, flag or not (#126)."""
         outsider = await self._user(test_session, "outsider")
         domain = await self._tombstoned_domain(test_session, None)
 
         with pytest.raises(HTTPException) as exc_info:
             await get_domain_with_access(
-                domain.id, self._auth(outsider), test_session, include_deleted=True
+                domain.id, self._auth(outsider), test_session, include_deleted=include_deleted
             )
 
-        assert exc_info.value.status_code == 404
-        assert exc_info.value.detail == "Domain not found"
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Access denied to this domain"
 
     @pytest.mark.asyncio
     async def test_include_deleted_is_keyword_only(self, test_session: AsyncSession):
@@ -504,3 +505,51 @@ class TestGetDomainWithAccessTombstones:
             await get_domain_with_access(
                 domain.id, self._auth(superuser), test_session, "owner", True
             )
+
+
+class TestNonMemberAnswerIsDeletionBlind:
+    """Every domain-scoped route answers a non-member identically for a live and
+    a soft-deleted domain (#126), so the status code is never an oracle for
+    whether the domain was deleted.
+    """
+
+    ROUTES = [
+        "/api/v1/domains/{domain_id}",
+        "/api/v1/domains/{domain_id}/members",
+        "/api/v1/domains/{domain_id}/recipients",
+        "/api/v1/domains/{domain_id}/rulesets",
+        "/api/v1/domains/{domain_id}/delivery-log",
+    ]
+
+    SCOPES = [
+        "domains:read",
+        "members:read",
+        "recipients:read",
+        "rules:read",
+        "logs:read",
+    ]
+
+    @pytest.mark.parametrize("route", ROUTES)
+    @pytest.mark.parametrize("include_deleted", [False, True])
+    @pytest.mark.asyncio
+    async def test_same_answer_live_and_deleted(
+        self,
+        app: FastAPI,
+        test_session: AsyncSession,
+        route: str,
+        include_deleted: bool,
+    ):
+        _, _, full_key = await create_user_with_key(test_session, "outsider", scopes=self.SCOPES)
+        live = await create_domain_with_member(test_session, "live-blind.example.com", None)
+        gone = await create_domain_with_member(test_session, "gone-blind.example.com", None)
+        await soft_delete_domain(test_session, gone)
+        await test_session.commit()
+
+        params = {"include_deleted": "true"} if include_deleted else None
+        async with user_client(app, full_key) as client:
+            on_live = await client.get(route.format(domain_id=live.id), params=params)
+            on_tombstone = await client.get(route.format(domain_id=gone.id), params=params)
+
+        assert on_tombstone.status_code == on_live.status_code
+        assert on_tombstone.json()["detail"] == on_live.json()["detail"]
+        assert on_live.status_code == 403

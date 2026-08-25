@@ -545,7 +545,8 @@ async def make_log(
 class TestDeliveryLogOfTombstonedDomain:
     """History of a soft-deleted domain stays reachable to those who could
     delete it (spec §4.6): superusers and owners read it, plain members get
-    the same 404 as for a domain that never existed.
+    the same 404 as for a domain that never existed, and a caller who is not
+    a member at all keeps the 403 it got while the domain was live (#126).
     """
 
     @pytest_asyncio.fixture
@@ -591,6 +592,32 @@ class TestDeliveryLogOfTombstonedDomain:
             response = await client.get(f"/api/v1/delivery-log/{log.id}")
         assert response.status_code == 404
         assert response.json()["detail"] == "Domain not found"
+
+    @pytest.mark.asyncio
+    async def test_get_delivery_log_outsider_gets_403_either_way(
+        self, app: FastAPI, test_session: AsyncSession
+    ):
+        """This route resolves the domain with ``include_deleted`` always on,
+        so it is the one place a non-member could have read the delete off the
+        status code. It answers 403 on both."""
+        live = Domain(domain_name="live-outsider.com", is_enabled=True)
+        gone = Domain(domain_name="gone-outsider.com", is_enabled=True)
+        elsewhere = Domain(domain_name="elsewhere-outsider.com", is_enabled=True)
+        test_session.add_all([live, gone, elsewhere])
+        await test_session.flush()
+        outsider_key = await add_member_with_key(test_session, elsewhere, "outsider", "owner")
+        live_log = await make_log(test_session, live, DeliveryStatus.PENDING)
+        gone_log = await make_log(test_session, gone, DeliveryStatus.PENDING)
+        await soft_delete_domain(test_session, gone)
+        await test_session.commit()
+
+        async with user_client(app, outsider_key) as client:
+            on_live = await client.get(f"/api/v1/delivery-log/{live_log.id}")
+            on_tombstone = await client.get(f"/api/v1/delivery-log/{gone_log.id}")
+
+        assert on_live.status_code == 403
+        assert on_tombstone.status_code == on_live.status_code
+        assert on_tombstone.json()["detail"] == on_live.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_list_delivery_logs_requires_include_deleted(

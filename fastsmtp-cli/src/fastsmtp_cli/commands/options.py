@@ -7,8 +7,9 @@ import typer
 from fastsmtp_cli.client import UNSET, NullableStr
 
 #: ``--include-deleted`` on every list/get that can show tombstones. The server
-#: gates the flag at the delete role for that resource, so a caller below it
-#: gets a 403 whether or not a tombstone exists.
+#: gates the flag at the delete role for that resource: below it a caller with
+#: no access at all gets the same 403 whether or not a tombstone exists, and a
+#: member of the domain gets a 404 once it is deleted.
 IncludeDeleted = Annotated[
     bool,
     typer.Option("--include-deleted", help="Also show deleted (restorable) entries"),

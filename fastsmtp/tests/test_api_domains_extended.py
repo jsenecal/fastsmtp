@@ -670,7 +670,8 @@ class TestDomainSoftDelete:
     ):
         """The flag elevates the role before the lookup: on a live domain a
         non-owner gets 403 whether member or outsider; once tombstoned, the
-        same callers get the not-found answer and the owner sees the row."""
+        members get the not-found answer, the outsider keeps the 403 it got
+        while the domain was live (#126) and the owner sees the row."""
         clients = {role: await client_for(user) for role, user in members.items()}
 
         for role in ("admin", "member", "outsider"):
@@ -681,11 +682,15 @@ class TestDomainSoftDelete:
 
         assert (await auth_client.delete(f"/api/v1/domains/{domain.id}")).status_code == 200
 
-        for role in ("admin", "member", "outsider"):
-            for params in ({}, {"include_deleted": "true"}):
+        for params in ({}, {"include_deleted": "true"}):
+            for role in ("admin", "member"):
                 response = await clients[role].get(f"/api/v1/domains/{domain.id}", params=params)
                 assert response.status_code == 404, (role, params)
                 assert response.json()["detail"] == "Domain not found"
+
+            response = await clients["outsider"].get(f"/api/v1/domains/{domain.id}", params=params)
+            assert response.status_code == 403, params
+            assert response.json()["detail"] == "Access denied to this domain"
 
         response = await clients["owner"].get(f"/api/v1/domains/{domain.id}")
         assert response.status_code == 404
@@ -847,14 +852,19 @@ class TestDomainSoftDelete:
         domain: Domain,
         members: dict[str, User],
     ):
-        """Owner restores; below owner a tombstone is invisible (404, spec s3 step 4)."""
+        """Owner restores; below owner a tombstone is invisible to its members
+        (404, spec s3 step 4) and an outsider keeps its 403 (#126)."""
         clients = {role: await client_for(user) for role, user in members.items()}
         assert (await auth_client.delete(f"/api/v1/domains/{domain.id}")).status_code == 200
 
-        for role in ("admin", "member", "outsider"):
+        for role in ("admin", "member"):
             response = await clients[role].post(f"/api/v1/domains/{domain.id}/restore")
             assert response.status_code == 404, role
             assert response.json()["detail"] == "Domain not found"
+
+        response = await clients["outsider"].post(f"/api/v1/domains/{domain.id}/restore")
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Access denied to this domain"
 
         response = await clients["owner"].post(f"/api/v1/domains/{domain.id}/restore")
         assert response.status_code == 200
