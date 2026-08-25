@@ -1,9 +1,13 @@
 """Tests for CLI configuration management."""
 
+import os
+import stat
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import pytest
+from fastsmtp_cli import config as config_module
 from fastsmtp_cli.config import (
     CLIConfig,
     Profile,
@@ -101,6 +105,70 @@ class TestConfigOperations:
         """Test config path from environment variable."""
         monkeypatch.setenv("FSMTP_CONFIG", "/custom/path/config.toml")
         assert get_config_path() == Path("/custom/path/config.toml")
+
+
+class TestConfigPermissions:
+    """The config file holds API keys in clear, so it must not be readable by others.
+
+    The convention every comparable tool follows - ``~/.aws/credentials``,
+    ``~/.docker/config.json``, ``~/.netrc`` - is 0600 on the file and 0700 on the
+    directory. Relying on the user's umask is not enough: the common 022 leaves the
+    file world-readable.
+    """
+
+    def test_saved_config_is_not_readable_by_others(self, temp_config_dir):
+        """A freshly written config must be 0600."""
+        save_config(CLIConfig(profiles={"p": Profile(api_key="fsmtp_secret")}))
+
+        mode = temp_config_dir.stat().st_mode
+        assert mode & 0o077 == 0, f"config is group/world accessible: {stat.filemode(mode)}"
+
+    def test_created_config_dir_is_not_readable_by_others(self, monkeypatch, tmp_path):
+        """A config directory created by save_config must be 0700."""
+        config_path = tmp_path / "fresh" / "config.toml"
+        monkeypatch.setenv("FSMTP_CONFIG", str(config_path))
+
+        save_config(CLIConfig(profiles={"p": Profile(api_key="fsmtp_secret")}))
+
+        mode = config_path.parent.stat().st_mode
+        assert mode & 0o077 == 0, f"config dir is group/world accessible: {stat.filemode(mode)}"
+
+    def test_existing_loose_config_is_tightened_on_save(self, temp_config_dir):
+        """A config left world-readable by an older version is repaired on the next save.
+
+        Someone whose key already leaked through a 0644 file should not have to
+        notice and chmod it themselves.
+        """
+        temp_config_dir.write_text("default_profile = 'default'\n")
+        temp_config_dir.chmod(0o644)
+
+        save_config(CLIConfig(profiles={"p": Profile(api_key="fsmtp_secret")}))
+
+        mode = temp_config_dir.stat().st_mode
+        assert mode & 0o077 == 0, f"config left permissive: {stat.filemode(mode)}"
+
+    def test_key_is_never_written_through_a_readable_window(self, temp_config_dir):
+        """The file must already be 0600 at the moment the key is written into it.
+
+        Writing first and chmod-ing after leaves a window in which the key sits on
+        disk world-readable, so the mode has to be in place before the content is.
+        This checks the handle being written to, whichever call opened it.
+        """
+        observed: list[int] = []
+        real_dump = config_module.tomli_w.dump
+
+        def spy(data, fp, *args, **kwargs):
+            observed.append(os.fstat(fp.fileno()).st_mode)
+            return real_dump(data, fp, *args, **kwargs)
+
+        with mock.patch.object(config_module.tomli_w, "dump", spy):
+            save_config(CLIConfig(profiles={"p": Profile(api_key="fsmtp_secret")}))
+
+        assert observed, "config was never written"
+        for mode in observed:
+            assert mode & 0o077 == 0, (
+                f"key written into a group/world accessible file: {stat.filemode(mode)}"
+            )
 
 
 class TestProfileManagement:

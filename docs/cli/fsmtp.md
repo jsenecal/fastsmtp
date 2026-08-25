@@ -65,6 +65,17 @@ fsmtp config show --show-keys
 fsmtp config delete myprofile
 ```
 
+Profiles live in `~/.fastsmtp/config.toml`, or wherever `FSMTP_CONFIG` points. The file
+holds API keys in clear, so `fsmtp` creates it `0600` inside a `0700` directory instead of
+leaving the mode to your umask, and tightens the file again on every save. A config
+written by a version before this behaviour existed was created with the umask's mode,
+which is world-readable under the common `022`: run any `fsmtp config set` to have it
+repaired, or check it yourself with `ls -l ~/.fastsmtp/config.toml`.
+
+An existing directory is never re-chmod-ed, since `FSMTP_CONFIG` may point into one
+shared with other things. Keys can also be passed per-invocation with `FSMTP_API_KEY`,
+which overrides the profile and writes nothing to disk.
+
 ## Authentication
 
 ```bash
