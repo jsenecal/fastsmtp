@@ -2,6 +2,12 @@
 
 All configuration is via environment variables with the `FASTSMTP_` prefix.
 
+A `.env` file in the working directory is read as well, and an exported variable
+wins over the same key in the file. It is resolved relative to the directory the
+command is started from, and every command resolves it the same way: `fastsmtp
+serve`, `fastsmtp show-config` and `fastsmtp db upgrade head` run from one shell
+all reach the same database.
+
 ## SMTP Server
 
 | Variable | Default | Description |

@@ -25,7 +25,10 @@ import pytest
 
 
 def _run_cli(
-    environ: dict[str, str], env: dict[str, str], *args: str
+    environ: dict[str, str],
+    env: dict[str, str],
+    *args: str,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``fastsmtp <args>`` with ``env`` as the only FastSMTP configuration.
 
@@ -34,10 +37,14 @@ def _run_cli(
     path, the way a cron job or systemd unit would, so the venv's ``bin`` is
     not on PATH and Alembic has to be found through the interpreter rather
     than by name.
+
+    ``cwd`` is the operator's working directory, which is where a ``.env``
+    is looked up.
     """
     return subprocess.run(
         [sys.executable, "-m", "fastsmtp.cli", *args],
         env={**environ, "PATH": "/usr/bin:/bin", **env},
+        cwd=cwd,
         capture_output=True,
         text=True,
     )
@@ -125,3 +132,71 @@ def test_db_current_is_not_subject_to_the_s3_cross_field_validation(
         "current",
     )
     _assert_succeeded(result)
+
+
+class TestDotenvInTheWorkingDirectory:
+    """``fastsmtp db`` and ``fastsmtp serve`` must read the same configuration
+    from the same shell (issue #114).
+
+    ``_run_alembic`` spawns Alembic with ``cwd`` set to the package directory
+    so ``alembic.ini`` resolves, and settings are loaded from ``.env``
+    relative to the working directory. Without the resolved URL being handed
+    to the child, ``db upgrade head`` migrated the default database while
+    ``serve`` in the same shell used the one the operator configured.
+    """
+
+    @staticmethod
+    def _workdir(tmp_path: Path, database_url: str) -> Path:
+        """An operator working directory holding a ``.env``."""
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        (workdir / ".env").write_text(
+            f"FASTSMTP_DATABASE_URL={database_url}\nFASTSMTP_ROOT_API_KEY=from-dotenv\n"
+        )
+        return workdir
+
+    def test_db_uses_the_database_url_from_the_dotenv(
+        self, scrubbed_environ: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Connecting creates the SQLite file, so its existence proves which
+        database Alembic actually opened."""
+        database_path = tmp_path / "from-dotenv.db"
+        workdir = self._workdir(tmp_path, f"sqlite+aiosqlite:///{database_path}")
+
+        result = _run_cli(scrubbed_environ, {}, "db", "current", cwd=workdir)
+
+        _assert_succeeded(result)
+        assert database_path.exists()
+
+    def test_db_and_show_config_resolve_the_same_url(
+        self, scrubbed_environ: dict[str, str], tmp_path: Path
+    ) -> None:
+        """``show-config`` is what ``serve`` loads; both must name one database."""
+        database_url = f"sqlite+aiosqlite:///{tmp_path}/agreed.db"
+        workdir = self._workdir(tmp_path, database_url)
+
+        # Rich truncates a cell wider than the console, so the table is given
+        # room rather than the assertion being loosened.
+        shown = _run_cli(scrubbed_environ, {"COLUMNS": "250"}, "show-config", cwd=workdir)
+        _assert_succeeded(shown)
+
+        assert database_url in shown.stdout
+
+    def test_an_explicit_environment_variable_still_wins(
+        self, scrubbed_environ: dict[str, str], tmp_path: Path
+    ) -> None:
+        """The usual pydantic-settings precedence: the environment beats ``.env``."""
+        database_path = tmp_path / "from-environ.db"
+        workdir = self._workdir(tmp_path, f"sqlite+aiosqlite:///{tmp_path}/from-dotenv.db")
+
+        result = _run_cli(
+            scrubbed_environ,
+            {"FASTSMTP_DATABASE_URL": f"sqlite+aiosqlite:///{database_path}"},
+            "db",
+            "current",
+            cwd=workdir,
+        )
+
+        _assert_succeeded(result)
+        assert database_path.exists()
+        assert not (tmp_path / "from-dotenv.db").exists()

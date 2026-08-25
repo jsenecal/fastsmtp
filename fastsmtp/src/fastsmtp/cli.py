@@ -17,6 +17,7 @@ needs inside its body.
 """
 
 import asyncio
+import os
 import subprocess
 import sys
 import uuid
@@ -34,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp import __version__
-from fastsmtp.config import Settings, get_settings
+from fastsmtp.config import DatabaseSettings, Settings, get_settings
 from fastsmtp.db.integrity import is_unique_violation, live_value_taken
 from fastsmtp.db.models import Domain, SoftDeleteMixin, User
 
@@ -329,9 +330,25 @@ def _run_alembic(*args):
     # name: it is installed beside us, and a cron job or systemd unit that
     # starts .venv/bin/fastsmtp directly has no venv bin on PATH.
     cmd = [sys.executable, "-m", "alembic", "-c", str(alembic_ini), *args]
-    result = subprocess.run(cmd, cwd=package_dir)
+    result = subprocess.run(cmd, cwd=package_dir, env=_alembic_environ())
     if result.returncode != 0:
         raise typer.Exit(result.returncode)
+
+
+def _alembic_environ() -> dict[str, str]:
+    """The environment for the Alembic child, with the database URL resolved here.
+
+    The child runs from the package directory so ``alembic.ini`` resolves, and
+    ``alembic/env.py`` builds ``DatabaseSettings`` there -- which looks for
+    ``.env`` relative to *its* working directory, not the operator's. A ``.env``
+    beside the shell that ``serve`` honours was therefore invisible to
+    ``fastsmtp db``, which silently migrated the default database instead
+    (issue #114). Resolving the URL in this process, whose working directory is
+    the operator's, and passing it explicitly keeps both commands on one
+    database. An exported ``FASTSMTP_DATABASE_URL`` still wins: it is what
+    ``DatabaseSettings`` here resolves to.
+    """
+    return {**os.environ, "FASTSMTP_DATABASE_URL": DatabaseSettings().database_url}
 
 
 # Soft-delete helpers shared by the user and domain commands
