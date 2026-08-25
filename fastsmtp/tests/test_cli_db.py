@@ -17,6 +17,7 @@ These tests run the real command in a child process with the
 carries is dropped, and only what the test sets is passed through.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -200,3 +201,58 @@ class TestDotenvInTheWorkingDirectory:
         _assert_succeeded(result)
         assert database_path.exists()
         assert not (tmp_path / "from-dotenv.db").exists()
+
+
+class TestAlembicEnvironment:
+    """The same contract as the class above, in process.
+
+    Everything above proves it end to end through a child process, which is
+    where the bug lived and the only place it can be shown; none of it
+    executes a line of ``fastsmtp.cli`` in the test interpreter. These pin the
+    two pieces directly: what the environment is built from, and that
+    ``_run_alembic`` actually hands it to Alembic.
+    """
+
+    def test_the_url_is_resolved_from_the_working_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastsmtp import cli
+
+        (tmp_path / ".env").write_text("FASTSMTP_DATABASE_URL=sqlite+aiosqlite:///from-dotenv.db\n")
+        monkeypatch.delenv("FASTSMTP_DATABASE_URL", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        environ = cli._alembic_environ()
+
+        assert environ["FASTSMTP_DATABASE_URL"] == "sqlite+aiosqlite:///from-dotenv.db"
+        # The rest of the environment is carried through, not replaced.
+        assert environ["PATH"] == os.environ["PATH"]
+
+    def test_run_alembic_hands_that_environment_to_the_child(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastsmtp.db.migrations import alembic_ini_path
+
+        from fastsmtp import cli
+
+        (tmp_path / ".env").write_text("FASTSMTP_DATABASE_URL=sqlite+aiosqlite:///child.db\n")
+        monkeypatch.delenv("FASTSMTP_DATABASE_URL", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        recorded: dict[str, object] = {}
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            recorded["cmd"] = cmd
+            recorded.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+        cli._run_alembic("current")
+
+        # The child still runs from the package directory, so alembic.ini and
+        # the script location resolve; only the environment is new.
+        assert recorded["cwd"] == alembic_ini_path().parent
+        env = recorded["env"]
+        assert isinstance(env, dict)
+        assert env["FASTSMTP_DATABASE_URL"] == "sqlite+aiosqlite:///child.db"
