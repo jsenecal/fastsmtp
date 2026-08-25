@@ -938,6 +938,25 @@ class TestPerDomainAuthPolicy:
         run.enqueue.assert_not_awaited()
         assert _refused_recipients_total() == before
 
+    @pytest.mark.asyncio
+    async def test_two_recipients_on_one_domain_share_its_policy(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """Recipients that share a domain are judged by one resolution of it."""
+        await make_domain(self.STRICT, reject_dkim_fail=True)
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=False)
+        )
+
+        run = await run_smtp_data(
+            handler,
+            self._envelope(f"sales@{self.STRICT}", f"support@{self.STRICT}"),
+            dkim=RESULT_FAIL,
+        )
+
+        assert run.reply == "550 DKIM verification failed"
+        run.enqueue.assert_not_awaited()
+
     # -- a domain that inherits everything answers exactly as before ------
 
     @pytest.mark.asyncio
@@ -1005,4 +1024,23 @@ class TestPerDomainAuthPolicy:
             handler, self._envelope("user@never-configured.test"), dkim=RESULT_FAIL
         )
 
+        assert run.reply == "550 DKIM verification failed"
+
+    @pytest.mark.asyncio
+    async def test_an_envelope_with_no_recipients_still_applies_the_global_policy(
+        self, make_smtp_settings, run_smtp_data
+    ):
+        """With nobody to inherit from, the global policy still decides the message.
+
+        aiosmtpd answers DATA without a RCPT itself, so this is the handler's
+        own guard: no recipient must not mean no policy, which would leave the
+        message unverified and accepted.
+        """
+        handler = FastSMTPHandler(
+            make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=True)
+        )
+
+        run = await run_smtp_data(handler, self._envelope(), dkim=RESULT_FAIL)
+
+        run.dkim.assert_awaited_once()
         assert run.reply == "550 DKIM verification failed"

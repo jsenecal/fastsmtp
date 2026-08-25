@@ -379,9 +379,17 @@ class FastSMTPHandler:
         still decides the message rather than nothing verifying it.
         """
         policies: list[RecipientAuthPolicy] = []
+        # The policy is a property of the domain, and lookup_recipient resolves
+        # the domain from the address's domain part alone, so recipients that
+        # share one need only one query.
+        by_domain_part: dict[str | None, Domain | None] = {}
         async with async_session() as db_session:
             for rcpt_to in rcpt_tos:
-                domain, _recipient, _error = await lookup_recipient(rcpt_to, db_session)
+                domain_part = address_domain(rcpt_to)
+                if domain_part not in by_domain_part:
+                    found, _recipient, _error = await lookup_recipient(rcpt_to, db_session)
+                    by_domain_part[domain_part] = found
+                domain = by_domain_part[domain_part]
                 policies.append(
                     RecipientAuthPolicy(
                         address=rcpt_to,
