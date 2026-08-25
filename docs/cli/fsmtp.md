@@ -2,6 +2,9 @@
 
 The remote CLI connects to a FastSMTP server over HTTPS for remote management. For running the server itself, see the [server CLI](fastsmtp.md).
 
+Every command outside the `config` group takes `--profile/-p <name>` to address a server
+other than the default one, so a single workstation can manage several deployments.
+
 !!! note "Update conventions"
 
     Every `update` command sends only the options you name, so an omitted option
@@ -46,11 +49,17 @@ fsmtp config set myprofile \
   --url https://fastsmtp.example.com \
   --api-key "your-api-key"
 
+# Adjust the request timeout, or skip TLS verification against a self-signed server
+fsmtp config set myprofile --timeout 60 --no-verify-ssl
+
 # Set default profile
 fsmtp config use myprofile
 
-# Show current configuration
+# Show current configuration (API keys are masked)
 fsmtp config show
+
+# Show it with the API keys in clear
+fsmtp config show --show-keys
 
 # Delete a profile
 fsmtp config delete myprofile
@@ -71,6 +80,13 @@ fsmtp auth keys --include-deleted
 
 # Create a new API key (optionally expiring after N days)
 fsmtp auth create-key "CI/CD" --expires 90
+
+# Attach scopes to the key (repeat the option for several). A key created without
+# any scope cannot reach the recipient, rule or delivery-log routes at all
+fsmtp auth create-key "CI/CD" --scope recipients:read --scope logs:read
+
+# A key that should be able to do whatever its owner can
+fsmtp auth create-key "CI/CD" --scope admin
 
 # Rotate an API key (the old key is deleted)
 fsmtp auth rotate-key <key-id>
@@ -230,6 +246,10 @@ fsmtp recipient create <domain-id> https://n8n.example.com/webhook/email \
 fsmtp recipient update <domain-id> <recipient-id> \
   --webhook https://new-webhook.example.com/email
 
+# Stop delivering to a recipient without deleting it, and turn it back on
+fsmtp recipient update <domain-id> <recipient-id> --disabled
+fsmtp recipient update <domain-id> <recipient-id> --enabled
+
 # Clear the local part to turn a recipient into the domain's catch-all
 fsmtp recipient update <domain-id> <recipient-id> --local ''
 
@@ -290,6 +310,15 @@ fsmtp rules rule create <domain-id> <ruleset-id> \
   --action forward \
   --preserve-raw
 
+# Match case-sensitively (the default is --ignore-case)
+fsmtp rules rule create <domain-id> <ruleset-id> \
+  --field subject \
+  --operator contains \
+  --value "URGENT" \
+  --action tag \
+  --tag urgent \
+  --case-sensitive
+
 # Update a rule (rules are addressed by domain, not by ruleset)
 fsmtp rules rule update <domain-id> <rule-id> --action drop
 fsmtp rules rule update <domain-id> <rule-id> --no-preserve-raw
@@ -320,8 +349,15 @@ fsmtp ops health
 # Check server readiness (includes DB)
 fsmtp ops ready
 
-# Test a webhook URL
+# Test a webhook URL with a synthetic payload
 fsmtp ops test-webhook https://webhook.site/xxx
+
+# Control what the test payload says
+fsmtp ops test-webhook https://webhook.site/xxx \
+  --from billing@sender.com \
+  --to invoices@example.com \
+  --subject "Invoice 2025-01" \
+  --body "Payload under test"
 
 # View delivery logs
 fsmtp ops log list <domain-id>

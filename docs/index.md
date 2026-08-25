@@ -14,7 +14,7 @@ A TLS-capable, async SMTP server that receives emails and forwards them to webho
 - **Multi-tenant**: Domain-based isolation with role-based access control
 - **Rate Limiting**: Configurable limits for both API and SMTP (per-IP connection/message limits)
 - **Prometheus Metrics**: `/metrics` endpoint with SMTP, webhook, queue and auth metrics, with optional IP allowlisting
-- **Security**: Webhook header encryption at rest, SSRF protection for webhook URLs
+- **Security**: SSRF protection for webhook URLs, salted API key hashing, scoped API keys
 - **Queue Backpressure**: Configurable limits to prevent unbounded queue growth
 - **Soft Delete**: Deleted users, API keys, domains and recipients are restorable; delivery history survives, permanent removal is a separate superuser step or an optional retention job
 - **Automatic Cleanup**: Background worker for delivery-log and soft-delete retention

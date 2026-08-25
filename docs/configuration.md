@@ -18,6 +18,12 @@ all reach the same database.
 | `FASTSMTP_SMTP_TLS_CERT` | - | Path to TLS certificate |
 | `FASTSMTP_SMTP_TLS_KEY` | - | Path to TLS private key |
 | `FASTSMTP_SMTP_REQUIRE_STARTTLS` | `false` | Enforce STARTTLS |
+| `FASTSMTP_SMTP_MAX_MESSAGE_SIZE` | `10485760` | Largest message accepted, in bytes (10 MB) |
+| `FASTSMTP_SMTP_TLS_HOT_RELOAD` | `false` | Watch the certificate and key files and reload them without a restart |
+| `FASTSMTP_SMTP_TLS_RELOAD_INTERVAL` | `300` | Seconds between hot-reload checks |
+
+Hot reload only starts when both `FASTSMTP_SMTP_TLS_CERT` and `FASTSMTP_SMTP_TLS_KEY`
+are set; without it a renewed certificate is picked up on the next restart.
 
 ## Email Validation
 
@@ -63,6 +69,15 @@ domain:
 |----------|---------|-------------|
 | `FASTSMTP_API_HOST` | `0.0.0.0` | API bind address |
 | `FASTSMTP_API_PORT` | `8000` | API port |
+| `FASTSMTP_CORS_ORIGINS` | *(empty)* | Allowed CORS origins. Empty leaves CORS middleware off entirely |
+
+```bash
+export FASTSMTP_CORS_ORIGINS='["https://console.example.com"]'
+```
+
+Credentials are allowed only for an explicit origin list. `["*"]` still works but
+disables `allow_credentials`, since a wildcard origin with credentials is a
+cross-origin read of anyone's session.
 
 ## Database
 
@@ -71,6 +86,7 @@ domain:
 | `FASTSMTP_DATABASE_URL` | *required* | PostgreSQL or MariaDB connection URL |
 | `FASTSMTP_DATABASE_POOL_SIZE` | `5` | Connection pool size |
 | `FASTSMTP_DATABASE_POOL_MAX_OVERFLOW` | `10` | Max overflow connections |
+| `FASTSMTP_DATABASE_ECHO` | `false` | Log every SQL statement. Development only - it logs query parameters |
 | `FASTSMTP_VERIFY_SCHEMA_ON_STARTUP` | `true` | Refuse to start when the database is behind this build's migrations |
 
 ### Schema version check
@@ -152,6 +168,116 @@ control. Because matching includes subdomains, a dangling DNS record under an al
 parent is a takeover risk - prefer the most specific hostname. Entries are normalized
 before matching: surrounding whitespace and a leading dot are stripped, case is ignored,
 and empty entries are dropped.
+
+## Dead Letter Queue
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_DLQ_WEBHOOK_URL` | - | Webhook notified when a delivery is exhausted. Unset means exhausted deliveries are only recorded in the delivery log |
+
+When every retry of a delivery has failed, its status becomes `exhausted` and a
+notification is posted to this URL with an `X-FastSMTP-Event: dlq` header and a payload
+of the delivery's metadata, not the email itself:
+
+```json
+{
+  "event": "delivery.exhausted",
+  "delivery_id": "5f2c...",
+  "message_id": "<abc123@sender.com>",
+  "domain_id": "9a2e...",
+  "webhook_url": "https://n8n.example.com/webhook/email",
+  "attempts": 5,
+  "last_error": "HTTP 502",
+  "last_status_code": 502,
+  "created_at": "2026-03-07T10:00:00+00:00",
+  "exhausted_at": "2026-03-07T10:31:12+00:00"
+}
+```
+
+The notification is fire-and-forget: a failure to reach the DLQ endpoint is logged and
+changes nothing else. It goes through the same SSRF validation as any other webhook, so a
+DLQ URL on an internal host needs `FASTSMTP_WEBHOOK_ALLOWED_INTERNAL_DOMAINS`. Deliveries
+that end as `cancelled` never reach the DLQ - see
+[Delivery statuses](webhooks.md#delivery-statuses).
+
+## Queue Backpressure
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_QUEUE_MAX_PENDING` | - | Pending deliveries after which new mail is refused. Unset (the default) is unlimited |
+| `FASTSMTP_QUEUE_BACKPRESSURE_ACTION` | `reject` | What to do once the limit is reached: `reject` or `drop` |
+
+`reject` answers the SMTP transaction with `451 Service temporarily unavailable - queue
+full, try again later`, which makes the sending MTA hold the message and retry. `drop`
+answers `250` and discards the message; it protects the queue at the cost of losing mail
+silently, so prefer `reject` unless you are absorbing a flood you would rather not have
+retried at you.
+
+Either way the message counts as `rejected` in
+[`fastsmtp_smtp_messages_total`](monitoring.md#smtp-intake). Alert on
+`fastsmtp_queue_depth{status="pending"}` before it reaches the limit rather than on the
+rejections.
+
+## Delivery Worker
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_WORKER_POLL_INTERVAL` | `1.0` | Seconds the worker waits before looking for work again when the queue is empty |
+| `FASTSMTP_WORKER_BATCH_SIZE` | `10` | Deliveries claimed per poll |
+| `FASTSMTP_INSTANCE_ID` | `$HOSTNAME` | Identifier this process claims deliveries under. Defaults to the hostname, or a random suffix when there is none |
+
+Workers claim deliveries in the database, so several `fastsmtp serve --worker-only`
+processes can run against one database without coordinating. `FASTSMTP_INSTANCE_ID` only
+needs setting when two workers would otherwise share a hostname.
+
+## Rate Limiting
+
+Two independent limiters: the API one is shared across instances through Redis, the SMTP
+one is per-process and in memory.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_REDIS_URL` | - | Redis/Valkey URL for API rate limiting, e.g. `redis://localhost:6379/0` |
+| `FASTSMTP_RATE_LIMIT_ENABLED` | `true` | Enable API rate limiting. Has no effect without `FASTSMTP_REDIS_URL` |
+| `FASTSMTP_RATE_LIMIT_REQUESTS_PER_MINUTE` | `100` | API requests per minute per API key |
+| `FASTSMTP_RATE_LIMIT_AUTH_ATTEMPTS_PER_MINUTE` | `5` | Requests per minute per IP for requests with no usable `X-API-Key` header |
+
+!!! warning "API rate limiting is off until Redis is configured"
+
+    The middleware is only installed when `FASTSMTP_REDIS_URL` is set, so on a default
+    deployment `FASTSMTP_RATE_LIMIT_REQUESTS_PER_MINUTE` does nothing. If Redis is
+    configured but unreachable at request time, requests are allowed rather than
+    refused - the limiter fails open.
+
+`/metrics`, `/api/v1/health` and `/api/v1/ready` are excluded from API rate limiting.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_SMTP_RATE_LIMIT_ENABLED` | `true` | Enable SMTP rate limiting per client IP |
+| `FASTSMTP_SMTP_RATE_LIMIT_CONNECTIONS_PER_MINUTE` | `30` | SMTP connections per minute per IP |
+| `FASTSMTP_SMTP_RATE_LIMIT_MESSAGES_PER_MINUTE` | `60` | Messages per minute per IP |
+| `FASTSMTP_SMTP_RATE_LIMIT_RECIPIENTS_PER_MESSAGE` | `100` | Recipients accepted per message; the next `RCPT TO` is answered `452 Too many recipients` |
+
+SMTP limits need no Redis and are counted per process, so the effective limit for a
+sender is the per-instance limit multiplied by the number of SMTP instances it can reach.
+The recipient cap is the exception twice over: it counts the recipients of one
+transaction, so it holds regardless of how many instances are running, and it is applied
+even when `FASTSMTP_SMTP_RATE_LIMIT_ENABLED` is `false` - that flag only turns off the
+per-IP connection and message buckets.
+Refusals are counted in
+[`fastsmtp_smtp_rate_limited_total`](monitoring.md#smtp-intake).
+
+## Rule Engine
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FASTSMTP_RULES_MAX_BODY_SIZE` | `1048576` | Size of the `body` field a rule sees (1 MB). Longer bodies are truncated for matching only |
+
+The `body` field a rule matches against is the text and HTML parts joined together, and
+it is this joined value that the limit truncates. Truncation is local to rule evaluation
+and changes nothing about what is delivered: the webhook payload still carries the body,
+subject to the webhook size settings above. A `contains` or `regex` rule can therefore
+miss a match that sits past the cut-off. See [Rule Engine](rules.md).
 
 ## Attachment Storage (S3)
 
@@ -271,3 +397,11 @@ and the reverse-proxy caveats.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FASTSMTP_ROOT_API_KEY` | *required* | Root API key for superuser access. Required by `fastsmtp serve`; not read by `fastsmtp db` |
+| `FASTSMTP_API_KEY_HASH_ALGORITHM` | `sha256` | Legacy fallback used only to verify unsalted keys issued by older versions |
+
+The root API key is compared in constant time and is never stored in the database. Issued
+keys are stored as a salted PBKDF2-HMAC-SHA256 hash and never in clear, so
+`FASTSMTP_API_KEY_HASH_ALGORITHM` has no effect on keys created by any current version -
+it only decides how a pre-salting key is verified, and changing it stops those keys from
+authenticating. Rotate the remaining unsalted keys (`fsmtp auth rotate-key`) rather than
+touching it.

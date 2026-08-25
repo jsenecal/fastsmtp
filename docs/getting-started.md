@@ -73,6 +73,9 @@ docker run -d \
 
 ## Docker Compose
 
+Migrations are never applied for you, so the stack runs them in a one-shot `migrate`
+service that the server and worker wait on. It needs only the database URL.
+
 ```yaml
 services:
   postgres:
@@ -89,6 +92,16 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    image: ghcr.io/jsenecal/fastsmtp:latest
+    command: ["fastsmtp", "db", "upgrade", "head"]
+    restart: "no"
+    environment:
+      FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres/fastsmtp
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   fastsmtp:
     image: ghcr.io/jsenecal/fastsmtp:latest
     ports:
@@ -101,8 +114,8 @@ services:
       FASTSMTP_API_HOST: 0.0.0.0
       FASTSMTP_SMTP_HOST: 0.0.0.0
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   worker:
     image: ghcr.io/jsenecal/fastsmtp:latest
@@ -111,14 +124,17 @@ services:
       FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres/fastsmtp
       FASTSMTP_ROOT_API_KEY: ${FASTSMTP_ROOT_API_KEY:?Required}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     deploy:
       replicas: 2
 
 volumes:
   postgres_data:
 ```
+
+Re-run `docker compose up` after pulling a newer image and `migrate` applies whatever is
+pending before the server comes back; on an up-to-date database it is a no-op.
 
 ## Docker Compose with S3 (MinIO)
 
@@ -169,6 +185,16 @@ services:
       exit 0;
       "
 
+  migrate:
+    image: ghcr.io/jsenecal/fastsmtp:latest
+    command: ["fastsmtp", "db", "upgrade", "head"]
+    restart: "no"
+    environment:
+      FASTSMTP_DATABASE_URL: postgresql+asyncpg://fastsmtp:fastsmtp@postgres/fastsmtp
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   fastsmtp:
     image: ghcr.io/jsenecal/fastsmtp:latest
     ports:
@@ -187,8 +213,8 @@ services:
       FASTSMTP_S3_SECRET_KEY: minioadmin
       FASTSMTP_S3_PRESIGNED_URLS: "true"
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       createbucket:
         condition: service_completed_successfully
 
@@ -204,8 +230,8 @@ services:
       FASTSMTP_S3_ACCESS_KEY: minioadmin
       FASTSMTP_S3_SECRET_KEY: minioadmin
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     deploy:
       replicas: 2
 
