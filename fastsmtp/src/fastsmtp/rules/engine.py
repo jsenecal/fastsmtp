@@ -246,35 +246,3 @@ async def evaluate_rules(
     )
 
     return result
-
-
-async def get_domain_auth_settings(
-    session: AsyncSession,
-    domain_id: uuid.UUID,
-) -> tuple[bool | None, bool | None, bool | None, bool | None]:
-    """Get authentication settings for a domain.
-
-    Returns domain-specific settings if set, otherwise falls back to None
-    (caller should use global settings).
-
-    Args:
-        session: Database session
-        domain_id: Domain ID
-
-    Returns:
-        Tuple of (verify_dkim, verify_spf, reject_dkim_fail, reject_spf_fail)
-        Values are None if not overridden at domain level
-    """
-    stmt = select(Domain).where(Domain.id == domain_id)
-    result = await session.execute(stmt)
-    domain = result.scalar_one_or_none()
-
-    if not domain:
-        return None, None, None, None
-
-    return (
-        domain.verify_dkim,
-        domain.verify_spf,
-        domain.reject_dkim_fail,
-        domain.reject_spf_fail,
-    )

@@ -25,6 +25,15 @@ from sqlalchemy import false, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def api_client(app, api_key: str) -> AsyncClient:
+    """A client that talks to ``app`` over ASGI as the holder of ``api_key``."""
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-API-Key": api_key},
+    )
+
+
 class TestDomainMembersExtended:
     """Extended tests for domain member operations."""
 
@@ -143,12 +152,7 @@ class TestDomainAccessControl:
         """Test regular user sees only their domains."""
         user, domain, api_key = non_superuser_with_domain
 
-        transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            headers={"X-API-Key": api_key},
-        ) as user_client:
+        async with api_client(app, api_key) as user_client:
             response = await user_client.get("/api/v1/domains")
             assert response.status_code == 200
             data = response.json()
@@ -168,12 +172,7 @@ class TestDomainAccessControl:
         await test_session.commit()
         await test_session.refresh(other_domain)
 
-        transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            headers={"X-API-Key": api_key},
-        ) as user_client:
+        async with api_client(app, api_key) as user_client:
             response = await user_client.get(f"/api/v1/domains/{other_domain.id}")
             assert response.status_code == 403
             assert "Access denied" in response.json()["detail"]
@@ -231,18 +230,71 @@ class TestDomainRoleHierarchy:
         """Test admin can update domain settings."""
         user, domain, api_key = admin_user_with_domain
 
-        transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            headers={"X-API-Key": api_key},
-        ) as admin_client:
+        async with api_client(app, api_key) as admin_client:
             response = await admin_client.put(
                 f"/api/v1/domains/{domain.id}",
-                json={"verify_dkim": True},
+                json={"is_enabled": False},
             )
             assert response.status_code == 200
-            assert response.json()["verify_dkim"] is True
+            assert response.json()["is_enabled"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "field", ["verify_dkim", "verify_spf", "reject_dkim_fail", "reject_spf_fail"]
+    )
+    async def test_admin_cannot_set_an_authentication_field(
+        self,
+        app,
+        test_session: AsyncSession,
+        admin_user_with_domain: tuple[User, Domain, str],
+        field: str,
+    ):
+        """A domain admin may not opt their domain out of the server-wide policy."""
+        user, domain, api_key = admin_user_with_domain
+
+        async with api_client(app, api_key) as admin_client:
+            response = await admin_client.put(
+                f"/api/v1/domains/{domain.id}",
+                json={field: False},
+            )
+
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert field in detail
+        assert "superuser only" in detail
+        await test_session.refresh(domain)
+        assert getattr(domain, field) is None
+
+    @pytest.mark.asyncio
+    async def test_admin_may_set_an_authentication_field_back_to_inherit(
+        self, app, admin_user_with_domain: tuple[User, Domain, str]
+    ):
+        """An explicit null is not an opt-out: it hands the decision back to the server."""
+        user, domain, api_key = admin_user_with_domain
+
+        async with api_client(app, api_key) as admin_client:
+            response = await admin_client.put(
+                f"/api/v1/domains/{domain.id}",
+                json={"verify_dkim": None},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["verify_dkim"] is None
+
+    @pytest.mark.asyncio
+    async def test_superuser_can_set_the_authentication_fields(
+        self, auth_client: AsyncClient, admin_user_with_domain: tuple[User, Domain, str]
+    ):
+        """The operator keeps the fields the domain admin is refused."""
+        user, domain, _api_key = admin_user_with_domain
+
+        response = await auth_client.put(
+            f"/api/v1/domains/{domain.id}",
+            json={"reject_dkim_fail": True},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["reject_dkim_fail"] is True
 
     @pytest.mark.asyncio
     async def test_admin_cannot_delete_domain(
@@ -251,12 +303,7 @@ class TestDomainRoleHierarchy:
         """Test admin cannot delete domain (requires owner)."""
         user, domain, api_key = admin_user_with_domain
 
-        transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-            headers={"X-API-Key": api_key},
-        ) as admin_client:
+        async with api_client(app, api_key) as admin_client:
             response = await admin_client.delete(f"/api/v1/domains/{domain.id}")
             assert response.status_code == 403
             assert "owner" in response.json()["detail"].lower()
@@ -420,11 +467,7 @@ class TestDomainSoftDelete:
                 )
             )
             await test_session.commit()
-            client = AsyncClient(
-                transport=ASGITransport(app=app),
-                base_url="http://test",
-                headers={"X-API-Key": full_key},
-            )
+            client = api_client(app, full_key)
             clients.append(client)
             return client
 

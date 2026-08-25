@@ -1,11 +1,12 @@
 """Shared request validation helpers for the API."""
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastsmtp.auth import AuthContext
 from fastsmtp.config import Settings
 
 # Re-exported (the redundant alias is the explicit re-export form): the
@@ -86,6 +87,47 @@ def require_s3_for_preservation(settings: Settings) -> None:
             detail=(
                 "Raw message preservation requires S3 storage to be configured. "
                 f"Missing settings: {', '.join(missing)}"
+            ),
+        )
+
+
+#: Domain columns the SMTP receive path acts on before a message is accepted:
+#: they decide which mechanisms are verified and whether a failure is refused.
+SUPERUSER_ONLY_DOMAIN_FIELDS = (
+    "verify_dkim",
+    "verify_spf",
+    "reject_dkim_fail",
+    "reject_spf_fail",
+)
+
+
+def require_superuser_for_auth_overrides(auth: AuthContext, payload: dict[str, Any]) -> None:
+    """Reject a non-superuser setting a domain's DKIM or SPF override.
+
+    ``PUT /domains/{id}`` needs only the domain admin role, and these four
+    columns are a live security control on the operator's own MX: a tenant
+    admin setting ``verify_dkim`` to false would opt their domain out of the
+    server-wide reject policy. Leaving a field out of the payload, or sending
+    it as ``null`` to go back to inheriting, is not an opt-out and stays open
+    to domain admins.
+
+    Args:
+        auth: The caller's authentication context
+        payload: ``model_dump(exclude_unset=True)`` of the request body, so a
+            field the caller did not send is absent here
+
+    Raises:
+        HTTPException: 403 naming the fields the caller may not set
+    """
+    if auth.is_superuser():
+        return
+    attempted = [field for field in SUPERUSER_ONLY_DOMAIN_FIELDS if payload.get(field) is not None]
+    if attempted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "The domain authentication fields are superuser only: "
+                f"{', '.join(attempted)}. Send null to inherit the server-wide setting."
             ),
         )
 

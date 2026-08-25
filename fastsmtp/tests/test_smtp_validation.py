@@ -3,15 +3,19 @@
 import asyncio
 
 import pytest
+from fastsmtp.db.models import Domain
 from fastsmtp.smtp.validation import (
     RESULT_FAIL,
     RESULT_NONE,
     RESULT_PASS,
     RESULT_PERMERROR,
+    RESULT_SOFTFAIL,
     RESULT_TEMPERROR,
+    EffectiveAuthPolicy,
     EmailAuthResult,
     _verify_dkim_sync,
     _verify_spf_sync,
+    resolve_auth_policy,
     validate_email_auth,
     verify_dkim,
     verify_spf,
@@ -384,3 +388,192 @@ class TestSPFEdgeCases:
         )
         # Should use helo as domain since mail_from has no @
         assert domain == "mail.example.com"
+
+
+FLAGS = ("verify_dkim", "verify_spf", "reject_dkim_fail", "reject_spf_fail")
+
+
+def _auth_result(dkim: str = RESULT_NONE, spf: str = RESULT_NONE) -> EmailAuthResult:
+    return EmailAuthResult(
+        dkim_result=dkim,
+        dkim_domain=None,
+        dkim_selector=None,
+        spf_result=spf,
+        spf_domain=None,
+        client_ip="203.0.113.10",
+    )
+
+
+def _policy(make_smtp_settings, **overrides: bool) -> EffectiveAuthPolicy:
+    """The policy of a domain carrying ``overrides``, over default settings."""
+    return resolve_auth_policy(Domain(domain_name="policy.test", **overrides), make_smtp_settings())
+
+
+class TestResolveAuthPolicy:
+    """Tests for resolving a domain's tri-state auth columns against the globals."""
+
+    @pytest.mark.parametrize("global_value", [True, False])
+    @pytest.mark.parametrize("flag", FLAGS)
+    def test_null_column_inherits_the_global_setting(
+        self, make_smtp_settings, flag: str, global_value: bool
+    ):
+        """A column left NULL follows the server-wide setting, whatever it is."""
+        settings = make_smtp_settings(**{f"smtp_{flag}": global_value})
+
+        policy = resolve_auth_policy(Domain(domain_name="inherit.test"), settings)
+
+        assert getattr(policy, flag) is global_value
+
+    @pytest.mark.parametrize("override", [True, False])
+    @pytest.mark.parametrize("flag", FLAGS)
+    def test_column_overrides_the_global_setting(
+        self, make_smtp_settings, flag: str, override: bool
+    ):
+        """A column that is set wins over the global setting in both directions."""
+        settings = make_smtp_settings(**{f"smtp_{flag}": not override})
+
+        policy = resolve_auth_policy(
+            Domain(domain_name="override.test", **{flag: override}), settings
+        )
+
+        assert getattr(policy, flag) is override
+
+    def test_flags_are_resolved_independently(self, make_smtp_settings):
+        """Overriding one flag leaves the other three inheriting."""
+        settings = make_smtp_settings(
+            smtp_verify_dkim=True,
+            smtp_verify_spf=True,
+            smtp_reject_dkim_fail=False,
+            smtp_reject_spf_fail=False,
+        )
+
+        policy = resolve_auth_policy(
+            Domain(domain_name="mixed.test", verify_spf=False, reject_dkim_fail=True), settings
+        )
+
+        assert policy.verify_dkim is True
+        assert policy.verify_spf is False
+        assert policy.reject_dkim_fail is True
+        assert policy.reject_spf_fail is False
+
+    def test_no_domain_is_the_global_policy(self, make_smtp_settings):
+        """An address with no configured domain keeps the server-wide settings."""
+        settings = make_smtp_settings(
+            smtp_verify_dkim=True,
+            smtp_verify_spf=False,
+            smtp_reject_dkim_fail=True,
+            smtp_reject_spf_fail=False,
+        )
+
+        policy = resolve_auth_policy(None, settings)
+
+        assert policy.verify_dkim is True
+        assert policy.verify_spf is False
+        assert policy.reject_dkim_fail is True
+        assert policy.reject_spf_fail is False
+
+
+class TestMaskedResult:
+    """What one recipient domain is shown of the message-level result."""
+
+    @staticmethod
+    def _both_failed() -> EmailAuthResult:
+        return EmailAuthResult(
+            dkim_result=RESULT_FAIL,
+            dkim_domain="signer.test",
+            dkim_selector="s1",
+            spf_result=RESULT_FAIL,
+            spf_domain="envelope.test",
+            client_ip="203.0.113.10",
+        )
+
+    def test_a_domain_verifying_both_sees_the_result_itself(self, make_smtp_settings):
+        """Nothing is copied, and nothing is blanked, for a domain that asked for both."""
+        policy = _policy(make_smtp_settings, verify_dkim=True, verify_spf=True)
+        auth_result = self._both_failed()
+
+        assert policy.masked(auth_result) is auth_result
+
+    def test_an_unverified_mechanism_reads_as_not_checked(self, make_smtp_settings):
+        """Everything DKIM produced is blanked for a domain that opted out of it."""
+        policy = _policy(make_smtp_settings, verify_dkim=False, verify_spf=True)
+
+        masked = policy.masked(self._both_failed())
+
+        assert masked.dkim_result == RESULT_NONE
+        assert masked.dkim_domain is None
+        assert masked.dkim_selector is None
+        assert masked.spf_result == RESULT_FAIL
+        assert masked.spf_domain == "envelope.test"
+
+    def test_masking_spf_leaves_dkim_alone(self, make_smtp_settings):
+        policy = _policy(make_smtp_settings, verify_dkim=True, verify_spf=False)
+
+        masked = policy.masked(self._both_failed())
+
+        assert masked.dkim_result == RESULT_FAIL
+        assert masked.dkim_domain == "signer.test"
+        assert masked.spf_result == RESULT_NONE
+        assert masked.spf_domain is None
+
+    def test_the_message_level_result_is_not_mutated(self, make_smtp_settings):
+        """One recipient's view must not become the next recipient's."""
+        policy = _policy(make_smtp_settings, verify_dkim=False, verify_spf=False)
+        auth_result = self._both_failed()
+
+        policy.masked(auth_result)
+
+        assert auth_result.dkim_result == RESULT_FAIL
+        assert auth_result.spf_result == RESULT_FAIL
+
+    def test_the_client_ip_survives_masking(self, make_smtp_settings):
+        policy = _policy(make_smtp_settings, verify_dkim=False, verify_spf=False)
+
+        assert policy.masked(self._both_failed()).client_ip == "203.0.113.10"
+
+
+class TestRefusedMechanism:
+    """Tests for the per-recipient refusal decision."""
+
+    def test_verified_and_rejecting_refuses_a_failure(self, make_smtp_settings):
+        """A domain that verifies DKIM and rejects failures refuses a fail."""
+        policy = _policy(make_smtp_settings, verify_dkim=True, reject_dkim_fail=True)
+
+        assert policy.refused_mechanism(_auth_result(dkim=RESULT_FAIL)) == "DKIM"
+
+    def test_unverified_mechanism_cannot_refuse(self, make_smtp_settings):
+        """reject_dkim_fail is inert while the domain does not verify DKIM."""
+        policy = _policy(make_smtp_settings, verify_dkim=False, reject_dkim_fail=True)
+
+        assert policy.refused_mechanism(_auth_result(dkim=RESULT_FAIL)) is None
+
+    def test_verified_without_rejecting_does_not_refuse(self, make_smtp_settings):
+        """Verifying a mechanism does not by itself refuse anything."""
+        policy = _policy(make_smtp_settings, verify_dkim=True, reject_dkim_fail=False)
+
+        assert policy.refused_mechanism(_auth_result(dkim=RESULT_FAIL)) is None
+
+    @pytest.mark.parametrize("spf_result", [RESULT_SOFTFAIL, RESULT_NONE, RESULT_PASS])
+    def test_only_a_hard_fail_refuses(self, make_smtp_settings, spf_result: str):
+        """softfail, none and pass are not failures."""
+        policy = _policy(make_smtp_settings, verify_spf=True, reject_spf_fail=True)
+
+        assert policy.refused_mechanism(_auth_result(spf=spf_result)) is None
+
+    def test_spf_refusal_is_named(self, make_smtp_settings):
+        """An SPF-only refusal names SPF."""
+        policy = _policy(make_smtp_settings, verify_spf=True, reject_spf_fail=True)
+
+        assert policy.refused_mechanism(_auth_result(spf=RESULT_FAIL)) == "SPF"
+
+    def test_dkim_is_named_when_both_mechanisms_refuse(self, make_smtp_settings):
+        """With both failing, DKIM is the mechanism reported, as before."""
+        policy = _policy(
+            make_smtp_settings,
+            verify_dkim=True,
+            reject_dkim_fail=True,
+            verify_spf=True,
+            reject_spf_fail=True,
+        )
+
+        assert policy.refused_mechanism(_auth_result(dkim=RESULT_FAIL, spf=RESULT_FAIL)) == "DKIM"

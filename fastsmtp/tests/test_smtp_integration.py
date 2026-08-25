@@ -591,9 +591,14 @@ class TestSMTPAuthSettings:
 
     @pytest.mark.asyncio
     async def test_handler_rejects_dkim_fail_when_configured(
-        self, make_smtp_settings: Callable[..., Settings]
+        self, make_smtp_settings: Callable[..., Settings], session_factory
     ):
-        """Test handler rejects messages with DKIM failure when configured."""
+        """Test handler rejects messages with DKIM failure when configured.
+
+        ``recipient@test.com`` is on no configured domain, so the DATA path
+        resolves it to the global policy - which is what this asserts. The
+        session factory is patched because that resolution reads the database.
+        """
         settings = make_smtp_settings(smtp_verify_dkim=True, smtp_reject_dkim_fail=True)
 
         handler = FastSMTPHandler(settings)
@@ -615,7 +620,10 @@ Body.
 """
 
         # Mock validate_email_auth to return DKIM failure
-        with patch("fastsmtp.smtp.server.validate_email_auth") as mock_auth:
+        with (
+            patch("fastsmtp.smtp.server.async_session", session_factory),
+            patch("fastsmtp.smtp.server.validate_email_auth") as mock_auth,
+        ):
             from fastsmtp.smtp.validation import EmailAuthResult
 
             mock_auth.return_value = EmailAuthResult(
@@ -634,9 +642,13 @@ Body.
 
     @pytest.mark.asyncio
     async def test_handler_rejects_spf_fail_when_configured(
-        self, make_smtp_settings: Callable[..., Settings]
+        self, make_smtp_settings: Callable[..., Settings], session_factory
     ):
-        """Test handler rejects messages with SPF failure when configured."""
+        """Test handler rejects messages with SPF failure when configured.
+
+        Same as the DKIM case above: an unconfigured recipient domain keeps
+        the global policy, and resolving that reads the database.
+        """
         settings = make_smtp_settings(smtp_verify_spf=True, smtp_reject_spf_fail=True)
 
         handler = FastSMTPHandler(settings)
@@ -657,7 +669,10 @@ Subject: Test
 Body.
 """
 
-        with patch("fastsmtp.smtp.server.validate_email_auth") as mock_auth:
+        with (
+            patch("fastsmtp.smtp.server.async_session", session_factory),
+            patch("fastsmtp.smtp.server.validate_email_auth") as mock_auth,
+        ):
             from fastsmtp.smtp.validation import EmailAuthResult
 
             mock_auth.return_value = EmailAuthResult(

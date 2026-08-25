@@ -63,19 +63,25 @@ def _update_flag(option: TriState | None) -> Any:
 
 VerifyDkim = Annotated[
     TriState | None,
-    typer.Option("--verify-dkim", help="Verify DKIM signatures (true/false/inherit)"),
+    typer.Option(
+        "--verify-dkim", help="Verify DKIM signatures (true/false/inherit, superuser only)"
+    ),
 ]
 VerifySpf = Annotated[
     TriState | None,
-    typer.Option("--verify-spf", help="Verify SPF records (true/false/inherit)"),
+    typer.Option("--verify-spf", help="Verify SPF records (true/false/inherit, superuser only)"),
 ]
 RejectDkimFail = Annotated[
     TriState | None,
-    typer.Option("--reject-dkim-fail", help="Reject on DKIM failure (true/false/inherit)"),
+    typer.Option(
+        "--reject-dkim-fail", help="Reject on DKIM failure (true/false/inherit, superuser only)"
+    ),
 ]
 RejectSpfFail = Annotated[
     TriState | None,
-    typer.Option("--reject-spf-fail", help="Reject on SPF failure (true/false/inherit)"),
+    typer.Option(
+        "--reject-spf-fail", help="Reject on SPF failure (true/false/inherit, superuser only)"
+    ),
 ]
 PreserveRawMessage = Annotated[
     TriState | None,

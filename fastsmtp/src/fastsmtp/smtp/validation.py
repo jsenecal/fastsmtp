@@ -2,12 +2,16 @@
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import dkim
 import spf
+
+if TYPE_CHECKING:
+    from fastsmtp.config import Settings
+    from fastsmtp.db.models import Domain
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +24,22 @@ RESULT_NONE = "none"
 RESULT_TEMPERROR = "temperror"
 RESULT_PERMERROR = "permerror"
 
+# Mechanism names, as they are reported to an operator and to a sender: they
+# are part of the "550 <mechanism> verification failed" reply, so they are
+# spelled once here rather than in every module that names one.
+MECHANISM_DKIM = "DKIM"
+MECHANISM_SPF = "SPF"
 
-@dataclass
+
+@dataclass(frozen=True)
 class EmailAuthResult:
-    """Results of email authentication validation."""
+    """Results of email authentication validation.
+
+    Frozen because one result is computed for the whole message and then
+    shared: :meth:`EffectiveAuthPolicy.masked` hands the same instance to
+    every recipient whose domain verifies both mechanisms, so a mutation
+    would follow the message to recipients that never asked for it.
+    """
 
     dkim_result: str  # pass, fail, none, temperror, permerror
     dkim_domain: str | None
@@ -46,6 +62,91 @@ class EmailAuthResult:
     def spf_failed(self) -> bool:
         """Check if SPF verification explicitly failed (not softfail/neutral/none)."""
         return self.spf_result == RESULT_FAIL
+
+
+@dataclass(frozen=True)
+class EffectiveAuthPolicy:
+    """The DKIM and SPF policy in force for one recipient domain.
+
+    Every flag is already resolved: the domain's own override where it has
+    one, the server-wide setting where the column is NULL.
+    """
+
+    verify_dkim: bool
+    verify_spf: bool
+    reject_dkim_fail: bool
+    reject_spf_fail: bool
+
+    def masked(self, auth_result: EmailAuthResult) -> EmailAuthResult:
+        """``auth_result`` as this domain is entitled to see it.
+
+        A mechanism is verified once for the whole message if *any* recipient
+        domain asks for it, so a domain that set ``verify_dkim`` to false can
+        be handed a DKIM decision it never asked for. Everything such a
+        mechanism produced is blanked back to "not checked" here, so the
+        domain's rules match ``dkim_result`` as ``none`` and its webhook
+        payload and delivery log record the same.
+
+        Returns ``auth_result`` itself when the domain verifies both
+        mechanisms; nothing mutates it.
+        """
+        if self.verify_dkim and self.verify_spf:
+            return auth_result
+        return replace(
+            auth_result,
+            dkim_result=auth_result.dkim_result if self.verify_dkim else RESULT_NONE,
+            dkim_domain=auth_result.dkim_domain if self.verify_dkim else None,
+            dkim_selector=auth_result.dkim_selector if self.verify_dkim else None,
+            spf_result=auth_result.spf_result if self.verify_spf else RESULT_NONE,
+            spf_domain=auth_result.spf_domain if self.verify_spf else None,
+        )
+
+    def refused_mechanism(self, auth_result: EmailAuthResult) -> str | None:
+        """Name the mechanism this policy refuses the message on, if any.
+
+        The decision is made on what this domain is shown (:meth:`masked`),
+        which is why a domain that does not verify a mechanism cannot reject
+        on it: the result it would be judging was never computed for it, and
+        ``fail`` there would mean "another recipient's domain asked for this
+        check", not anything this domain decided.
+
+        DKIM is reported ahead of SPF when both refuse, so a message that
+        fails everything is refused with the reply it always was.
+        """
+        visible = self.masked(auth_result)
+        if self.reject_dkim_fail and visible.dkim_result == RESULT_FAIL:
+            return MECHANISM_DKIM
+        if self.reject_spf_fail and visible.spf_result == RESULT_FAIL:
+            return MECHANISM_SPF
+        return None
+
+
+def resolve_auth_policy(domain: "Domain | None", settings: "Settings") -> EffectiveAuthPolicy:
+    """Resolve a recipient domain's auth policy against the global settings.
+
+    The four ``Domain`` columns are tri-state: NULL inherits the matching
+    ``FASTSMTP_SMTP_*`` setting, true and false override it. ``domain`` is
+    None for an address that resolves to no configured domain -- never
+    configured, or tombstoned between RCPT and DATA -- which keeps the global
+    policy, exactly as before domains could override anything.
+
+    Takes the loaded row rather than an id so the receive path, which already
+    holds it, does not pay for a second query.
+    """
+
+    def resolve(override: bool | None, default: bool) -> bool:
+        return default if override is None else bool(override)
+
+    return EffectiveAuthPolicy(
+        verify_dkim=resolve(domain.verify_dkim if domain else None, settings.smtp_verify_dkim),
+        verify_spf=resolve(domain.verify_spf if domain else None, settings.smtp_verify_spf),
+        reject_dkim_fail=resolve(
+            domain.reject_dkim_fail if domain else None, settings.smtp_reject_dkim_fail
+        ),
+        reject_spf_fail=resolve(
+            domain.reject_spf_fail if domain else None, settings.smtp_reject_spf_fail
+        ),
+    )
 
 
 def _verify_dkim_sync(message: bytes) -> tuple[str, str | None, str | None]:

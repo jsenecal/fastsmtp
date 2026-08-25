@@ -25,7 +25,6 @@ from fastsmtp.rules.engine import (
     evaluate_rule,
     evaluate_rules,
     extract_field_value,
-    get_domain_auth_settings,
 )
 from fastsmtp.smtp.validation import EmailAuthResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -636,46 +635,6 @@ class TestEvaluateRulesAsync:
         )
 
         assert result.should_drop is True
-
-
-class TestGetDomainAuthSettings:
-    """Tests for get_domain_auth_settings function."""
-
-    @pytest_asyncio.fixture
-    async def domain_with_auth_settings(self, test_session: AsyncSession) -> Domain:
-        """Create a domain with custom auth settings."""
-        domain = Domain(
-            domain_name="auth-settings-test.com",
-            is_enabled=True,
-            verify_dkim=True,
-            verify_spf=False,
-            reject_dkim_fail=True,
-            reject_spf_fail=False,
-        )
-        test_session.add(domain)
-        await test_session.commit()
-        await test_session.refresh(domain)
-        return domain
-
-    @pytest.mark.asyncio
-    async def test_get_auth_settings(
-        self, test_session: AsyncSession, domain_with_auth_settings: Domain
-    ):
-        """Test getting domain auth settings."""
-        verify_dkim, verify_spf, reject_dkim, reject_spf = await get_domain_auth_settings(
-            test_session, domain_with_auth_settings.id
-        )
-        assert verify_dkim is True
-        assert verify_spf is False
-        assert reject_dkim is True
-        assert reject_spf is False
-
-    @pytest.mark.asyncio
-    async def test_get_auth_settings_not_found(self, test_session: AsyncSession):
-        """Test getting auth settings for non-existent domain."""
-        fake_id = uuid.uuid4()
-        result = await get_domain_auth_settings(test_session, fake_id)
-        assert result == (None, None, None, None)
 
 
 class TestPreserveRawRules:

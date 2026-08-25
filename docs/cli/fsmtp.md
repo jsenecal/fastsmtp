@@ -181,6 +181,22 @@ fsmtp domain member update <domain-id> <user-id> --role member
 fsmtp domain member remove <domain-id> <user-id>
 ```
 
+!!! note "The authentication flags are superuser only, and apply at receive time"
+
+    `--verify-dkim`, `--verify-spf`, `--reject-dkim-fail` and `--reject-spf-fail` each
+    take `true`, `false` or `inherit`, and only a superuser may set one to `true` or
+    `false`: the server answers `403` to a domain admin, since these decide whether the
+    operator's own MX checks and rejects mail for that domain. `inherit` clears the
+    override so the domain follows the server-wide `FASTSMTP_SMTP_*` setting and is
+    open to domain admins; leaving the option off a `domain update` leaves that setting
+    alone. Whatever a domain ends up with decides what happens to mail addressed to it:
+    a check runs for a message if any recipient's domain verifies that mechanism, only
+    the domains that asked for it see the result, and a domain only rejects on a
+    mechanism it also verifies, so `--reject-dkim-fail true --verify-dkim false`
+    rejects nothing. A message with recipients on several domains is refused for
+    everyone as soon as one of those domains refuses it. See
+    [Per-domain overrides](../configuration.md#per-domain-overrides).
+
 !!! note "Raw preservation needs S3"
 
     `--preserve-raw-message true` is rejected with a 422 when the server has no S3
