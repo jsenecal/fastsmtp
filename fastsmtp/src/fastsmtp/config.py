@@ -332,6 +332,25 @@ class Settings(DatabaseSettings):
             missing.append("s3_secret_key")
         return missing
 
+    def raw_preservation_unavailable(self) -> str | None:
+        """Why raw message preservation cannot be enabled, or ``None`` if it can.
+
+        The per-domain and per-rule flags are stored in the database but acted
+        on by the SMTP server, so one set while S3 is unconfigured is accepted
+        and then silently does nothing. Both writers of those flags refuse it:
+        the API turns this into a 422 (``api.validation``) and the server CLI
+        prints it and exits 1. The condition and the wording live here so the
+        two cannot drift, and so the CLI does not have to import FastAPI to
+        ask the question.
+        """
+        missing = self.missing_s3_settings()
+        if not missing:
+            return None
+        return (
+            "Raw message preservation requires S3 storage to be configured. "
+            f"Missing settings: {', '.join(missing)}"
+        )
+
     @model_validator(mode="after")
     def validate_metrics_access(self) -> "Settings":
         """Reject malformed metrics access entries at startup.
