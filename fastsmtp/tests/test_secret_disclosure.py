@@ -98,6 +98,39 @@ class TestTheCommandLineNeverPrintsIt:
         assert "postgresql+asyncpg://" in result.stdout
         assert "***" in result.stdout
 
+    def test_show_config_redaction_runs_in_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The same assertion as above, in this process rather than a child.
+
+        The subprocess test is the honest one: it runs the real entry point the
+        way an operator does. But nothing it executes is visible to coverage, so
+        the branch that does the redacting looked untested and would have been
+        free to rot. This drives the same code through Typer's runner in-process
+        so the rendering path is actually exercised where it can be seen.
+
+        Both are kept deliberately. Drop the subprocess one and the end-to-end
+        guarantee goes; drop this one and the redaction is only ever run where
+        no tool is watching.
+        """
+        from fastsmtp.config import clear_settings_cache
+        from typer.testing import CliRunner
+
+        from fastsmtp import cli
+
+        monkeypatch.setenv("FASTSMTP_DATABASE_URL", DATABASE_URL)
+        monkeypatch.setenv("FASTSMTP_ROOT_API_KEY", "root-key")
+        monkeypatch.setenv("COLUMNS", "250")
+        clear_settings_cache()
+
+        try:
+            result = CliRunner().invoke(cli.app, ["show-config"])
+
+            assert result.exit_code == 0, result.output
+            assert PASSWORD not in result.output
+            assert "postgresql+asyncpg://" in result.output
+            assert "***" in result.output
+        finally:
+            clear_settings_cache()
+
     def test_typer_does_not_render_frame_locals(self) -> None:
         """The class-wide defence, pinned so it is not turned back on.
 

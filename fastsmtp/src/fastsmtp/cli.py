@@ -289,7 +289,12 @@ def show_config():
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
 
-    for field_name in settings.model_fields:
+    # On the class, not the instance: pydantic 2.11 deprecates the instance
+    # attribute and V3 removes it. Under this repo's warnings-as-errors the
+    # instance form does not warn, it raises - so `show-config` exited 1 with an
+    # empty table. It looked healthy only because the one test that ran it did
+    # so in a child process, where the warning is not fatal.
+    for field_name in type(settings).model_fields:
         value = getattr(settings, field_name)
         # Hide sensitive values
         if field_name == "database_url":
