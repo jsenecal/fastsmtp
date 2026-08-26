@@ -29,9 +29,9 @@ from typing import Any
 
 import pytest
 from cli_harness import Db
-from fastsmtp.config import clear_settings_cache
 from fastsmtp.crypto import DecryptionError, build_cipher, decrypt_json, is_encrypted
-from fastsmtp.db.models import Domain, Recipient
+from fastsmtp.db.enums import DeliveryStatus
+from fastsmtp.db.models import DeliveryLog, Domain, Recipient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,26 +39,6 @@ KEY_A = "key-alpha-0000000000000000000000"
 KEY_B = "key-bravo-0000000000000000000000"
 
 HEADERS = {"Authorization": "Bearer secret-token", "X-Tenant": "acme"}
-
-
-@pytest.fixture
-def keys():
-    """Configure ``FASTSMTP_ENCRYPTION_KEYS``, as an operator's environment would.
-
-    Its own MonkeyPatch context, so the settings cache can be cleared *after*
-    the variable is restored - a cached Settings carrying a test key would
-    otherwise leak into every later test in the session.
-    """
-    with pytest.MonkeyPatch.context() as mp:
-
-        def apply(*values: str) -> None:
-            mp.setenv("FASTSMTP_ENCRYPTION_KEYS", json.dumps(list(values)))
-            clear_settings_cache()
-
-        apply()
-        yield apply
-
-    clear_settings_cache()
 
 
 # --- seeding and inspection ---------------------------------------------------
@@ -116,6 +96,45 @@ def raw_headers(db: Db, recipient_id: uuid.UUID) -> dict[str, Any]:
     return db(go)
 
 
+def seed_delivery_log(
+    db: Db, domain_id: uuid.UUID, recipient_id: uuid.UUID, payload: dict[str, Any]
+) -> uuid.UUID:
+    """One delivery-log row, written through the ORM so the column type applies."""
+
+    async def go(session: AsyncSession) -> uuid.UUID:
+        log = DeliveryLog(
+            domain_id=domain_id,
+            recipient_id=recipient_id,
+            message_id=f"<{uuid.uuid4()}@example.com>",
+            webhook_url="https://hooks.example.com/inbound",
+            payload_hash="unused-by-this-test",
+            payload=payload,
+            status=DeliveryStatus.PENDING.value,
+            attempts=0,
+            instance_id="test-instance",
+        )
+        session.add(log)
+        await session.flush()
+        return log.id
+
+    return db(go)
+
+
+def raw_payload(db: Db, log_id: uuid.UUID) -> dict[str, Any]:
+    """The stored payload, straight from the column, with no decryption."""
+
+    async def go(session: AsyncSession) -> dict[str, Any]:
+        result = await session.execute(
+            text("SELECT payload::text FROM delivery_log WHERE id = CAST(:id AS uuid)"),
+            {"id": str(log_id)},
+        )
+        stored = json.loads(result.scalar_one())
+        assert isinstance(stored, dict)
+        return stored
+
+    return db(go)
+
+
 def orm_headers(db: Db, recipient_id: uuid.UUID) -> dict[str, Any]:
     """The headers as the application sees them, decrypted by the column type."""
 
@@ -130,7 +149,7 @@ def orm_headers(db: Db, recipient_id: uuid.UUID) -> dict[str, Any]:
 # --- tests --------------------------------------------------------------------
 
 
-def test_refuses_without_a_key(db: Db, keys, run) -> None:
+def test_refuses_without_a_key(db: Db, configure_keys, run) -> None:
     """No key means no cipher: fail, name the setting, and leave the row alone."""
     domain_id = seed_domain(db)
     recipient_id = seed_recipient(db, domain_id, "alice", HEADERS)
@@ -142,7 +161,7 @@ def test_refuses_without_a_key(db: Db, keys, run) -> None:
     assert raw_headers(db, recipient_id) == HEADERS
 
 
-def test_plaintext_row_is_written_back_as_an_envelope(db: Db, keys, run) -> None:
+def test_plaintext_row_is_written_back_as_an_envelope(db: Db, configure_keys, run) -> None:
     """The raw column must change; the application's view of it must not.
 
     The raw assertion is the load-bearing one. The ORM hands back plaintext on
@@ -153,7 +172,7 @@ def test_plaintext_row_is_written_back_as_an_envelope(db: Db, keys, run) -> None
     recipient_id = seed_recipient(db, domain_id, "alice", HEADERS)
     assert raw_headers(db, recipient_id) == HEADERS
 
-    keys(KEY_A)
+    configure_keys(KEY_A)
     exit_code, output = run("encrypt-existing")
 
     assert exit_code == 0, output
@@ -164,11 +183,11 @@ def test_plaintext_row_is_written_back_as_an_envelope(db: Db, keys, run) -> None
     assert orm_headers(db, recipient_id) == HEADERS
 
 
-def test_dry_run_writes_nothing(db: Db, keys, run) -> None:
+def test_dry_run_writes_nothing(db: Db, configure_keys, run) -> None:
     domain_id = seed_domain(db)
     recipient_id = seed_recipient(db, domain_id, "alice", HEADERS)
 
-    keys(KEY_A)
+    configure_keys(KEY_A)
     exit_code, output = run("encrypt-existing", "--dry-run")
 
     assert exit_code == 0, output
@@ -176,9 +195,9 @@ def test_dry_run_writes_nothing(db: Db, keys, run) -> None:
     assert raw_headers(db, recipient_id) == HEADERS
 
 
-def test_rotation_lets_the_old_key_be_dropped(db: Db, keys, run) -> None:
+def test_rotation_lets_the_old_key_be_dropped(db: Db, configure_keys, run) -> None:
     """Row written under A, run with [B, A]: B alone must read it afterwards."""
-    keys(KEY_A)
+    configure_keys(KEY_A)
     domain_id = seed_domain(db)
     recipient_id = seed_recipient(db, domain_id, "alice", HEADERS)
 
@@ -187,7 +206,7 @@ def test_rotation_lets_the_old_key_be_dropped(db: Db, keys, run) -> None:
     with pytest.raises(DecryptionError):
         decrypt_json(raw_headers(db, recipient_id), only_b)
 
-    keys(KEY_B, KEY_A)
+    configure_keys(KEY_B, KEY_A)
     exit_code, output = run("encrypt-existing")
 
     assert exit_code == 0, output
@@ -196,14 +215,14 @@ def test_rotation_lets_the_old_key_be_dropped(db: Db, keys, run) -> None:
     assert decrypt_json(stored, only_b) == HEADERS
 
 
-def test_unreadable_row_fails_without_overwriting(db: Db, keys, run) -> None:
+def test_unreadable_row_fails_without_overwriting(db: Db, configure_keys, run) -> None:
     """A key dropped too early is reported, not written over with a new envelope."""
-    keys(KEY_A)
+    configure_keys(KEY_A)
     domain_id = seed_domain(db)
     recipient_id = seed_recipient(db, domain_id, "alice", HEADERS)
     before = raw_headers(db, recipient_id)
 
-    keys(KEY_B)
+    configure_keys(KEY_B)
     exit_code, output = run("encrypt-existing")
 
     assert exit_code == 1
@@ -211,11 +230,11 @@ def test_unreadable_row_fails_without_overwriting(db: Db, keys, run) -> None:
     assert raw_headers(db, recipient_id) == before
 
 
-def test_empty_headers_are_encrypted_too(db: Db, keys, run) -> None:
+def test_empty_headers_are_encrypted_too(db: Db, configure_keys, run) -> None:
     domain_id = seed_domain(db)
     recipient_id = seed_recipient(db, domain_id, "alice", {})
 
-    keys(KEY_A)
+    configure_keys(KEY_A)
     exit_code, output = run("encrypt-existing")
 
     assert exit_code == 0, output
@@ -223,12 +242,12 @@ def test_empty_headers_are_encrypted_too(db: Db, keys, run) -> None:
     assert orm_headers(db, recipient_id) == {}
 
 
-def test_summary_counts_split_clear_from_already_encrypted(db: Db, keys, run) -> None:
+def test_summary_counts_split_clear_from_already_encrypted(db: Db, configure_keys, run) -> None:
     domain_id = seed_domain(db)
     seed_recipient(db, domain_id, "alice", HEADERS)
     seed_recipient(db, domain_id, "bob", HEADERS)
 
-    keys(KEY_A)
+    configure_keys(KEY_A)
     already = seed_recipient(db, domain_id, "carol", HEADERS)
     assert is_encrypted(raw_headers(db, already))
 
@@ -241,12 +260,12 @@ def test_summary_counts_split_clear_from_already_encrypted(db: Db, keys, run) ->
     )
 
 
-def test_every_row_is_converted_across_batches(db: Db, keys, run) -> None:
+def test_every_row_is_converted_across_batches(db: Db, configure_keys, run) -> None:
     """Batching is pagination, not a limit: a batch smaller than the table still finishes."""
     domain_id = seed_domain(db)
     recipient_ids = [seed_recipient(db, domain_id, f"user{n}", HEADERS) for n in range(3)]
 
-    keys(KEY_A)
+    configure_keys(KEY_A)
     exit_code, output = run("encrypt-existing", "--batch-size", "1")
 
     assert exit_code == 0, output
@@ -255,9 +274,38 @@ def test_every_row_is_converted_across_batches(db: Db, keys, run) -> None:
         assert is_encrypted(raw_headers(db, recipient_id))
 
 
-def test_empty_table_reports_zero(db: Db, keys, run) -> None:
-    keys(KEY_A)
+def test_empty_table_reports_zero(db: Db, configure_keys, run) -> None:
+    configure_keys(KEY_A)
     exit_code, output = run("encrypt-existing")
 
     assert exit_code == 0, output
     assert "(0 examined)" in output
+
+
+def test_delivery_log_payloads_are_left_alone(db: Db, configure_keys, run) -> None:
+    """The backfill is recipients-only on purpose, and that is worth pinning.
+
+    ``delivery_log.payload`` is encrypted at rest too, but its rows are never
+    rewritten: the table is append-only and retention deletes each row after
+    ``FASTSMTP_DELIVERY_LOG_RETENTION_DAYS``, so payloads written before a key
+    existed age out on their own. Converting them would mean rewriting every
+    retained row - millions on a busy server - to reach a state that arrives by
+    itself inside the retention window.
+
+    So this asserts an absence, which only means something if the reason is
+    written down: if someone later teaches the command to walk delivery logs,
+    this test fails and they have to decide that deliberately rather than
+    inherit it.
+    """
+    domain_id = seed_domain(db)
+    recipient_id = seed_recipient(db, domain_id, "alice", HEADERS)
+    log_id = seed_delivery_log(db, domain_id, recipient_id, {"subject": "before the key"})
+
+    configure_keys(KEY_A)
+    exit_code, output = run("encrypt-existing")
+
+    assert exit_code == 0, output
+    assert is_encrypted(raw_headers(db, recipient_id)), "the recipient should have converted"
+    assert raw_payload(db, log_id) == {"subject": "before the key"}, (
+        "the delivery log payload should have been left exactly as it was"
+    )

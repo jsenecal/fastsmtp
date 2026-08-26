@@ -216,10 +216,12 @@ fastsmtp encrypt-existing --dry-run
 fastsmtp encrypt-existing --batch-size 200
 ```
 
-Backfills [webhook header encryption](../configuration.md#webhook-header-encryption)
-onto recipients that already existed before a key was configured, and carries a key
-rotation once the new key is in place. See that section for the required rollout and
-rotation order.
+Backfills [encryption at rest](../configuration.md#encryption-at-rest) onto recipients
+that already existed before a key was configured, and carries a key rotation once the new
+key is in place. See that section for the required rollout and rotation order.
+
+Recipients only - it does not touch `delivery_log.payload`, which has no backfill by
+design. See [Encryption at Rest](../configuration.md#encryption-at-rest) for why.
 
 - With no key configured it exits `1`, naming `FASTSMTP_ENCRYPTION_KEYS`.
 - Default batch size 500, one transaction per batch.
