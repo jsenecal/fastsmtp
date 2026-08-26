@@ -22,6 +22,7 @@ import sys
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
@@ -33,13 +34,13 @@ from rich.table import Table
 from sqlalchemy import CursorResult, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
 from fastsmtp import __version__
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.integrity import is_unique_violation, live_value_taken
-from fastsmtp.db.migrations import alembic_config
+from fastsmtp.db.migrations import SchemaRevisionError, alembic_config
 from fastsmtp.db.models import Domain, SoftDeleteMixin, User
 
 app = typer.Typer(
@@ -115,6 +116,28 @@ def _cleanup_worker_started_line(settings: Settings) -> str:
     )
 
 
+async def _run_startup_guards(settings: Settings) -> None:
+    """Refuse to start against a database this process cannot serve.
+
+    The checks themselves are ``db.startup``, shared with the API lifespan;
+    this is the CLI's half of the arrangement, which is how a failure is
+    reported. A stale schema or an unreadable encrypted column is an operator
+    error, so it is a console message and exit 1 rather than a traceback.
+
+    Called from ``serve`` because the lifespan runs only when uvicorn does:
+    ``--worker-only`` and ``--smtp-only`` reached the database with no check at
+    all (issue #138), and the worker is the component that most needs the
+    encrypted headers, since it is what sends them.
+    """
+    from fastsmtp.db.encryption_guard import EncryptionKeyMissingError
+    from fastsmtp.db.startup import verify_database_is_serviceable
+
+    try:
+        await verify_database_is_serviceable(settings)
+    except (SchemaRevisionError, EncryptionKeyMissingError) as exc:
+        raise _fail(str(exc)) from exc
+
+
 @app.command()
 def serve(
     smtp_only: bool = typer.Option(False, "--smtp-only", help="Run only SMTP server"),
@@ -130,10 +153,6 @@ def serve(
     import uvicorn
 
     from fastsmtp.config import get_settings
-    from fastsmtp.db.encryption_guard import (
-        EncryptionKeyMissingError,
-        verify_encryption_key_is_configured,
-    )
     from fastsmtp.smtp import SMTPServer
     from fastsmtp.webhook import WebhookWorker
 
@@ -202,21 +221,8 @@ def serve(
             # Windows doesn't support add_signal_handler
             pass
 
-        # Refuse a database holding encrypted columns this process cannot read,
-        # before any component starts. This lives here rather than only in the
-        # API lifespan because the lifespan runs only when uvicorn does: a
-        # --worker-only process would otherwise skip the check entirely, and the
-        # worker is the component that most needs those headers, since it is what
-        # sends them. (The same gap applies to the schema check; see issue #138.)
-        if settings.verify_encryption_on_startup:
-            guard_engine = create_async_engine(settings.database_dsn)
-            try:
-                await verify_encryption_key_is_configured(guard_engine)
-            except EncryptionKeyMissingError as e:
-                console.print(f"[red]{e}[/red]")
-                raise typer.Exit(1) from e
-            finally:
-                await guard_engine.dispose()
+        # Every mode of serve, before any component starts.
+        await _run_startup_guards(settings)
 
         tasks = []
 
@@ -801,6 +807,127 @@ def domain_create(
             console.print(f"[green]Created domain '{domain_name}' (ID: {domain.id})[/green]")
 
     run_async(create())
+
+
+class TriState(str, Enum):
+    """A per-domain override of a server-wide boolean setting.
+
+    ``inherit`` clears the override so the domain follows the server default;
+    leaving the option off entirely means "don't touch this setting". Spelled
+    exactly as ``fsmtp domain update`` spells it: the two CLIs write the same
+    nullable columns and an operator should not have to learn it twice.
+    """
+
+    true = "true"
+    false = "false"
+    inherit = "inherit"
+
+
+def _tri_state_value(option: TriState) -> bool | None:
+    """The column value a tri-state option asks for; ``inherit`` is SQL NULL."""
+    if option is TriState.true:
+        return True
+    if option is TriState.false:
+        return False
+    return None
+
+
+def _flag_text(value: bool | None) -> str:
+    """Render a written flag back in the words the options use."""
+    return "inherit" if value is None else str(value).lower()
+
+
+# Option names and help mirror fsmtp's, minus its "superuser only" note: that
+# describes who the API lets set these, and a local CLI has no caller to check.
+# The command's own help says what that means here.
+VerifyDkim = Annotated[
+    TriState | None,
+    typer.Option("--verify-dkim", help="Verify DKIM signatures (true/false/inherit)"),
+]
+VerifySpf = Annotated[
+    TriState | None,
+    typer.Option("--verify-spf", help="Verify SPF records (true/false/inherit)"),
+]
+RejectDkimFail = Annotated[
+    TriState | None,
+    typer.Option("--reject-dkim-fail", help="Reject on DKIM failure (true/false/inherit)"),
+]
+RejectSpfFail = Annotated[
+    TriState | None,
+    typer.Option("--reject-spf-fail", help="Reject on SPF failure (true/false/inherit)"),
+]
+PreserveRawMessage = Annotated[
+    TriState | None,
+    typer.Option(
+        "--preserve-raw-message",
+        help="Preserve the raw MIME message in S3 (true/false/inherit)",
+    ),
+]
+Enable = Annotated[
+    bool | None,
+    typer.Option("--enable/--disable", help="Enable or disable the domain"),
+]
+
+
+@domain_app.command("update")
+def domain_update(
+    domain_name: str = typer.Argument(..., help="Domain name"),
+    enable: Enable = None,
+    verify_dkim: VerifyDkim = None,
+    verify_spf: VerifySpf = None,
+    reject_dkim_fail: RejectDkimFail = None,
+    reject_spf_fail: RejectSpfFail = None,
+    preserve_raw_message: PreserveRawMessage = None,
+):
+    """Change a domain's settings. At least one option is required.
+
+    The five override options take true, false or inherit: inherit clears the
+    override so the domain follows the server-wide setting, which is a
+    different state from false. An option not given leaves that setting alone.
+
+    Over the API the four authentication options are superuser only, since a
+    domain admin could otherwise opt their domain out of the operator's reject
+    policy. This CLI runs on the server with no caller identity and sets them
+    for any domain.
+    """
+    from fastsmtp.db.session import async_session
+
+    changes: dict[str, bool | None] = {}
+    if enable is not None:
+        changes["is_enabled"] = enable
+    for field, option in (
+        ("verify_dkim", verify_dkim),
+        ("verify_spf", verify_spf),
+        ("reject_dkim_fail", reject_dkim_fail),
+        ("reject_spf_fail", reject_spf_fail),
+        ("preserve_raw_message", preserve_raw_message),
+    ):
+        if option is not None:
+            changes[field] = _tri_state_value(option)
+
+    if not changes:
+        raise _fail("At least one option must be provided")
+
+    # The flag is stored here but acted on by the SMTP server, and this command
+    # never reaches the API check that would refuse it, so it asks the same
+    # question of the same settings.
+    if changes.get("preserve_raw_message") is True:
+        unavailable = get_settings().raw_preservation_unavailable()
+        if unavailable:
+            raise _fail(unavailable)
+
+    async def update():
+        async with async_session() as session:
+            domain = await _require_live_domain(session, domain_name)
+
+            for field, value in changes.items():
+                setattr(domain, field, value)
+            await session.commit()
+
+            summary = ", ".join(f"{field}={_flag_text(value)}" for field, value in changes.items())
+            console.print(f"[green]Updated domain '{domain_name}' ({summary})[/green]")
+
+    run_async(update())
 
 
 @domain_app.command("list")

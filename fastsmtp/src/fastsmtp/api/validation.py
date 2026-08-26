@@ -75,19 +75,19 @@ def require_s3_for_preservation(settings: Settings) -> None:
 
     Domain and rule flags are stored in the database but acted on by the SMTP
     server, so without this check a flag would be accepted and then silently
-    do nothing.
+    do nothing. The condition and the message are
+    ``Settings.raw_preservation_unavailable``: ``fastsmtp domain update``
+    writes the same flag without going through the API and has to refuse it on
+    exactly the same terms, and it cannot import this module.
 
     Raises:
         HTTPException: 422 if the S3 settings needed for preservation are missing
     """
-    missing = settings.missing_s3_settings()
-    if missing:
+    unavailable = settings.raw_preservation_unavailable()
+    if unavailable:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                "Raw message preservation requires S3 storage to be configured. "
-                f"Missing settings: {', '.join(missing)}"
-            ),
+            detail=unavailable,
         )
 
 

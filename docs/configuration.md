@@ -96,6 +96,11 @@ startup the application compares the database's Alembic revision against the mig
 shipped in the image and refuses to start if the database is behind, naming both
 revisions and the migrations that have not been applied.
 
+`fastsmtp serve` runs the check itself, so every mode is covered: `--worker-only` and
+`--smtp-only` refuse a stale database exactly as a full `serve` does. It also runs when
+the API is started directly with `uvicorn fastsmtp.main:app`, which never goes through
+`serve`; a full `serve` therefore performs the check twice, one extra query at startup.
+
 This turns a missed `fastsmtp db upgrade head` into an immediate, explicit failure
 instead of a `UndefinedColumn` error on the first query that touches a new column.
 

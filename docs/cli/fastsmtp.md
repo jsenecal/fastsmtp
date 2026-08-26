@@ -22,6 +22,11 @@ fastsmtp serve --worker-only    # Only webhook worker
 fastsmtp serve --shutdown-timeout 60
 ```
 
+Every mode runs the startup guards before any component starts, so a `--worker-only`
+or `--smtp-only` process refuses a database behind this build's migrations just as a
+full `serve` does. See
+[Schema version check](../configuration.md#schema-version-check).
+
 ## Database Management
 
 The `db` commands read only `FASTSMTP_DATABASE_URL`. The root API key, S3 settings and
@@ -97,6 +102,14 @@ fastsmtp user delete alice --purge --id 3f1c...
 # Create a domain
 fastsmtp domain create example.com
 
+# Change a domain's settings (at least one option is required)
+fastsmtp domain update example.com --disable
+fastsmtp domain update example.com --enable --preserve-raw-message true
+fastsmtp domain update example.com --verify-dkim true --reject-dkim-fail false
+
+# inherit clears an override so the domain follows the server-wide setting again
+fastsmtp domain update example.com --verify-spf inherit
+
 # List all domains
 fastsmtp domain list
 
@@ -128,6 +141,29 @@ fastsmtp domain delete example.com --purge
 
 Restoring a name that a live entry has since taken fails with
 `Domain 'example.com' already exists; rename or purge it first`.
+
+`update` takes `--enable/--disable` for `is_enabled`, and `true`, `false` or `inherit`
+for the five nullable overrides (`--verify-dkim`, `--verify-spf`, `--reject-dkim-fail`,
+`--reject-spf-fail`, `--preserve-raw-message`). `inherit` clears the override so the
+domain follows the server-wide setting, which is a different state from `false`; an
+option that is not given leaves that column alone. With no options at all the command
+exits `1` with `At least one option must be provided` rather than doing nothing.
+
+Three differences from `fsmtp domain update`, which reaches the same fields over the API:
+
+- The domain is addressed by **name**, not by id, like every other `fastsmtp` command.
+- The paired flag is `--enable/--disable`, as in `fastsmtp user set-superuser`, where
+  `fsmtp` spells it `--enabled/--disabled`. The five tri-state options are spelled the
+  same in both.
+- The four authentication options are superuser only over the API, since a domain admin
+  could otherwise opt their domain out of the operator's reject policy. This CLI runs on
+  the server with no caller identity and sets them for any domain.
+
+`--preserve-raw-message true` is refused with
+`Raw message preservation requires S3 storage to be configured` when the S3 settings are
+missing, on the same terms as the API - the flag is stored in the database but acted on
+by the SMTP server, so enabling it without S3 would do nothing. Turning it off (`false`
+or `inherit`) never needs S3.
 
 ## Maintenance
 
