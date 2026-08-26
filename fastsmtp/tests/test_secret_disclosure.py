@@ -163,3 +163,78 @@ class TestTheValueStillWorks:
         engine = create_async_engine(settings.database_dsn)
 
         assert engine.url.drivername == "sqlite+aiosqlite"
+
+    def test_the_application_engine_is_built_from_the_masked_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real path, not a stand-in: ``get_engine`` is what the app runs on.
+
+        The test above builds an engine itself, which proves the accessor
+        returns something usable but not that the one place the application
+        opens its own connection was converted. ``get_engine`` also branches on
+        the URL text to decide whether to pass pool arguments, so a SecretStr
+        reaching it would fail on ``.startswith`` before ``create_async_engine``
+        ever saw it.
+        """
+        from fastsmtp.config import clear_settings_cache
+        from fastsmtp.db import session as session_module
+
+        monkeypatch.setenv("FASTSMTP_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+        monkeypatch.setenv("FASTSMTP_ROOT_API_KEY", "root-key")
+        monkeypatch.setattr(session_module, "_engine", None)
+        clear_settings_cache()
+
+        try:
+            engine = session_module.get_engine()
+            assert engine.url.drivername == "sqlite+aiosqlite"
+        finally:
+            monkeypatch.setattr(session_module, "_engine", None)
+            clear_settings_cache()
+
+    def test_the_pooled_branch_also_reads_the_masked_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-sqlite URL takes the other branch, where the pool arguments are
+        added. ``create_async_engine`` opens no connection, so this needs no
+        database."""
+        from fastsmtp.config import clear_settings_cache
+        from fastsmtp.db import session as session_module
+
+        monkeypatch.setenv("FASTSMTP_DATABASE_URL", DATABASE_URL)
+        monkeypatch.setenv("FASTSMTP_ROOT_API_KEY", "root-key")
+        monkeypatch.setattr(session_module, "_engine", None)
+        clear_settings_cache()
+
+        try:
+            engine = session_module.get_engine()
+            assert engine.url.drivername == "postgresql+asyncpg"
+            assert PASSWORD not in repr(engine)
+        finally:
+            monkeypatch.setattr(session_module, "_engine", None)
+            clear_settings_cache()
+
+    async def test_the_startup_guard_opens_its_own_connection(self) -> None:
+        """The lifespan builds a second, throwaway engine for the startup checks.
+
+        It is a separate call site from ``get_engine`` - deliberately, so that a
+        ``create_app(settings=...)`` override checks the database it was handed
+        rather than the process-wide one - and therefore needed converting
+        separately. Running the lifespan is the only way to prove it was.
+
+        The schema check finds no ``alembic_version`` table here, which it
+        treats as "cannot compare" and allows, so this asserts the guard ran
+        without raising rather than asserting a revision.
+        """
+        from fastsmtp.main import create_app, lifespan
+
+        settings = Settings(
+            _env_file=None,
+            database_url="sqlite+aiosqlite:///:memory:",
+            root_api_key="root-key",
+            verify_schema_on_startup=True,
+            verify_encryption_on_startup=False,
+        )
+        app = create_app(settings)
+
+        async with lifespan(app):
+            pass
