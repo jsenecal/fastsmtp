@@ -173,19 +173,33 @@ class TestDotenvInTheWorkingDirectory:
         _assert_succeeded(result)
         assert database_path.exists()
 
-    def test_db_and_show_config_resolve_the_same_url(
+    def test_db_and_the_serving_settings_resolve_the_same_url(
         self, scrubbed_environ: dict[str, str], tmp_path: Path
     ) -> None:
-        """``show-config`` is what ``serve`` loads; both must name one database."""
+        """``get_settings`` is what ``serve`` loads; both must name one database.
+
+        ``show-config`` used to be the observable here, but ``database_url`` is a
+        ``SecretStr`` now and renders masked (issue #140), so the serving loader
+        is asked directly -- in a child process started in the operator's working
+        directory, since that is what the ``.env`` lookup depends on.
+        """
         database_url = f"sqlite+aiosqlite:///{tmp_path}/agreed.db"
         workdir = self._workdir(tmp_path, database_url)
 
-        # Rich truncates a cell wider than the console, so the table is given
-        # room rather than the assertion being loosened.
-        shown = _run_cli(scrubbed_environ, {"COLUMNS": "250"}, "show-config", cwd=workdir)
+        shown = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from fastsmtp.config import get_settings; print(get_settings().database_dsn)",
+            ],
+            env={**scrubbed_environ, "PATH": "/usr/bin:/bin"},
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+        )
         _assert_succeeded(shown)
 
-        assert database_url in shown.stdout
+        assert shown.stdout.strip() == database_url
 
     def test_an_explicit_environment_variable_still_wins(
         self, scrubbed_environ: dict[str, str], tmp_path: Path

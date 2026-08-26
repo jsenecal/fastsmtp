@@ -30,10 +30,27 @@ class DatabaseSettings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = Field(
-        default="postgresql+asyncpg://fastsmtp:fastsmtp@localhost:5432/fastsmtp",
+    #: The default is written as a ``SecretStr`` rather than a plain string on
+    #: purpose: pydantic does not validate defaults, so a ``str`` here would
+    #: survive as a ``str`` and break ``database_dsn`` for anyone who configured
+    #: nothing.
+    database_url: SecretStr = Field(
+        default=SecretStr("postgresql+asyncpg://fastsmtp:fastsmtp@localhost:5432/fastsmtp"),
         description="Database connection URL (postgresql+asyncpg://...)",
     )
+
+    @property
+    def database_dsn(self) -> str:
+        """The database URL as a plain string, for the code that opens a connection.
+
+        ``database_url`` is a ``SecretStr`` because it carries the database
+        password, and an unmasked field is echoed by anything that renders the
+        settings -- ``show-config``, a repr, a traceback that holds one in a
+        frame local (issue #140). Read it through here, never with
+        ``.get_secret_value()`` at the call site, so the unmasked value exists
+        only where a connection is actually being made.
+        """
+        return self.database_url.get_secret_value()
 
 
 class Settings(DatabaseSettings):

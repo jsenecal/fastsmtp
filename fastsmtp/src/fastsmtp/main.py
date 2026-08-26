@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     # the wrong database would be worse than not checking.
     settings = getattr(app.state, "settings", None) or get_settings()
     if settings.verify_schema_on_startup or settings.verify_encryption_on_startup:
-        engine = create_async_engine(settings.database_url)
+        engine = create_async_engine(settings.database_dsn)
         try:
             if settings.verify_schema_on_startup:
                 await verify_schema_is_current(engine)

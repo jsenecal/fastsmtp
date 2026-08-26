@@ -31,6 +31,7 @@ from alembic.util.exc import CommandError
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import CursorResult, select
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import InstrumentedAttribute
@@ -45,6 +46,12 @@ app = typer.Typer(
     name="fastsmtp",
     help="FastSMTP - SMTP-to-Webhook Relay Server",
     no_args_is_help=True,
+    # Typer renders frame locals in its pretty traceback by default, which put
+    # the database password on the operator's terminal whenever settings failed
+    # to validate (issue #140). Any secret that a frame happens to hold leaks
+    # the same way, so this stays off however convenient it looks for debugging;
+    # reach for a debugger instead.
+    pretty_exceptions_show_locals=False,
 )
 
 console = Console()
@@ -202,7 +209,7 @@ def serve(
         # worker is the component that most needs those headers, since it is what
         # sends them. (The same gap applies to the schema check; see issue #138.)
         if settings.verify_encryption_on_startup:
-            guard_engine = create_async_engine(settings.database_url)
+            guard_engine = create_async_engine(settings.database_dsn)
             try:
                 await verify_encryption_key_is_configured(guard_engine)
             except EncryptionKeyMissingError as e:
@@ -282,10 +289,22 @@ def show_config():
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
 
-    for field_name in settings.model_fields:
+    # On the class, not the instance: pydantic 2.11 deprecates the instance
+    # attribute and V3 removes it. Under this repo's warnings-as-errors the
+    # instance form does not warn, it raises - so `show-config` exited 1 with an
+    # empty table. It looked healthy only because the one test that ran it did
+    # so in a child process, where the warning is not fatal.
+    for field_name in type(settings).model_fields:
         value = getattr(settings, field_name)
         # Hide sensitive values
-        if "key" in field_name.lower() or "secret" in field_name.lower():
+        if field_name == "database_url":
+            # Masking the whole URL would hide the host and database name too,
+            # and "which database am I pointed at" is most of why anyone runs
+            # this command. SQLAlchemy's own renderer redacts just the
+            # password, so there is no hand-written parser here to get it
+            # wrong. See issue #140.
+            value = make_url(settings.database_dsn).render_as_string(hide_password=True)
+        elif "key" in field_name.lower() or "secret" in field_name.lower():
             value = "********"
         elif isinstance(value, Path):
             value = str(value)

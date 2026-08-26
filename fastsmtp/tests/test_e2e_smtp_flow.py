@@ -434,7 +434,7 @@ class TestSMTPServerWithRealDatabase:
     async def db_engine(self, smtp_settings: Settings):
         """Create database engine and tables."""
         engine = create_async_engine(
-            smtp_settings.database_url,
+            smtp_settings.database_dsn,
             echo=False,
         )
 

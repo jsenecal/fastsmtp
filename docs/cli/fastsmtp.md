@@ -158,6 +158,10 @@ fastsmtp show-config
 fastsmtp version
 ```
 
+`show-config` masks every credential it prints, `FASTSMTP_DATABASE_URL` included: the
+row reads `**********`, not the connection string. Use it to confirm *which* settings a
+shell resolves, not to read a password back out.
+
 `generate-key` takes its scopes as one comma-separated string, where the remote CLI
 repeats `--scope` instead. Both default to no scopes at all - see
 [Key scopes](../api.md#key-scopes).

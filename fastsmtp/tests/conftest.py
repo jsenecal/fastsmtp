@@ -133,7 +133,7 @@ def scrubbed_environ() -> dict[str, str]:
 async def test_engine(test_settings: Settings):
     """Create test database engine with fresh tables."""
     engine = create_async_engine(
-        test_settings.database_url,
+        test_settings.database_dsn,
         echo=False,
     )
 
@@ -496,7 +496,7 @@ def db(test_engine, test_settings: Settings, monkeypatch: pytest.MonkeyPatch) ->
     """Point the CLI's session factory at the test database."""
 
     def make_session() -> AsyncSession:
-        engine = create_async_engine(test_settings.database_url, poolclass=NullPool)
+        engine = create_async_engine(test_settings.database_dsn, poolclass=NullPool)
         return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)()
 
     monkeypatch.setattr("fastsmtp.db.session.async_session", make_session)
