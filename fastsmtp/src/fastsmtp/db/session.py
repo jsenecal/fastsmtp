@@ -33,12 +33,12 @@ def get_engine() -> AsyncEngine:
         }
 
         # Only add pool parameters for non-SQLite databases
-        if not settings.database_url.startswith("sqlite"):
+        if not settings.database_dsn.startswith("sqlite"):
             engine_kwargs["pool_size"] = settings.database_pool_size
             engine_kwargs["max_overflow"] = settings.database_pool_max_overflow
             engine_kwargs["pool_pre_ping"] = True
 
-        _engine = create_async_engine(settings.database_url, **engine_kwargs)
+        _engine = create_async_engine(settings.database_dsn, **engine_kwargs)
 
     return _engine
 

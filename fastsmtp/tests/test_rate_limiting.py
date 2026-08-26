@@ -119,7 +119,7 @@ class TestRateLimitingMiddleware:
                 create_async_engine,
             )
 
-            engine = create_async_engine(rate_limited_settings.database_url, echo=False)
+            engine = create_async_engine(rate_limited_settings.database_dsn, echo=False)
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
@@ -173,7 +173,7 @@ class TestRateLimitingMiddleware:
                 create_async_engine,
             )
 
-            engine = create_async_engine(rate_limited_settings.database_url, echo=False)
+            engine = create_async_engine(rate_limited_settings.database_dsn, echo=False)
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
@@ -249,7 +249,7 @@ class TestRateLimitingMiddleware:
                 create_async_engine,
             )
 
-            engine = create_async_engine(rate_limited_settings.database_url, echo=False)
+            engine = create_async_engine(rate_limited_settings.database_dsn, echo=False)
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
@@ -327,7 +327,7 @@ class TestAuthRateLimiting:
         from fastsmtp.config import get_settings
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        engine = create_async_engine(settings.database_url, echo=False)
+        engine = create_async_engine(settings.database_dsn, echo=False)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 

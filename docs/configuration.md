@@ -83,7 +83,7 @@ cross-origin read of anyone's session.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FASTSMTP_DATABASE_URL` | *required* | PostgreSQL or MariaDB connection URL |
+| `FASTSMTP_DATABASE_URL` | *required* | PostgreSQL or MariaDB connection URL. Treated as a secret: masked in `show-config` and in any rendered traceback |
 | `FASTSMTP_DATABASE_POOL_SIZE` | `5` | Connection pool size |
 | `FASTSMTP_DATABASE_POOL_MAX_OVERFLOW` | `10` | Max overflow connections |
 | `FASTSMTP_DATABASE_ECHO` | `false` | Log every SQL statement. Development only - it logs query parameters |

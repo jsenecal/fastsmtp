@@ -23,7 +23,7 @@ class TestSettingsScope:
         monkeypatch.delenv("FASTSMTP_ROOT_API_KEY", raising=False)
         monkeypatch.setenv("FASTSMTP_DATABASE_URL", "sqlite+aiosqlite:///scoped.db")
         settings = DatabaseSettings(_env_file=None)
-        assert settings.database_url == "sqlite+aiosqlite:///scoped.db"
+        assert settings.database_dsn == "sqlite+aiosqlite:///scoped.db"
 
     def test_database_settings_ignore_the_s3_cross_field_rules(self, monkeypatch):
         """A config map shared with the serving pods must not break migrations."""

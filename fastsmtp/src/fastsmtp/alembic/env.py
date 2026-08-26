@@ -19,7 +19,7 @@ target_metadata = Base.metadata
 # Only the URL is needed here. Loading the full Settings would demand a root
 # API key and apply the S3 cross-field rules, none of which a migration run
 # uses -- a one-off Job given just the database URL must be able to run.
-config.set_main_option("sqlalchemy.url", DatabaseSettings().database_url)
+config.set_main_option("sqlalchemy.url", DatabaseSettings().database_dsn)
 
 
 def run_migrations_offline() -> None:
