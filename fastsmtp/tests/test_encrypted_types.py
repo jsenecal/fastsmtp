@@ -26,10 +26,9 @@ the ``configure_keys`` fixture.
 
 import json
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import pytest
-from fastsmtp.config import clear_settings_cache
 from fastsmtp.crypto import (
     ENVELOPE_MARKER,
     DecryptionError,
@@ -60,29 +59,6 @@ SECRET_HEADERS = {
 #: compares the new value equal to the loaded one and emits no UPDATE at all -
 #: which is also why the estate needs a backfill and not just traffic.
 ROTATED_HEADERS = {"Authorization": "Bearer sk-live-rewritten-0001"}
-
-
-@pytest.fixture
-def configure_keys(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., None]]:
-    """Return a helper that sets the process's configured encryption keys.
-
-    ``get_cipher`` resolves its keys through ``get_settings``, which is a cached
-    read of the environment, so a test changes both together. Every test starts
-    from "no key configured" whatever the ambient environment holds, and the
-    cache is cleared again on teardown so the restored environment is what the
-    next caller sees.
-    """
-
-    def configure(*keys: str) -> None:
-        if keys:
-            monkeypatch.setenv("FASTSMTP_ENCRYPTION_KEYS", json.dumps(list(keys)))
-        else:
-            monkeypatch.delenv("FASTSMTP_ENCRYPTION_KEYS", raising=False)
-        clear_settings_cache()
-
-    configure()
-    yield configure
-    clear_settings_cache()
 
 
 async def seed_recipient(

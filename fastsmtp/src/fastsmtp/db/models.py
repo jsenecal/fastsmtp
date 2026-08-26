@@ -406,7 +406,16 @@ class DeliveryLog(Base, TimestampMixin):
     last_status_code: Mapped[int | None] = mapped_column(nullable=True)
     instance_id: Mapped[str] = mapped_column(String(50), nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    payload: Mapped[dict] = mapped_column(default=dict)
+    # Encrypted at rest when a key is configured: this holds the whole webhook
+    # payload, which is the message - subject, bodies, and inline attachments -
+    # kept for the retention window. See db/encrypted_types.py; the stored type
+    # is unchanged, so this needs no migration.
+    #
+    # ``payload_hash`` above stays a hash of the *plaintext*: it is computed in
+    # ``webhook/queue.py`` before the row is flushed, and the column type only
+    # encrypts on the way to the database. Hashing the ciphertext would make it
+    # useless as a content fingerprint, since Fernet output differs every time.
+    payload: Mapped[dict] = mapped_column(EncryptedJSON, default=dict)
     dkim_result: Mapped[str | None] = mapped_column(String(50), nullable=True)
     spf_result: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
@@ -415,7 +424,12 @@ class DeliveryLog(Base, TimestampMixin):
         Index("ix_delivery_log_domain_created", "domain_id", "created_at"),
         Index("ix_delivery_log_instance_id", "instance_id"),
         Index("ix_delivery_log_delivered_at", "delivered_at"),
-        Index("ix_delivery_log_cleanup", "created_at", "status"),  # For cleanup queries
+        # Named for the cleanup job, but load-bearing for startup too: the
+        # encryption guard samples the newest rows by created_at, and this is
+        # the index that keeps that an index scan instead of a sort over the
+        # whole table (db/encryption_guard.py). Do not drop or reorder its
+        # columns on cleanup's behalf alone.
+        Index("ix_delivery_log_cleanup", "created_at", "status"),
     )
 
     def __repr__(self) -> str:

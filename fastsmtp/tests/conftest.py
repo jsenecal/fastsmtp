@@ -1,8 +1,9 @@
 """Pytest configuration and fixtures for fastsmtp tests."""
 
 import asyncio
+import json
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from email import message_from_bytes
@@ -522,3 +523,37 @@ def run(db: Db) -> Callable[..., tuple[int, str]]:
         return result.exit_code, strip_ansi(result.output)
 
     return invoke
+
+
+@pytest.fixture
+def configure_keys(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., None]]:
+    """Set the encryption keys this process is configured with.
+
+    ``EncryptedJSON`` asks ``encryption.get_cipher()`` on every read and write,
+    and that resolves through the cached ``Settings`` - so setting the variable
+    and clearing the cache together is exactly what an operator's ``export``
+    does, and it is the only way the column type and the test agree on what the
+    key is.
+
+    Every test starts from "no key configured" whatever the ambient environment
+    holds, so a test that never calls the helper is testing the unencrypted
+    default rather than inheriting a key from whatever ran before it.
+
+    Teardown restores the environment *before* clearing the cache, not after:
+    the reverse order leaves a window in which a cached ``Settings`` still
+    carries a test key, and anything reading settings in that window would take
+    it into the next test.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+
+        def configure(*keys: str) -> None:
+            if keys:
+                mp.setenv("FASTSMTP_ENCRYPTION_KEYS", json.dumps(list(keys)))
+            else:
+                mp.delenv("FASTSMTP_ENCRYPTION_KEYS", raising=False)
+            clear_settings_cache()
+
+        configure()
+        yield configure
+
+    clear_settings_cache()

@@ -411,19 +411,22 @@ it only decides how a pre-salting key is verified, and changing it stops those k
 authenticating. Rotate the remaining unsalted keys (`fsmtp auth rotate-key`) rather than
 touching it.
 
-## Webhook Header Encryption
+## Encryption at Rest
 
 `recipients.webhook_headers` holds the customer's own bearer tokens for their webhook
-endpoint. Configuring a key encrypts that column at rest, so a stolen database or backup
-does not hand over those credentials. It is a storage-layer feature only: API responses,
-payload shapes and CLI output are unchanged either way, and an authorised API caller can
-still read the headers back through the ordinary API - this defends the data at rest, not
-from the people already allowed to read it through the application.
+endpoint. `delivery_log.payload` holds the whole webhook payload for every delivery -
+subject, `body_text`, `body_html`, and inline base64 attachments - retained for
+`FASTSMTP_DELIVERY_LOG_RETENTION_DAYS` (90 days by default; see [Retention](#retention)).
+Configuring a key encrypts both columns at rest under the same setting, so a stolen
+database or backup does not hand over either. It is a storage-layer feature only: API
+responses, webhook payload shapes and CLI output are unchanged either way, and an
+authorised API caller can still read both back through the ordinary API - this defends the
+data at rest, not from the people already allowed to read it through the application.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FASTSMTP_ENCRYPTION_KEYS` | *(empty)* | Keys in priority order. The first key encrypts; every key is tried when decrypting. Empty means the column is stored in clear, exactly as before |
-| `FASTSMTP_VERIFY_ENCRYPTION_ON_STARTUP` | `true` | Refuse to start when the database holds encrypted rows and no key is configured |
+| `FASTSMTP_ENCRYPTION_KEYS` | *(empty)* | Keys in priority order, shared by both columns. The first key encrypts; every key is tried when decrypting. Empty means both columns are stored in clear, exactly as before |
+| `FASTSMTP_VERIFY_ENCRYPTION_ON_STARTUP` | `true` | Refuse to start when the database holds encrypted rows in either column and no key is configured |
 
 It is a JSON list in the environment, the same shape as `FASTSMTP_METRICS_ALLOWED_IPS`:
 
@@ -446,38 +449,87 @@ memorable one would not.
 !!! warning "Losing the key loses the data"
 
     There is no recovery path. A key removed from `FASTSMTP_ENCRYPTION_KEYS` before every
-    row written under it has been re-encrypted makes those rows permanently unreadable.
-    Keys belong in the same place as `FASTSMTP_ROOT_API_KEY`.
+    row written under it has been re-encrypted, or has aged out of the delivery log,
+    makes those rows permanently unreadable. Keys belong in the same place as
+    `FASTSMTP_ROOT_API_KEY`.
+
+### Cost
+
+Encrypting lands on the SMTP accept path, when the delivery log row is written; decrypting
+runs on every delivery attempt, including retries. Measured on one machine, per payload:
+
+| Payload | Encrypt | Decrypt | Stored size |
+|---|---|---|---|
+| 50 KB (typical) | 2 ms | 0.5 ms | 1.33x |
+| 10 MB | 198 ms | 165 ms | 1.33x |
+| 50 MB (the `FASTSMTP_WEBHOOK_MAX_INLINE_PAYLOAD_SIZE` ceiling) | 998 ms | 774 ms | 1.33x |
+
+The 1.33x stored-size overhead applies to `delivery_log` for the whole retention window,
+since every retained row carries it.
+
+Large payloads come from inline attachments. With `FASTSMTP_ATTACHMENT_STORAGE=s3` (see
+[Attachment Storage (S3)](#attachment-storage-s3)) the payload holds S3 references instead
+of base64 bodies, so it stays small regardless of attachment size and the encryption cost
+stays in the milliseconds. Pair the two settings when attachments are expected to be large.
 
 ### Rollout
 
-1. Generate a key, set `FASTSMTP_ENCRYPTION_KEYS`, restart. New writes are encrypted.
-2. Run `fastsmtp encrypt-existing` to convert the rows already there - see
+1. Generate a key, set `FASTSMTP_ENCRYPTION_KEYS`, restart. New writes to both columns are
+   encrypted.
+2. Run `fastsmtp encrypt-existing` to convert the recipient rows already there - see
    [Maintenance](cli/fastsmtp.md#maintenance).
 
 Existing rows do **not** convert through ordinary traffic. SQLAlchemy emits no UPDATE
 when a value is written back equal to what was loaded, and in-place mutation of the
 dict is not tracked at all, so a recipient nobody edits keeps plaintext headers
-indefinitely. The backfill command is what carries the rollout, not time.
+indefinitely. The backfill command is what carries the rollout for recipients, not time.
+
+!!! note "`delivery_log.payload` has no backfill, and that is deliberate"
+
+    `fastsmtp encrypt-existing` converts `recipients.webhook_headers` only.
+    `delivery_log` is append-only, and every row is deleted after
+    `FASTSMTP_DELIVERY_LOG_RETENTION_DAYS` (90 days by default), so a payload written
+    before a key existed ages out on its own inside that window. Converting it in place
+    would mean rewriting every retained row - potentially millions - to reach a state
+    the retention job already reaches by itself. If a payload written before the key was
+    configured is still readable in clear, that is expected until it ages out; it is not
+    a bug.
 
 ### Rotation
 
 !!! warning "Getting this order wrong destroys data"
 
     1. Prepend the new key while keeping the old one: `'["new-key", "old-key"]'`
-    2. Restart, so new writes use the new key.
-    3. Run `fastsmtp encrypt-existing`, which rewrites every row under the new key.
-    4. Only now remove the old key.
+    2. Restart, so new writes to both columns use the new key.
+    3. Run `fastsmtp encrypt-existing`, which rewrites every recipient row under the new
+       key. It does not touch `delivery_log`.
+    4. Keep the old key in `FASTSMTP_ENCRYPTION_KEYS` for at least
+       `FASTSMTP_DELIVERY_LOG_RETENTION_DAYS` after step 3, so every `delivery_log` row
+       still encrypted under it stays readable until it ages out through retention.
+    5. Only now remove the old key.
 
-    Dropping the old key before step 3 finishes makes every row still written under it
-    permanently unreadable. The command refuses to overwrite a row it cannot decrypt and
-    exits non-zero, so it will tell you before that happens - but it cannot undo an old
-    key that has already been removed.
+    Dropping the old key before every row written under it is either re-encrypted or has
+    aged out makes it permanently unreadable. `encrypt-existing` refuses to overwrite a
+    recipient row it cannot decrypt and exits non-zero, so it will tell you before that
+    happens for recipients - but nothing checks `delivery_log` on the old key's behalf,
+    since nothing converts it.
 
 No migration is needed to adopt this feature: the ciphertext is wrapped in a JSON
-envelope, so the column stays `JSONB` (PostgreSQL) or `JSON` (elsewhere) and the schema
+envelope, so both columns stay `JSONB` (PostgreSQL) or `JSON` (elsewhere) and the schema
 is unchanged. Upgrading needs no `fastsmtp db upgrade` on its account.
 
 The startup guard behind `FASTSMTP_VERIFY_ENCRYPTION_ON_STARTUP` covers `fastsmtp serve`
 in every mode, including `--worker-only`, and refuses to boot rather than failing on the
-first row it cannot decrypt.
+first row it cannot decrypt. It checks `recipients` and `delivery_log` separately, and the
+two checks are not the same shape: `recipients` holds one row per address and is scanned
+in full. `delivery_log` grows with traffic, so only the newest 1000 rows are sampled.
+
+!!! warning "The delivery-log check is a sample, not a scan"
+
+    An encrypted `delivery_log` payload buried under more than 1000 newer plaintext rows
+    is not detected at startup, so the process can start against a database holding rows
+    it cannot read. It then fails on first read of that row - `GET /delivery-log/{id}` or
+    `fsmtp ops log get` return an error for it - rather than at boot. Reaching this state
+    requires already having ignored a startup refusal once: a key is removed, the process
+    is restarted and passes the sampled check because the now-unreadable rows are not
+    among the newest 1000, and only a later request or retry reaches one of them.
