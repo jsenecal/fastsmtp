@@ -6,7 +6,11 @@ The rule engine allows conditional processing of emails based on various attribu
 
 - `from`, `to`, `subject`, `body`
 - `header:<name>` (e.g., `header:X-Priority`)
-- `has_attachment`
+- `has_attachment` - inline images that the HTML body actually renders, such as
+  signature logos, are delivered in the webhook payload but do not set this
+  field. Everything else the message carries does, including a part that claims
+  an inline disposition without being referenced from the body; see
+  [Inline images and Content-ID](webhooks.md#inline-images-and-content-id)
 - `dkim_result`, `spf_result` - a mechanism this rule's own domain does not verify
   reads as `none`, whatever another recipient's domain asked for; see
   [Per-domain overrides](configuration.md#per-domain-overrides)
