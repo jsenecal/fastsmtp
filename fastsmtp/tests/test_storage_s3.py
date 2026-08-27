@@ -1,5 +1,6 @@
 """Tests for S3 storage module."""
 
+import hashlib
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
@@ -51,6 +52,57 @@ class TestSanitizeKeyComponent:
         """Test that valid characters are preserved."""
         result = sanitize_key_component("report-2024.pdf")
         assert result == "report-2024.pdf"
+
+    def test_strips_forward_slashes(self):
+        """A path separator must not survive into a key component.
+
+        Left intact, a sender-supplied filename like ``../../../evil/passwd``
+        lands verbatim in the S3 key and places the object outside the
+        namespace the rest of the system assumes.
+        """
+        result = sanitize_key_component("../../../evil/passwd")
+        assert "/" not in result
+
+    def test_strips_backslashes_too(self):
+        """Windows-style separators are already covered by the char class."""
+        result = sanitize_key_component("..\\..\\evil\\passwd")
+        assert "\\" not in result
+
+    def test_component_that_is_only_dot_dot_falls_back(self):
+        """A component that sanitizes to exactly ``..`` is a traversal segment.
+
+        ``_build_key`` joins components with ``/`` itself, so a component
+        that survives sanitization as a bare ``..`` becomes a real parent-
+        directory segment in the final key even though it never contained a
+        ``/`` of its own.
+        """
+        result = sanitize_key_component("..")
+        assert result == "unnamed"
+
+    def test_component_that_is_only_dot_falls_back(self):
+        """Same reasoning as ``..`` for the current-directory segment ``.``."""
+        result = sanitize_key_component(".")
+        assert result == "unnamed"
+
+    def test_component_that_is_only_dots_falls_back(self):
+        """Any run of only dots is treated the same as empty."""
+        result = sanitize_key_component("...")
+        assert result == "unnamed"
+
+    def test_dot_dot_fallback_respects_custom_fallback(self):
+        """The empty-fallback ``""`` used for identity-bearing components still applies."""
+        result = sanitize_key_component("..", fallback="")
+        assert result == ""
+
+    def test_dotfile_is_not_treated_as_all_dots(self):
+        """A real dotfile like ``.gitignore`` must not be mistaken for a bare dot segment."""
+        result = sanitize_key_component(".gitignore")
+        assert result == ".gitignore"
+
+    def test_embedded_dot_dot_without_slash_is_left_alone(self):
+        """``..`` that isn't the whole component has no traversal meaning."""
+        result = sanitize_key_component("..pdf")
+        assert result == "..pdf"
 
 
 class TestS3AttachmentInfo:
@@ -116,12 +168,15 @@ class TestS3Storage:
     def test_build_key(self, s3_settings):
         """Test S3 key building."""
         storage = S3Storage(s3_settings)
+        content = b"PDF content here"
+        digest = hashlib.sha256(content).hexdigest()[:8]
         key = storage._build_key(
             domain="example.com",
             message_id="<abc123@example.com>",
             filename="report.pdf",
+            content=content,
         )
-        assert key == "attachments/example.com/abc123@example.com/report.pdf"
+        assert key == f"attachments/example.com/abc123@example.com/{digest}-report.pdf"
 
     def test_build_key_sanitizes_components(self, s3_settings):
         """Test that key components are sanitized."""
@@ -130,11 +185,80 @@ class TestS3Storage:
             domain="example.com",
             message_id="<msg with spaces>",
             filename="file|name?.pdf",
+            content=b"content",
         )
         assert "|" not in key
         assert "?" not in key
         assert "<" not in key
         assert ">" not in key
+
+    def test_build_key_strips_path_traversal_from_filename(self, s3_settings):
+        """A sender-supplied filename cannot place the object outside its namespace.
+
+        Regression test for #147: ``../../../evil/passwd`` used to land in the
+        key verbatim.
+        """
+        storage = S3Storage(s3_settings)
+        key = storage._build_key(
+            domain="example.com",
+            message_id="<abc@example.com>",
+            filename="../../../evil/passwd",
+            content=b"content",
+        )
+        # Exactly four segments: prefix/domain/message_id/digest-filename.
+        # A surviving "/" or ".." segment would add or hide segments.
+        parts = key.split("/")
+        assert parts == ["attachments", "example.com", "abc@example.com", parts[-1]]
+        assert ".." not in parts
+        assert parts[-1].endswith("evilpasswd")
+
+    def test_build_key_two_parts_same_filename_different_content_get_different_keys(
+        self, s3_settings
+    ):
+        """Two attachments sharing a filename must not collide and overwrite each other."""
+        storage = S3Storage(s3_settings)
+        key_a = storage._build_key(
+            domain="example.com",
+            message_id="<msg@example.com>",
+            filename="report.pdf",
+            content=b"first version",
+        )
+        key_b = storage._build_key(
+            domain="example.com",
+            message_id="<msg@example.com>",
+            filename="report.pdf",
+            content=b"second version",
+        )
+        assert key_a != key_b
+
+    def test_build_key_same_filename_and_content_get_same_key(self, s3_settings):
+        """Identical bytes under the same name key to the same object (idempotent retry)."""
+        storage = S3Storage(s3_settings)
+        content = b"identical bytes"
+        key_a = storage._build_key(
+            domain="example.com",
+            message_id="<msg@example.com>",
+            filename="report.pdf",
+            content=content,
+        )
+        key_b = storage._build_key(
+            domain="example.com",
+            message_id="<msg@example.com>",
+            filename="report.pdf",
+            content=content,
+        )
+        assert key_a == key_b
+
+    def test_build_key_is_pure_function_of_its_inputs(self, s3_settings):
+        """A retry with identical inputs rewrites the same key rather than a new object."""
+        storage = S3Storage(s3_settings)
+        kwargs = {
+            "domain": "example.com",
+            "message_id": "<retry@example.com>",
+            "filename": "invoice.pdf",
+            "content": b"same bytes every retry",
+        }
+        assert storage._build_key(**kwargs) == storage._build_key(**kwargs)
 
     def test_build_url_aws(self, s3_settings):
         """Test URL building for AWS S3."""

@@ -69,8 +69,8 @@ With `FASTSMTP_ATTACHMENT_STORAGE=s3`, attachments are uploaded to S3 and the pa
       "size": 45678,
       "storage": "s3",
       "bucket": "my-email-attachments",
-      "key": "attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf",
-      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf"
+      "key": "attachments/yourdomain.com/abc123@sender.com/7f3a9c21-invoice-2025-01.pdf",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/abc123@sender.com/7f3a9c21-invoice-2025-01.pdf"
     }
   ],
   "dkim_result": "pass",
@@ -100,9 +100,9 @@ With `FASTSMTP_S3_PRESIGNED_URLS=true`, the payload includes time-limited downlo
       "size": 45678,
       "storage": "s3",
       "bucket": "my-email-attachments",
-      "key": "attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf",
-      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf",
-      "presigned_url": "https://my-email-attachments.s3.us-west-2.amazonaws.com/attachments/yourdomain.com/abc123@sender.com/invoice-2025-01.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20250106%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20250106T100000Z&X-Amz-Expires=3600&X-Amz-Signature=abc123..."
+      "key": "attachments/yourdomain.com/abc123@sender.com/7f3a9c21-invoice-2025-01.pdf",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/abc123@sender.com/7f3a9c21-invoice-2025-01.pdf",
+      "presigned_url": "https://my-email-attachments.s3.us-west-2.amazonaws.com/attachments/yourdomain.com/abc123@sender.com/7f3a9c21-invoice-2025-01.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20250106%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20250106T100000Z&X-Amz-Expires=3600&X-Amz-Signature=abc123..."
     }
   ]
 }
@@ -178,8 +178,8 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
       "size": 89012,
       "storage": "s3",
       "bucket": "my-email-attachments",
-      "key": "attachments/yourdomain.com/xyz789@sender.com/offer-letter.pdf",
-      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/offer-letter.pdf",
+      "key": "attachments/yourdomain.com/xyz789@sender.com/e4b8f01d-offer-letter.pdf",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/e4b8f01d-offer-letter.pdf",
       "presigned_url": "https://..."
     },
     {
@@ -188,8 +188,8 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
       "size": 234567,
       "storage": "s3",
       "bucket": "my-email-attachments",
-      "key": "attachments/yourdomain.com/xyz789@sender.com/headshot.jpg",
-      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/headshot.jpg",
+      "key": "attachments/yourdomain.com/xyz789@sender.com/58e2a94f-headshot.jpg",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/58e2a94f-headshot.jpg",
       "presigned_url": "https://..."
     },
     {
@@ -198,8 +198,8 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
       "size": 56789,
       "storage": "s3",
       "bucket": "my-email-attachments",
-      "key": "attachments/yourdomain.com/xyz789@sender.com/w4-form.pdf",
-      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/w4-form.pdf",
+      "key": "attachments/yourdomain.com/xyz789@sender.com/9d1c6b73-w4-form.pdf",
+      "url": "https://s3.us-west-2.amazonaws.com/my-email-attachments/attachments/yourdomain.com/xyz789@sender.com/9d1c6b73-w4-form.pdf",
       "presigned_url": "https://..."
     }
   ]
@@ -211,14 +211,27 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
 Attachments are stored with the following key structure:
 
 ```
-{prefix}/{domain}/{message_id}/{filename}
+{prefix}/{domain}/{message_id}/{content_digest}-{filename}
 ```
+
+`content_digest` is the first 8 hex characters of the SHA-256 digest of the attachment's
+bytes. It disambiguates parts that would otherwise share a key -- two attachments in one
+message with the same filename, or a filename that sanitizes down to nothing -- without
+changing what `filename` reports to the sender's own value. Two parts with identical bytes
+get the same key (a retried upload overwrites its own object as a no-op); two parts with
+the same filename but different bytes get different keys, so neither silently overwrites
+the other.
 
 For example:
 
 ```
-attachments/yourdomain.com/abc123@sender.com/invoice.pdf
+attachments/yourdomain.com/abc123@sender.com/7f3a9c21-invoice.pdf
 ```
+
+`filename` is sanitized before it goes into the key: path separators (`/` and `\`) are
+stripped, and a component that would sanitize down to a bare `.` or `..` is replaced, so a
+sender-supplied filename cannot place the object outside its own
+`{prefix}/{domain}/{message_id}/` namespace.
 
 Preserved raw messages use their own prefix and are partitioned by receive date so S3
 lifecycle rules can expire archives by age:
