@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email import message_from_bytes
 from email.message import Message
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import idna
 
@@ -715,14 +715,18 @@ def _iter_payload_parts(message: Message) -> Iterator[Message]:
     of ``is_multipart()`` is what keeps the two apart: only an actual
     ``multipart/*`` container has maintype ``"multipart"``.
     """
-    if message.get_content_maintype() == "multipart":
-        payload = message.get_payload()
-        if isinstance(payload, list):
-            for subpart in payload:
-                if isinstance(subpart, Message):
-                    yield from _iter_payload_parts(subpart)
-    else:
+    if message.get_content_maintype() != "multipart":
         yield message
+        return
+
+    payload = message.get_payload()
+    if not isinstance(payload, list):
+        # A multipart the parser could not split - one declaring no boundary,
+        # say - keeps its raw payload as a string and has no parts to yield.
+        return
+    # Every element of a split multipart payload is a Message by construction.
+    for subpart in cast(list[Message], payload):
+        yield from _iter_payload_parts(subpart)
 
 
 def _attached_message_bytes(part: Message) -> bytes | None:

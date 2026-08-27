@@ -387,3 +387,129 @@ class TestPathologicalNestingDegradesGracefully:
         assert attachment["content_type"] == "message/rfc822"
         assert attachment["size"] == 0
         assert "content" not in attachment
+
+
+class TestOtherMessageSubtypes:
+    """Not every ``message/*`` part holds exactly one forwarded message.
+
+    ``_attached_message_bytes`` serializes the submessage only when the payload
+    is a single ``Message``. A DSN's ``message/delivery-status`` holds one
+    per-recipient block per report, so it fails that guard and keeps the
+    metadata-only entry it had before, rather than being serialized into
+    something no consumer asked for.
+    """
+
+    @pytest.mark.asyncio
+    async def test_multi_block_delivery_status_stays_metadata_only(self):
+        raw = b"""From: mailer-daemon@example.com
+To: sender@example.com
+Subject: Undelivered Mail Returned to Sender
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset="utf-8"
+
+Delivery to the following recipient failed.
+
+--outer
+Content-Type: message/delivery-status
+Content-Disposition: attachment; filename="status.txt"
+
+Reporting-MTA: dns; example.com
+
+Final-Recipient: rfc822; one@example.com
+Action: failed
+
+Final-Recipient: rfc822; two@example.com
+Action: failed
+
+--outer--
+"""
+        message = message_from_bytes(raw)
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert "Delivery to the following recipient failed" in payload["body_text"]
+        entries = [
+            a for a in payload["attachments"] if a["content_type"] == "message/delivery-status"
+        ]
+        assert len(entries) == 1
+        assert entries[0]["size"] == 0
+        assert "content" not in entries[0]
+
+
+class TestMalformedContainers:
+    """A multipart the parser cannot split has no parts to walk.
+
+    A container declaring no boundary leaves ``get_payload()`` returning the
+    raw string rather than a list of parts, so the iterator has nothing to
+    descend into and must not treat the string as one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_nested_boundaryless_multipart_yields_no_parts(self):
+        """The broken container has to be nested to reach the walk at all.
+
+        A top-level container with no boundary never reports itself as
+        multipart, so extraction takes the single-part path and the iterator is
+        never entered. Nested inside a container that did split, it is reached.
+        """
+        raw = b"""From: sender@example.com
+To: recipient@example.com
+Subject: Broken nested container
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset="utf-8"
+
+Body text
+
+--outer
+Content-Type: multipart/alternative
+
+not actually split into parts
+
+--outer--
+"""
+        message = message_from_bytes(raw)
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert "Body text" in payload["body_text"]
+        assert payload["attachments"] == []
+        assert payload["has_attachments"] is False
+
+    @pytest.mark.asyncio
+    async def test_unlabelled_binary_part_is_still_dropped(self):
+        """A part with no disposition, no filename and no Content-ID.
+
+        There is nothing to say it is a file and nothing to render it by, so it
+        stays out of the payload, exactly as it did before inline capture.
+        """
+        raw = b"""From: sender@example.com
+To: recipient@example.com
+Subject: Anonymous part
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset="utf-8"
+
+Body text
+
+--outer
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: base64
+
+aGVsbG8gd29ybGQ=
+
+--outer--
+"""
+        message = message_from_bytes(raw)
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert "Body text" in payload["body_text"]
+        assert payload["attachments"] == []
