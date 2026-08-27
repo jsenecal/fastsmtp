@@ -1,5 +1,6 @@
 """S3-compatible storage for email attachments."""
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -51,7 +52,15 @@ class S3UploadError(Exception):
 def sanitize_key_component(value: str, fallback: str = "unnamed") -> str:
     """Sanitize a string for use in S3 key.
 
-    Removes characters that are problematic in S3 keys.
+    Removes characters that are problematic in S3 keys, including path
+    separators (``/`` and ``\\``) -- callers join sanitized components with
+    ``/`` themselves, so a separator surviving inside one component would
+    silently add a segment to the key. A component that sanitizes down to a
+    bare ``.`` or ``..`` is treated the same as an empty one: those are the
+    two segments a directory-traversal parser gives special meaning to, and
+    since the caller supplies the surrounding ``/`` characters, a component
+    that survives as exactly ``..`` becomes a real parent-directory segment
+    even though it never contained a ``/`` of its own.
 
     ``fallback`` is what to return when nothing survives. It is right for a
     genuinely optional component like a filename, where every message sharing
@@ -59,15 +68,19 @@ def sanitize_key_component(value: str, fallback: str = "unnamed") -> str:
     pass ``fallback=""`` there and substitute something unique, or every such
     message shares one key and silently overwrites the last.
     """
-    # Remove < > and other problematic characters
-    sanitized = re.sub(r"[<>\"'\\|?*\x00-\x1f]", "", value)
+    # Remove < > and other problematic characters, including path separators
+    sanitized = re.sub(r"[<>\"'\\/|?*\x00-\x1f]", "", value)
     # Replace spaces and other whitespace with underscores
     sanitized = re.sub(r"\s+", "_", sanitized)
     # Collapse multiple underscores
     sanitized = re.sub(r"_+", "_", sanitized)
     # Remove leading/trailing underscores
     sanitized = sanitized.strip("_")
-    return sanitized or fallback
+    # A component that is nothing but dots (".", "..", "...") has no content
+    # of its own and, as a whole path segment, ".." means "parent directory".
+    if not sanitized or sanitized.strip(".") == "":
+        return fallback
+    return sanitized
 
 
 class S3Storage:
@@ -96,12 +109,22 @@ class S3Storage:
         self._secret_key = secret_key
         self._session = get_session()
 
-    def _build_key(self, domain: str, message_id: str, filename: str) -> str:
-        """Build S3 key for attachment."""
+    def _build_key(self, domain: str, message_id: str, filename: str, content: bytes) -> str:
+        """Build S3 key for attachment.
+
+        The filename segment is prefixed with the first 8 hex characters of
+        ``sha256(content)`` so two parts that sanitize to the same filename
+        cannot collide: identical bytes produce the same digest and therefore
+        the same key, so a retried upload overwrites its own object as a
+        harmless no-op, while different bytes produce different digests and
+        therefore different keys, so nothing is silently lost to the second
+        ``put_object`` overwriting the first.
+        """
         safe_message_id = sanitize_key_component(message_id)
         safe_filename = sanitize_key_component(filename)
+        digest = hashlib.sha256(content).hexdigest()[:8]
         prefix = self.settings.s3_prefix.strip("/")
-        return f"{prefix}/{domain}/{safe_message_id}/{safe_filename}"
+        return f"{prefix}/{domain}/{safe_message_id}/{digest}-{safe_filename}"
 
     def _build_raw_key(
         self,
@@ -164,7 +187,7 @@ class S3Storage:
         Raises:
             S3UploadError: If upload fails
         """
-        key = self._build_key(domain, message_id, filename)
+        key = self._build_key(domain, message_id, filename, content)
         bucket = self.bucket
 
         try:
