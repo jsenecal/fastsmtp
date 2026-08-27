@@ -20,10 +20,13 @@ The claims under test:
 * **``content_id`` is independent of disposition.** Outlook marks
   cid-referenced images ``attachment`` as often as ``inline``; both need the
   field.
-* **``has_attachments`` still counts only attachment-disposition parts.** It
-  backs the ``has_attachment`` rule field, and corporate signature footers are
-  inline logos - counting them would flip the field to true for a large share
-  of ordinary mail and silently re-route existing rules on upgrade.
+* **``has_attachments`` excuses only what the body renders.** It backs the
+  ``has_attachment`` rule field, and corporate signature footers are inline
+  logos - counting them would flip the field to true for a large share of
+  ordinary mail and silently re-route existing rules on upgrade. So a part is
+  excused when it is an inline image whose Content-ID the HTML references, and
+  counts otherwise. See ``TestUnreferencedInlinePartsCount`` and
+  ``TestOnlyImagesEarnTheExemption`` for the two ways that was got wrong.
 * **The message body is not mistaken for an inline part.** Outlook and Apple
   Mail both put ``Content-Disposition: inline`` on the ``text/plain`` and
   ``text/html`` body parts themselves. A rule that captured every inline
@@ -461,7 +464,11 @@ class TestUnreferencedInlinePartsCount:
     """
 
     @staticmethod
-    def _inline_file(headers: str, body_html: str = "<html><body>Hi</body></html>") -> bytes:
+    def _inline_file(
+        headers: str,
+        body_html: str = "<html><body>Hi</body></html>",
+        content_type: str = "application/x-msdownload",
+    ) -> bytes:
         encoded = base64.b64encode(b"MZ fake executable").decode("ascii")
         return f"""From: sender@example.com
 To: recipient@example.com
@@ -475,7 +482,7 @@ Content-Type: text/html; charset="utf-8"
 {body_html}
 
 --outer
-Content-Type: application/x-msdownload
+Content-Type: {content_type}
 Content-Transfer-Encoding: base64
 {headers}
 
@@ -515,6 +522,7 @@ Content-Transfer-Encoding: base64
             self._inline_file(
                 'Content-Disposition: inline; filename="logo.png"\nContent-ID: <shown@example.com>',
                 body_html='<html><body><img src="cid:shown@example.com"></body></html>',
+                content_type="image/png",
             )
         )
 
@@ -530,6 +538,7 @@ Content-Transfer-Encoding: base64
                 'Content-Disposition: attachment; filename="logo.png"\n'
                 "Content-ID: <shown@example.com>",
                 body_html='<html><body><img src="cid:shown@example.com"></body></html>',
+                content_type="image/png",
             )
         )
 
@@ -597,3 +606,160 @@ Content-Disposition: inline
         payload = await extract_email_payload(message, _envelope())
 
         assert payload["attachments"][0]["content_id"] == "image001.png@01DA1234.5678"
+
+
+class TestOnlyImagesEarnTheExemption:
+    """A `cid:` reference in the body is not proof a part is a decoration.
+
+    The exemption was gated on the body referencing the part's Content-ID, on
+    the reasoning that a referenced part is one a mail client renders inline.
+    That reasoning does not survive `display: none`: a hidden `<img>` costs the
+    sender one tag, buys the exemption, and renders nothing. Requiring the part
+    to be an image as well narrows what can claim to be a signature logo to
+    something a client would actually draw.
+
+    This cannot be made airtight while every input is sender-controlled - a
+    file mislabelled `image/png` still passes - but a mislabelled part is one
+    that no client offers as an attachment either, and its real filename still
+    reaches the consumer.
+    """
+
+    @staticmethod
+    def _hidden_reference(content_type: str, filename: str) -> bytes:
+        blob = base64.b64encode(b"MZ fake executable").decode("ascii")
+        return f"""From: sender@example.com
+To: recipient@example.com
+Subject: Invoice
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="outer"
+
+--outer
+Content-Type: text/html; charset="utf-8"
+
+<html><body>Hi<div style="display:none"><img src="cid:payload@evil"></div></body></html>
+
+--outer
+Content-Type: {content_type}
+Content-Transfer-Encoding: base64
+Content-ID: <payload@evil>
+Content-Disposition: inline; filename="{filename}"
+
+{blob}
+
+--outer--
+""".encode()
+
+    @pytest.mark.asyncio
+    async def test_hidden_reference_to_a_non_image_does_not_exempt(self):
+        message = message_from_bytes(
+            self._hidden_reference("application/x-msdownload", "invoice.exe")
+        )
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert payload["attachments"][0]["filename"] == "invoice.exe"
+        assert payload["has_attachments"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_referenced_image_is_still_exempt(self):
+        """The signature logo this rule exists to protect."""
+        message = message_from_bytes(_outlook_style_message())
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert payload["has_attachments"] is False
+
+
+class TestContentTypeNameIsNotAFilename:
+    """`get_filename()` falls back to the Content-Type `name` parameter.
+
+    So a body part sent as `text/html; name="message.html"` with no
+    Content-Disposition looked like a named file, was classified an attachment,
+    and took the whole body with it. Only a filename the sender put on the
+    Content-Disposition marks a text part as a file.
+    """
+
+    @pytest.mark.asyncio
+    async def test_named_html_body_is_still_the_body(self):
+        raw = b"""From: sender@example.com
+To: recipient@example.com
+Subject: Named body part
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="outer"
+
+--outer
+Content-Type: text/html; charset="utf-8"; name="message.html"
+
+<html><body><p>Real body</p></body></html>
+
+--outer--
+"""
+        message = message_from_bytes(raw)
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert "Real body" in payload["body_html"]
+        assert payload["attachments"] == []
+        assert payload["has_attachments"] is False
+
+    @pytest.mark.asyncio
+    async def test_disposition_filename_still_marks_a_text_file(self):
+        raw = b"""From: sender@example.com
+To: recipient@example.com
+Subject: Inline text file
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset="utf-8"
+
+Body text
+
+--outer
+Content-Type: text/plain; charset="utf-8"
+Content-Disposition: inline; filename="notes.txt"
+
+Note contents
+
+--outer--
+"""
+        message = message_from_bytes(raw)
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert "Body text" in payload["body_text"]
+        assert [a["filename"] for a in payload["attachments"]] == ["notes.txt"]
+
+
+class TestUnquotedCidReference:
+    """An unquoted `src` swallows the self-closing slash into the capture."""
+
+    @pytest.mark.asyncio
+    async def test_self_closing_unquoted_reference_still_matches(self):
+        encoded = base64.b64encode(PNG_BYTES).decode("ascii")
+        raw = f"""From: sender@example.com
+To: recipient@example.com
+Subject: Unquoted src
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="outer"
+
+--outer
+Content-Type: text/html; charset="utf-8"
+
+<html><body><img src=cid:logo@example.com/></body></html>
+
+--outer
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <logo@example.com>
+Content-Disposition: inline
+
+{encoded}
+
+--outer--
+""".encode()
+        message = message_from_bytes(raw)
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert payload["has_attachments"] is False
