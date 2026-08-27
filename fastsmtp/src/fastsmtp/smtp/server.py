@@ -609,6 +609,15 @@ class _PartInfo(NamedTuple):
 _UNSAFE_CONTENT_ID_CHARS = re.compile(r"""[\x00-\x1f\x7f<>"'\s]""")
 _MAX_CONTENT_ID_LENGTH = 512
 
+# The message/* subtypes that encapsulate a whole email. Other subtypes under
+# message/*, notably a DSN's message/delivery-status, are report data rather
+# than a forwarded message and keep the treatment they had before #148.
+_ENCAPSULATED_MESSAGE_TYPES = frozenset({"message/rfc822", "message/global"})
+
+# RFC 2045 restricts message/* to these; anything else means a client encoded
+# the encapsulated message and the parser has not undone it.
+_IDENTITY_TRANSFER_ENCODINGS = frozenset({"", "7bit", "8bit", "binary"})
+
 # Matches the cid: URLs in an HTML body, including the CSS url(cid:...) form.
 _CID_REFERENCE = re.compile(r"""cid:([^"'\s>)]+)""", re.IGNORECASE)
 
@@ -678,11 +687,14 @@ def _classify_part(part: Message) -> _PartInfo:
         # No disposition header at all, but a name= on the Content-Type. Some
         # clients emit exactly that for a genuine attachment.
         return _PartInfo("attachment", filename, content_id)
-    if part.get_content_maintype() == "message":
-        # An attached message/rfc822 (a forwarded email) with no disposition,
-        # Content-ID or filename of its own - unlike a bare text part, this is
-        # never body content. Falling through to None here would drop the
-        # entire forwarded message with no trace at all.
+    if part.get_content_type() in _ENCAPSULATED_MESSAGE_TYPES:
+        # A forwarded email with no disposition, Content-ID or filename of its
+        # own - unlike a bare text part, this is never body content. Falling
+        # through to None here would drop the whole forwarded message with no
+        # trace at all. Deliberately keyed on the subtype rather than the
+        # maintype: a DSN's message/delivery-status is report data, and
+        # capturing it would put a zero-byte stub in every bounce and set
+        # has_attachments on mail that carries nothing.
         return _PartInfo("attachment", filename, content_id)
     return _PartInfo(None, filename, content_id)
 
@@ -732,10 +744,15 @@ def _iter_payload_parts(message: Message) -> Iterator[Message]:
 def _attached_message_bytes(part: Message) -> bytes | None:
     """Serialize an attached message part back into its .eml bytes.
 
-    Covers ``message/global`` (RFC 6532's UTF-8 variant) on the same terms;
-    anything else under ``message/*``, such as a multi-block
-    ``message/delivery-status``, fails the single-submessage guard below and
-    keeps the metadata-only entry it has today.
+    Covers ``message/global`` (RFC 6532's UTF-8 variant) on the same terms.
+    Anything else under ``message/*`` is not an encapsulated message and never
+    reaches here.
+
+    RFC 2045 restricts ``message/*`` to an identity transfer encoding. A client
+    that base64s the encapsulated message anyway leaves the parser holding the
+    undecoded text, which would serialize into a ``content`` that decodes to
+    more base64 rather than to a message. That degrades to the metadata-only
+    stub instead of shipping bytes that look right and are not.
 
     ``get_payload(decode=True)`` returns ``None`` for a message/rfc822 part -
     it is internally shaped like a multipart payload (a one-element list
@@ -750,6 +767,14 @@ def _attached_message_bytes(part: Message) -> bytes | None:
     generator. Degrading that one attachment to the pre-fix "no content" stub
     keeps a single crafted message from failing delivery outright.
     """
+    encoding = (part.get("Content-Transfer-Encoding") or "").strip().lower()
+    if encoding not in _IDENTITY_TRANSFER_ENCODINGS:
+        logger.warning(
+            f"Encapsulated message uses Content-Transfer-Encoding {encoding!r}, "
+            "which RFC 2045 forbids; sending metadata only"
+        )
+        return None
+
     payload = part.get_payload()
     if not (isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], Message)):
         return None
@@ -817,7 +842,7 @@ async def extract_email_payload(
                     nameless_parts += 1
                     filename = _fallback_filename(content_type, nameless_parts)
                 part_payload = part.get_payload(decode=True)
-                if part_payload is None and part.get_content_maintype() == "message":
+                if part_payload is None and content_type in _ENCAPSULATED_MESSAGE_TYPES:
                     part_payload = _attached_message_bytes(part)
                 size = len(part_payload) if isinstance(part_payload, bytes) else 0
 

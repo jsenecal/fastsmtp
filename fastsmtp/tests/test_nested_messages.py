@@ -390,18 +390,20 @@ class TestPathologicalNestingDegradesGracefully:
 
 
 class TestOtherMessageSubtypes:
-    """Not every ``message/*`` part holds exactly one forwarded message.
+    """``message/*`` is not all forwarded mail.
 
-    ``_attached_message_bytes`` serializes the submessage only when the payload
-    is a single ``Message``. A DSN's ``message/delivery-status`` holds one
-    per-recipient block per report, so it fails that guard and keeps the
-    metadata-only entry it had before, rather than being serialized into
-    something no consumer asked for.
+    A DSN's ``message/delivery-status`` sits under the same maintype but is
+    report data, not an encapsulated message. Capturing it would put a
+    zero-byte stub in the payload of every bounce and, because an
+    ``attachment`` disposition always counts, would set ``has_attachments`` on
+    mail carrying nothing - firing every ``has_attachment`` rule on bounce
+    traffic. Note the fixture carries no ``Content-Disposition``, which is what
+    real DSNs send and what makes this reach the classifier's fallback at all.
     """
 
-    @pytest.mark.asyncio
-    async def test_multi_block_delivery_status_stays_metadata_only(self):
-        raw = b"""From: mailer-daemon@example.com
+    @staticmethod
+    def _bounce() -> bytes:
+        return b"""From: MAILER-DAEMON@example.com
 To: sender@example.com
 Subject: Undelivered Mail Returned to Sender
 MIME-Version: 1.0
@@ -414,7 +416,6 @@ Delivery to the following recipient failed.
 
 --outer
 Content-Type: message/delivery-status
-Content-Disposition: attachment; filename="status.txt"
 
 Reporting-MTA: dns; example.com
 
@@ -426,17 +427,67 @@ Action: failed
 
 --outer--
 """
-        message = message_from_bytes(raw)
+
+    @pytest.mark.asyncio
+    async def test_bounce_carries_no_attachment_entry(self):
+        message = message_from_bytes(self._bounce())
 
         payload = await extract_email_payload(message, _envelope())
 
         assert "Delivery to the following recipient failed" in payload["body_text"]
-        entries = [
-            a for a in payload["attachments"] if a["content_type"] == "message/delivery-status"
-        ]
-        assert len(entries) == 1
-        assert entries[0]["size"] == 0
-        assert "content" not in entries[0]
+        assert payload["attachments"] == []
+
+    @pytest.mark.asyncio
+    async def test_bounce_does_not_set_has_attachments(self):
+        message = message_from_bytes(self._bounce())
+
+        payload = await extract_email_payload(message, _envelope())
+
+        assert payload["has_attachments"] is False
+
+
+class TestEncodedEncapsulatedMessage:
+    """RFC 2045 restricts ``message/*`` to an identity transfer encoding.
+
+    A client that base64s the forwarded message anyway leaves the parser
+    holding the undecoded text as the submessage body. Serializing that gives
+    a ``content`` which decodes to more base64 rather than to a message -
+    plausible-looking bytes that are not the forwarded mail. Better to ship the
+    metadata-only stub and say nothing false.
+    """
+
+    @pytest.mark.asyncio
+    async def test_base64_encoded_forward_degrades_to_metadata(self):
+        inner = b"From: original@example.com\nSubject: Original\n\nOriginal body\n"
+        encoded = base64.b64encode(inner).decode("ascii")
+        raw = f"""From: sender@example.com
+To: recipient@example.com
+Subject: Fwd, wrongly encoded
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: text/plain; charset="utf-8"
+
+See attached.
+
+--outer
+Content-Type: message/rfc822
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="forwarded.eml"
+
+{encoded}
+
+--outer--
+""".encode()
+        message = message_from_bytes(raw)
+
+        payload = await extract_email_payload(message, _envelope())
+
+        entry = next(a for a in payload["attachments"] if a["content_type"] == "message/rfc822")
+        assert entry["size"] == 0
+        assert "content" not in entry
+        assert payload["has_attachments"] is True
 
 
 class TestMalformedContainers:

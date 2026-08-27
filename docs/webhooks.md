@@ -339,7 +339,13 @@ the parsed message rather than sliced out of the wire bytes. Use
 It goes through the same storage path as any other attachment: S3 when configured,
 base64 `content` when it is not, metadata only when it exceeds
 `FASTSMTP_WEBHOOK_MAX_INLINE_ATTACHMENT_SIZE`. A forwarded message with no filename of
-its own falls back to `part-N.eml`, same as any other nameless part. `has_attachments`
+its own falls back to `part-N.eml`, same as any other nameless part (`part-N.u8msg`
+for the `message/global` variant). Only `message/rfc822` and `message/global` are
+treated this way; a DSN's `message/delivery-status` is report data rather than an
+encapsulated message and stays out of `attachments` as it always has. A forwarded
+message sent with a `Content-Transfer-Encoding` that RFC 2045 forbids for `message/*`
+arrives as a metadata-only entry, since the bytes the parser holds are the undecoded
+text rather than the message. `has_attachments`
 is `true` whenever a forwarded message is present, since its `attachment` disposition
 always counts (see [`has_attachments` counts what the body does not render](#has_attachments-counts-what-the-body-does-not-render)).
 
