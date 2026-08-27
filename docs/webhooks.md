@@ -302,6 +302,75 @@ reference can be cut away entirely and the attachment entry left with nothing
 pointing at it. Do not assume every entry carrying a `content_id` has a matching
 reference in the body.
 
+## Forwarded Messages
+
+A forwarded email arrives as an attached `message/rfc822` part, whose payload is the
+complete original message, headers and all. Most clients mark it `attachment`; one that
+sends it with no disposition header at all is still treated as an attachment, since a
+message part is never body content.
+FastSMTP represents it as exactly one entry in `attachments`; it does not walk into
+the forwarded message's own parts.
+
+```json
+{
+  "from": "alice@example.com",
+  "subject": "Fwd: Quarterly numbers",
+  "body_text": "See attached.",
+  "has_attachments": true,
+  "attachments": [
+    {
+      "filename": "Quarterly numbers.eml",
+      "content_type": "message/rfc822",
+      "disposition": "attachment",
+      "size": 48213,
+      "storage": "inline",
+      "content": "RnJvbTogYm9iQGV4YW1wbGUuY29tClN1YmplY3Q6IFF1YXJ0ZXJseSBudW1iZXJzCg==...",
+      "content_transfer_encoding": "base64"
+    }
+  ]
+}
+```
+
+`content` is the forwarded message serialized back to RFC 5322 form and base64-encoded -
+the same shape as the `.eml` object in [Preserved Raw Message](#preserved-raw-message),
+though not byte-identical to what the sender transmitted, since it is re-serialized from
+the parsed message rather than sliced out of the wire bytes. Use
+`FASTSMTP_PRESERVE_RAW_MESSAGE` when you need the original octets.
+It goes through the same storage path as any other attachment: S3 when configured,
+base64 `content` when it is not, metadata only when it exceeds
+`FASTSMTP_WEBHOOK_MAX_INLINE_ATTACHMENT_SIZE`. A forwarded message with no filename of
+its own falls back to `part-N.eml`, same as any other nameless part (`part-N.u8msg`
+for the `message/global` variant). Only `message/rfc822` and `message/global` are
+treated this way; a DSN's `message/delivery-status` is report data rather than an
+encapsulated message and stays out of `attachments` as it always has. A forwarded
+message sent with a `Content-Transfer-Encoding` that RFC 2045 forbids for `message/*`
+arrives as a metadata-only entry, since the bytes the parser holds are the undecoded
+text rather than the message. `has_attachments`
+is `true` whenever a forwarded message is present, since its `attachment` disposition
+always counts (see [`has_attachments` counts what the body does not render](#has_attachments-counts-what-the-body-does-not-render)).
+
+Two things follow from not walking into the forwarded message:
+
+- `body_text` and `body_html` are always the outer message's own body. The forwarded
+  message's body no longer overwrites them - which matters beyond display, since it
+  also decides what the `body` rule condition matches against.
+- The forwarded message's own attachments and inline images do not appear as separate
+  entries in the outer `attachments` array. A consumer that needs them parses the
+  `.eml` bytes itself.
+
+### This is a breaking change for existing consumers
+
+Before this fix, payload extraction used `Message.walk()`, which recurses into any
+part shaped like a container - and a `message/rfc822` part is, internally, shaped
+exactly like one. Its own body, attachments and inline images were yielded as if they
+belonged to the outer message: the forwarded message's attachments were hoisted into
+the top-level `attachments` array, and the `message/rfc822` entry itself carried no
+content at all (`size: 0`, no `content` field - `get_payload(decode=True)` returns
+`None` for a `message/*` part). A consumer that downloaded a forwarded attachment
+straight from the top-level `attachments` array stops finding it there. It is still
+present, inside the `.eml` bytes of the `message/rfc822` entry, just no longer
+duplicated at the top level.
+
 ## S3 Key Structure
 
 Attachments are stored with the following key structure:
