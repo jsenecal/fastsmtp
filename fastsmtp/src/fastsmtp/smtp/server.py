@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import re
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email import message_from_bytes
@@ -677,6 +678,12 @@ def _classify_part(part: Message) -> _PartInfo:
         # No disposition header at all, but a name= on the Content-Type. Some
         # clients emit exactly that for a genuine attachment.
         return _PartInfo("attachment", filename, content_id)
+    if part.get_content_maintype() == "message":
+        # An attached message/rfc822 (a forwarded email) with no disposition,
+        # Content-ID or filename of its own - unlike a bare text part, this is
+        # never body content. Falling through to None here would drop the
+        # entire forwarded message with no trace at all.
+        return _PartInfo("attachment", filename, content_id)
     return _PartInfo(None, filename, content_id)
 
 
@@ -690,6 +697,63 @@ def _fallback_filename(content_type: str, index: int) -> str:
     """
     extension = mimetypes.guess_extension(content_type) or ""
     return f"part-{index}{extension}"
+
+
+def _iter_payload_parts(message: Message) -> Iterator[Message]:
+    """Yield the parts of ``message`` that belong in the webhook payload.
+
+    Mirrors ``Message.walk()`` for ordinary ``multipart/*`` containers, but
+    treats an attached ``message/rfc822`` part as a single leaf instead of
+    recursing into the forwarded message's own parts.
+
+    ``Message.walk()`` does not make that distinction: a message/rfc822 part
+    is internally shaped like a multipart one (its payload is a one-element
+    list holding the forwarded ``Message``), which is enough to make
+    ``is_multipart()`` true and pull ``walk()`` into it. That let a forwarded
+    message's body overwrite the outer body and its attachments hoist into
+    the outer attachment list - see issue #148. Checking the maintype instead
+    of ``is_multipart()`` is what keeps the two apart: only an actual
+    ``multipart/*`` container has maintype ``"multipart"``.
+    """
+    if message.get_content_maintype() == "multipart":
+        payload = message.get_payload()
+        if isinstance(payload, list):
+            for subpart in payload:
+                if isinstance(subpart, Message):
+                    yield from _iter_payload_parts(subpart)
+    else:
+        yield message
+
+
+def _attached_message_bytes(part: Message) -> bytes | None:
+    """Serialize an attached message part back into its .eml bytes.
+
+    Covers ``message/global`` (RFC 6532's UTF-8 variant) on the same terms;
+    anything else under ``message/*``, such as a multi-block
+    ``message/delivery-status``, fails the single-submessage guard below and
+    keeps the metadata-only entry it has today.
+
+    ``get_payload(decode=True)`` returns ``None`` for a message/rfc822 part -
+    it is internally shaped like a multipart payload (a one-element list
+    holding the forwarded ``Message``), and decode=True bails out on any
+    multipart payload. Serializing that submessage is what actually recovers
+    the forwarded email's bytes, so the attachment carries real content
+    instead of the ``size: 0`` stub it used to.
+
+    A forward-of-a-forward-of-a-forward, nested deeply enough, blows Python's
+    recursion limit during serialization even though parsing it succeeded -
+    each level of message/rfc822 nesting costs multiple stack frames in the
+    generator. Degrading that one attachment to the pre-fix "no content" stub
+    keeps a single crafted message from failing delivery outright.
+    """
+    payload = part.get_payload()
+    if not (isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], Message)):
+        return None
+    try:
+        return payload[0].as_bytes()
+    except Exception as e:
+        logger.warning(f"Failed to serialize message/rfc822 attachment, using metadata only: {e}")
+        return None
 
 
 async def extract_email_payload(
@@ -737,10 +801,7 @@ async def extract_email_payload(
     body_html = ""
 
     if message.is_multipart():
-        for part in message.walk():
-            if part.get_content_maintype() == "multipart":
-                continue
-
+        for part in _iter_payload_parts(message):
             content_type = part.get_content_type()
             disposition, part_filename, content_id = _classify_part(part)
 
@@ -752,6 +813,8 @@ async def extract_email_payload(
                     nameless_parts += 1
                     filename = _fallback_filename(content_type, nameless_parts)
                 part_payload = part.get_payload(decode=True)
+                if part_payload is None and part.get_content_maintype() == "message":
+                    part_payload = _attached_message_bytes(part)
                 size = len(part_payload) if isinstance(part_payload, bytes) else 0
 
                 attachment_info: dict[str, Any] = {
