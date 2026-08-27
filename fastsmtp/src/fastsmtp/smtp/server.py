@@ -644,16 +644,29 @@ def _content_id_value(part: Message) -> str | None:
 def _counts_as_attachment(attachment: dict[str, Any], referenced: set[str]) -> bool:
     """Whether a captured part should set ``has_attachments``.
 
-    Only parts the HTML body actually renders are excused - a ``cid:`` URL
-    pointing at this part's Content-ID. A part is not excused for merely
-    saying ``inline``, or for declaring a Content-ID nothing references:
-    either would let a sender deliver a file to the webhook consumer while
-    ``has_attachment`` rules stayed silent.
+    To be excused, a part has to look like a decoration on all three counts:
+    an ``inline`` disposition, an image, and a ``cid:`` URL in the body
+    pointing at its Content-ID. Saying ``inline`` is not enough on its own,
+    and neither is declaring a Content-ID nothing references - either would
+    let a sender deliver a file while ``has_attachment`` rules stayed silent.
+
+    Being referenced is not enough either, which is why the image test is
+    here. A reference costs the sender one hidden tag: a
+    ``<div style="display:none">`` wrapped around an ``<img>`` renders nothing
+    and would otherwise have bought the exemption for any file at all.
+
+    None of this can be airtight while every input is sender-controlled - a
+    file mislabelled ``image/png`` still passes. But a mislabelled part is one
+    no mail client offers as an attachment either, and its real filename still
+    reaches the consumer in the payload.
 
     An ``attachment`` disposition always counts, referenced or not. Outlook
     marks cid images that way, and those set the flag today.
     """
     if attachment.get("disposition") == "attachment":
+        return True
+    content_type = str(attachment.get("content_type") or "")
+    if not content_type.lower().startswith("image/"):
         return True
     content_id = attachment.get("content_id")
     return content_id is None or content_id not in referenced
@@ -678,7 +691,13 @@ def _classify_part(part: Message) -> _PartInfo:
     if disposition == "attachment":
         return _PartInfo("attachment", filename, content_id)
 
-    if part.get_content_maintype() == "text" and not filename:
+    # get_filename() falls back to the Content-Type name parameter, which body
+    # parts do carry - some clients send text/html; name="message.html". Only a
+    # filename the sender put on the Content-Disposition marks a text part as a
+    # file; keying on get_filename() here empties the body for that mail.
+    if part.get_content_maintype() == "text" and not part.get_param(
+        "filename", header="content-disposition"
+    ):
         return _PartInfo(None, filename, content_id)
 
     if disposition == "inline" or content_id:
@@ -935,7 +954,9 @@ async def extract_email_payload(
     # part would silently re-route existing rules the first time a message
     # carried a footer image - but only the ones the body actually renders are
     # excused. See _counts_as_attachment.
-    referenced = {match.group(1) for match in _CID_REFERENCE.finditer(body_html)}
+    # rstrip("/") because an unquoted src="" swallows a self-closing tag's
+    # slash into the capture: <img src=cid:logo@x/> yields "logo@x/".
+    referenced = {match.group(1).rstrip("/") for match in _CID_REFERENCE.finditer(body_html)}
     payload["has_attachments"] = any(_counts_as_attachment(a, referenced) for a in attachments)
 
     # Enforce maximum payload size for inline storage

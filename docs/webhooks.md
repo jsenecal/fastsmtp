@@ -269,18 +269,27 @@ or malformed.
 Note `"has_attachments": false` in the example above. A signature logo is not an
 attachment as far as your users are concerned, and treating it as one would fire
 attachment rules on a large share of ordinary mail. What earns the exemption is
-being rendered: a `cid:` URL in `body_html` pointing at that part's
-`content_id`. Specifically, a captured part sets `has_attachments` unless
+looking like a decoration on all three counts. A captured part sets
+`has_attachments` unless
 
 - its `disposition` is `inline` (or it has no disposition header of its own),
   **and**
+- its `content_type` is an `image/*`, **and**
 - it has a `content_id` that `body_html` actually references.
 
-Declaring an inline disposition is not enough on its own, and neither is
-declaring a `content_id` that nothing references - otherwise any sender could
-exempt a file from `has_attachment` rules just by labelling it. Parts with an
-explicit `attachment` disposition always count, referenced or not, since clients
-routinely mark cid images that way.
+Declaring an inline disposition is not enough on its own; neither is declaring a
+`content_id` that nothing references; and neither is the reference by itself,
+since a `<div style="display:none">` around an `<img>` renders nothing and would
+otherwise exempt any file at all. Parts with an explicit `attachment`
+disposition always count, referenced or not, since clients routinely mark cid
+images that way.
+
+None of this is airtight, because every input is sender-controlled - a file
+labelled `image/png` passes the type test. What it buys is that anything
+claiming the exemption is something a mail client would draw rather than offer
+as an attachment, and the part's real filename still reaches you in the payload.
+Treat `has_attachments` as a routing signal, not a security boundary: inspect
+`attachments` yourself when the decision matters.
 
 The same rule backs the `has_attachment` rule condition. To find inline images
 regardless of how they were labelled, look for entries that carry a
