@@ -4,13 +4,14 @@ import asyncio
 import base64
 import contextlib
 import logging
+import mimetypes
 import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email import message_from_bytes
 from email.message import Message
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import idna
 
@@ -588,6 +589,109 @@ class FastSMTPHandler:
         return deliveries_created
 
 
+class _PartInfo(NamedTuple):
+    """How a MIME part should be represented in the webhook payload.
+
+    ``disposition`` is ``None`` when the part is body text and belongs in
+    ``body_text`` or ``body_html``.
+    """
+
+    disposition: str | None
+    filename: str | None
+    content_id: str | None
+
+
+# A Content-ID is an addr-spec (RFC 2045), so none of these can appear in a
+# well-formed one. The value is sender-controlled and consumers interpolate it
+# into HTML to resolve cid: references, so a malformed one is dropped rather
+# than forwarded.
+_UNSAFE_CONTENT_ID_CHARS = re.compile(r"""[\x00-\x1f\x7f<>"'\s]""")
+_MAX_CONTENT_ID_LENGTH = 512
+
+# Matches the cid: URLs in an HTML body, including the CSS url(cid:...) form.
+_CID_REFERENCE = re.compile(r"""cid:([^"'\s>)]+)""", re.IGNORECASE)
+
+
+def _content_id_value(part: Message) -> str | None:
+    """Return a part's Content-ID as the bare addr-spec, or ``None``.
+
+    The header value is wrapped in angle brackets while the ``cid:`` URL in the
+    HTML body is the bare addr-spec (RFC 2392). Consumers match against the
+    URL, so strip the brackets here rather than making every one of them do it.
+    A bare ``Content-ID: <>``, which some relays emit, reduces to ``None``.
+    """
+    raw = part.get("Content-ID")
+    if not raw:
+        return None
+    value = str(raw).strip().lstrip("<").rstrip(">").strip()
+    if not value or len(value) > _MAX_CONTENT_ID_LENGTH:
+        return None
+    if _UNSAFE_CONTENT_ID_CHARS.search(value):
+        return None
+    return value
+
+
+def _counts_as_attachment(attachment: dict[str, Any], referenced: set[str]) -> bool:
+    """Whether a captured part should set ``has_attachments``.
+
+    Only parts the HTML body actually renders are excused - a ``cid:`` URL
+    pointing at this part's Content-ID. A part is not excused for merely
+    saying ``inline``, or for declaring a Content-ID nothing references:
+    either would let a sender deliver a file to the webhook consumer while
+    ``has_attachment`` rules stayed silent.
+
+    An ``attachment`` disposition always counts, referenced or not. Outlook
+    marks cid images that way, and those set the flag today.
+    """
+    if attachment.get("disposition") == "attachment":
+        return True
+    content_id = attachment.get("content_id")
+    return content_id is None or content_id not in referenced
+
+
+def _classify_part(part: Message) -> _PartInfo:
+    """Decide whether a MIME part is an attachment, an inline part, or body.
+
+    The distinction cannot be read off Content-Disposition alone: Outlook and
+    Apple Mail both mark the body parts themselves ``inline``. What separates
+    an inline *file* from the body is a filename.
+
+    A Content-ID deliberately does not: RFC 2387 identifies the root part of a
+    ``multipart/related`` by the container's ``start`` parameter, whose value
+    is that part's Content-ID, so an HTML body legitimately carries the header.
+    Treating it as a file marker empties ``body_html`` for that mail.
+    """
+    filename = part.get_filename()
+    content_id = _content_id_value(part)
+    disposition = (part.get("Content-Disposition") or "").split(";")[0].strip().lower()
+
+    if disposition == "attachment":
+        return _PartInfo("attachment", filename, content_id)
+
+    if part.get_content_maintype() == "text" and not filename:
+        return _PartInfo(None, filename, content_id)
+
+    if disposition == "inline" or content_id:
+        return _PartInfo("inline", filename, content_id)
+    if filename:
+        # No disposition header at all, but a name= on the Content-Type. Some
+        # clients emit exactly that for a genuine attachment.
+        return _PartInfo("attachment", filename, content_id)
+    return _PartInfo(None, filename, content_id)
+
+
+def _fallback_filename(content_type: str, index: int) -> str:
+    """Name a part that carries no filename of its own.
+
+    cid-referenced images routinely have only a Content-ID. Naming every one of
+    them the same literal would be invisible in the payload but not in S3,
+    where the key is built from the filename: two nameless parts in one message
+    would write to one key and the second would overwrite the first.
+    """
+    extension = mimetypes.guess_extension(content_type) or ""
+    return f"part-{index}{extension}"
+
+
 async def extract_email_payload(
     message: Message,
     envelope: Envelope,
@@ -609,8 +713,6 @@ async def extract_email_payload(
             usable Message-ID never share (and overwrite) the same S3 key prefix
     """
     s3_message_id = key_safe_message_id(message_id or message.get("Message-ID"))
-    from typing import Any
-
     settings = settings or get_settings()
     max_inline_attachment_size = settings.webhook_max_inline_attachment_size
 
@@ -630,17 +732,25 @@ async def extract_email_payload(
 
     # Extract body
     attachments: list[dict[str, Any]] = []
+    nameless_parts = 0
     body_text = ""
     body_html = ""
 
     if message.is_multipart():
         for part in message.walk():
-            content_type = part.get_content_type()
-            content_disposition = part.get("Content-Disposition", "")
+            if part.get_content_maintype() == "multipart":
+                continue
 
-            if "attachment" in content_disposition:
-                # Handle attachment
-                filename = part.get_filename() or "unnamed"
+            content_type = part.get_content_type()
+            disposition, part_filename, content_id = _classify_part(part)
+
+            if disposition is not None:
+                # Handle attachment or inline part
+                if part_filename:
+                    filename = part_filename
+                else:
+                    nameless_parts += 1
+                    filename = _fallback_filename(content_type, nameless_parts)
                 part_payload = part.get_payload(decode=True)
                 size = len(part_payload) if isinstance(part_payload, bytes) else 0
 
@@ -648,7 +758,10 @@ async def extract_email_payload(
                     "filename": filename,
                     "content_type": content_type,
                     "size": size,
+                    "disposition": disposition,
                 }
+                if content_id:
+                    attachment_info["content_id"] = content_id
 
                 if isinstance(part_payload, bytes) and s3_storage and domain:
                     # Upload to S3
@@ -725,7 +838,13 @@ async def extract_email_payload(
     payload["body_text"] = body_text
     payload["body_html"] = body_html
     payload["attachments"] = attachments
-    payload["has_attachments"] = len(attachments) > 0
+    # This field backs the "has_attachment" rule condition. Inline signature
+    # logos ride on a large share of ordinary mail, so counting every captured
+    # part would silently re-route existing rules the first time a message
+    # carried a footer image - but only the ones the body actually renders are
+    # excused. See _counts_as_attachment.
+    referenced = {match.group(1) for match in _CID_REFERENCE.finditer(body_html)}
+    payload["has_attachments"] = any(_counts_as_attachment(a, referenced) for a in attachments)
 
     # Enforce maximum payload size for inline storage
     max_payload_size = settings.webhook_max_inline_payload_size

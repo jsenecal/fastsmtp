@@ -28,6 +28,7 @@ With `FASTSMTP_ATTACHMENT_STORAGE=inline` (default), attachments are base64-enco
     {
       "filename": "invoice-2025-01.pdf",
       "content_type": "application/pdf",
+      "disposition": "attachment",
       "size": 45678,
       "content": "JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9UeXBlL..."
     }
@@ -66,6 +67,7 @@ With `FASTSMTP_ATTACHMENT_STORAGE=s3`, attachments are uploaded to S3 and the pa
     {
       "filename": "invoice-2025-01.pdf",
       "content_type": "application/pdf",
+      "disposition": "attachment",
       "size": 45678,
       "storage": "s3",
       "bucket": "my-email-attachments",
@@ -97,6 +99,7 @@ With `FASTSMTP_S3_PRESIGNED_URLS=true`, the payload includes time-limited downlo
     {
       "filename": "invoice-2025-01.pdf",
       "content_type": "application/pdf",
+      "disposition": "attachment",
       "size": 45678,
       "storage": "s3",
       "bucket": "my-email-attachments",
@@ -154,6 +157,7 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
     {
       "filename": "invoice-2025-01.pdf",
       "content_type": "application/pdf",
+      "disposition": "attachment",
       "size": 45678,
       "storage_fallback": true,
       "content": "JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9UeXBlL..."
@@ -175,6 +179,7 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
     {
       "filename": "offer-letter.pdf",
       "content_type": "application/pdf",
+      "disposition": "attachment",
       "size": 89012,
       "storage": "s3",
       "bucket": "my-email-attachments",
@@ -185,6 +190,7 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
     {
       "filename": "headshot.jpg",
       "content_type": "image/jpeg",
+      "disposition": "attachment",
       "size": 234567,
       "storage": "s3",
       "bucket": "my-email-attachments",
@@ -195,6 +201,7 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
     {
       "filename": "w4-form.pdf",
       "content_type": "application/pdf",
+      "disposition": "attachment",
       "size": 56789,
       "storage": "s3",
       "bucket": "my-email-attachments",
@@ -205,6 +212,95 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
   ]
 }
 ```
+
+## Inline Images and Content-ID
+
+HTML mail embeds images by reference rather than by value: the body carries
+`<img src="cid:image001.png@01DA1234.5678">` and a sibling MIME part carries the
+matching `Content-ID` header. Outlook and Apple Mail both do this for signature
+logos.
+
+Those parts appear in `attachments` alongside ordinary attachments, and are told
+apart by two fields:
+
+| Field | Meaning |
+|---|---|
+| `disposition` | `attachment` or `inline`. Present on every entry. |
+| `content_id` | The `Content-ID` addr-spec with the angle brackets stripped, so it matches the `cid:` URL in `body_html` directly. Present only on parts that carry the header. |
+
+`content_id` is independent of `disposition`: clients mark cid-referenced images
+`attachment` about as often as `inline`, so match on `content_id` rather than on
+`disposition` when resolving a `cid:` reference.
+
+```json
+{
+  "body_html": "<html><body><p>Regards,</p><img src=\"cid:image001.png@01DA1234.5678\"></body></html>",
+  "has_attachments": false,
+  "attachments": [
+    {
+      "filename": "image001.png",
+      "content_type": "image/png",
+      "disposition": "inline",
+      "content_id": "image001.png@01DA1234.5678",
+      "size": 4523,
+      "storage": "inline",
+      "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ...",
+      "content_transfer_encoding": "base64"
+    }
+  ]
+}
+```
+
+Inline parts go through the same storage path as attachments: S3 when it is
+configured, base64 `content` when it is not, metadata only when the part exceeds
+`FASTSMTP_WEBHOOK_MAX_INLINE_ATTACHMENT_SIZE`.
+
+### `content_id` is sender-controlled
+
+The header comes from the message, so treat the field as untrusted input and
+HTML-escape it before putting it anywhere near a rendered page. A well-formed
+Content-ID is an addr-spec, so FastSMTP omits the field entirely when the value
+carries quotes, angle brackets, whitespace or control characters, or runs past
+512 characters. An entry with no `content_id` is a part whose header was absent
+or malformed.
+
+### `has_attachments` counts what the body does not render
+
+Note `"has_attachments": false` in the example above. A signature logo is not an
+attachment as far as your users are concerned, and treating it as one would fire
+attachment rules on a large share of ordinary mail. What earns the exemption is
+being rendered: a `cid:` URL in `body_html` pointing at that part's
+`content_id`. Specifically, a captured part sets `has_attachments` unless
+
+- its `disposition` is `inline` (or it has no disposition header of its own),
+  **and**
+- it has a `content_id` that `body_html` actually references.
+
+Declaring an inline disposition is not enough on its own, and neither is
+declaring a `content_id` that nothing references - otherwise any sender could
+exempt a file from `has_attachment` rules just by labelling it. Parts with an
+explicit `attachment` disposition always count, referenced or not, since clients
+routinely mark cid images that way.
+
+The same rule backs the `has_attachment` rule condition. To find inline images
+regardless of how they were labelled, look for entries that carry a
+`content_id`.
+
+### Oversized messages leave dangling references
+
+When a payload exceeds `FASTSMTP_WEBHOOK_MAX_INLINE_PAYLOAD_SIZE`, FastSMTP
+drops attachment `content` before it truncates the bodies, since that is the one
+field it can remove without corrupting anything. The attachment entry and its
+`content_id` survive, so a `cid:` reference resolves to an entry with no bytes
+behind it. Render a placeholder for an entry that has a `content_id` but no
+`content`, `url` or `presigned_url`.
+
+If dropping the attachment content is not enough on its own, the bodies are
+truncated too, and truncation keeps the start of `body_html` and cuts the end.
+Signature images live in the footer, so on a message that large the `cid:`
+reference can be cut away entirely and the attachment entry left with nothing
+pointing at it. Do not assume every entry carrying a `content_id` has a matching
+reference in the body.
 
 ## S3 Key Structure
 
