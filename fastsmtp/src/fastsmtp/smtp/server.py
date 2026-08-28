@@ -722,9 +722,14 @@ def _fallback_filename(content_type: str, index: int) -> str:
     """Name a part that carries no filename of its own.
 
     cid-referenced images routinely have only a Content-ID. Naming every one of
-    them the same literal would be invisible in the payload but not in S3,
-    where the key is built from the filename: two nameless parts in one message
-    would write to one key and the second would overwrite the first.
+    them the same literal would leave a consumer unable to tell two nameless
+    parts apart, and with no extension to key off; the part index and the
+    guessed extension give it ``part-1.png`` instead.
+
+    This says nothing about S3 keys any more. ``S3Storage._build_key`` prefixes
+    the filename segment with a digest of the content (#150), so two parts with
+    different bytes cannot share a key whatever they are called, and two parts
+    with identical bytes share one harmlessly.
     """
     extension = mimetypes.guess_extension(content_type) or ""
     return f"part-{index}{extension}"
