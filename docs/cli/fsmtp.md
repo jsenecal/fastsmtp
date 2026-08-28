@@ -344,8 +344,11 @@ fsmtp rules rule reorder <domain-id> <ruleset-id> <rule-id-1> <rule-id-2>
 fsmtp rules rule delete <domain-id> <rule-id>
 ```
 
-Valid fields are `from`, `to`, `subject`, `body`, `has_attachment`, `dkim_result`,
-`spf_result`, or `header:X-Custom-Header`. Valid operators are `equals`, `contains`,
+Valid fields are `from`, `to`, `subject`, `body`, `has_attachment`,
+`attachment_names`, `attachment_types`, `dkim_result`, `spf_result`, or
+`header:X-Custom-Header`. The two attachment fields hold one value per part and match
+when any single part satisfies the condition; see
+[Matching on attachments](../rules.md#matching-on-attachments). Valid operators are `equals`, `contains`,
 `regex`, `starts_with`, `ends_with` and `exists`. Valid actions are `forward`, `drop`,
 `tag` and `quarantine`. `regex` patterns use
 [RE2 syntax](https://github.com/google/re2/wiki/Syntax) (no backreferences or

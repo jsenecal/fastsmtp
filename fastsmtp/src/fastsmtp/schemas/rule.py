@@ -14,6 +14,8 @@ RULE_FIELDS = {
     "subject",
     "body",
     "has_attachment",
+    "attachment_names",
+    "attachment_types",
     "dkim_result",
     "spf_result",
 }
@@ -85,7 +87,8 @@ class RuleBase(BaseModel):
     field: str = Field(
         ...,
         description="Field to match: from, to, subject, body, has_attachment, "
-        "dkim_result, spf_result, or header:X-Custom-Header",
+        "attachment_names, attachment_types, dkim_result, spf_result, or "
+        "header:X-Custom-Header",
     )
     operator: str = Field(
         ...,

@@ -50,7 +50,62 @@ class RuleEvaluationResult:
         return self.action == "quarantine"
 
 
+# Fields that hold one value per captured part rather than one per message,
+# mapped to the key each one reads off an entry in the payload's attachments.
+MULTI_VALUE_FIELDS = {
+    "attachment_names": "filename",
+    "attachment_types": "content_type",
+}
+
+
+def extract_field_values(
+    field_name: str,
+    message: Message,
+    payload: dict,
+    auth_result: EmailAuthResult | None = None,
+    settings: Settings | None = None,
+) -> list[str] | None:
+    """Extract every value a field offers, or ``None`` if the field is unknown.
+
+    Most fields describe the message as a whole and yield a single value. The
+    attachment fields yield one per captured part, and a rule matches when any
+    one of them satisfies the condition.
+
+    That is why they cannot be one joined string. Against ``"a.pdf\nb.exe"``
+    an ``ends_with ".exe"`` would pass and against ``"b.exe\na.pdf"`` it would
+    fail: the rule would silently test whichever part sorted last, while
+    reading as though it tested all of them.
+
+    An empty list is a known field with nothing to offer - a message carrying
+    no parts - and matches nothing, ``exists`` included.
+    """
+    part_key = MULTI_VALUE_FIELDS.get(field_name)
+    if part_key is not None:
+        return [str(part.get(part_key) or "") for part in payload.get("attachments", [])]
+
+    value = _single_field_value(field_name, message, payload, auth_result, settings)
+    return None if value is None else [value]
+
+
 def extract_field_value(
+    field_name: str,
+    message: Message,
+    payload: dict,
+    auth_result: EmailAuthResult | None = None,
+    settings: Settings | None = None,
+) -> str | None:
+    """Extract a field's first value, or ``None`` if the field is unknown.
+
+    Rule evaluation uses :func:`extract_field_values`, which matches on any of
+    them. This is the single-value view, kept for callers that want one string.
+    """
+    values = extract_field_values(field_name, message, payload, auth_result, settings)
+    if values is None:
+        return None
+    return values[0] if values else ""
+
+
+def _single_field_value(
     field_name: str,
     message: Message,
     payload: dict,
@@ -123,17 +178,23 @@ def evaluate_rule(
     Returns:
         True if the rule matches
     """
-    field_value = extract_field_value(rule.field, message, payload, auth_result, settings)
+    field_values = extract_field_values(rule.field, message, payload, auth_result, settings)
 
-    if field_value is None:
+    if field_values is None:
         logger.debug(f"Rule {rule.id}: field '{rule.field}' not found")
         return False
 
-    result = evaluate_condition(
-        operator=rule.operator,
-        value=field_value,
-        pattern=rule.value,
-        case_sensitive=rule.case_sensitive,
+    # Any one value satisfying the condition matches the rule. For the
+    # single-valued fields that is the only value; for the attachment fields it
+    # means a rule fires on whichever part matches, regardless of its position.
+    result = any(
+        evaluate_condition(
+            operator=rule.operator,
+            value=field_value,
+            pattern=rule.value,
+            case_sensitive=rule.case_sensitive,
+        )
+        for field_value in field_values
     )
 
     if result:
