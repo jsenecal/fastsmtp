@@ -1,11 +1,16 @@
 """Rule condition matchers."""
 
 import logging
+from functools import lru_cache
 from typing import Any
 
 import re2
 
 logger = logging.getLogger(__name__)
+
+# Rule patterns come from operators, not from mail, so the set is small and
+# bounded - the cap is a backstop, not a working limit.
+_PATTERN_CACHE_SIZE = 512
 
 
 def _re2_options(case_sensitive: bool) -> re2.Options:
@@ -18,6 +23,21 @@ def _re2_options(case_sensitive: bool) -> re2.Options:
     options.case_sensitive = case_sensitive
     options.log_errors = False
     return options
+
+
+@lru_cache(maxsize=_PATTERN_CACHE_SIZE)
+def _compiled_pattern(pattern: str, case_sensitive: bool) -> Any:
+    """Compile a rule pattern once and reuse it.
+
+    ``re2.search(pattern, text)`` compiles on every call - it has no cache of
+    its own. A rule used to cost one compile per message, which was already
+    waste; once a field can hold one value per attachment part, it became one
+    compile per part, so the cost grew with what the sender chose to send.
+
+    An invalid pattern raises out of here rather than being cached, so it keeps
+    logging and failing to match exactly as before.
+    """
+    return re2.compile(pattern, options=_re2_options(case_sensitive))
 
 
 def _re2_error_reason(exc: re2.error) -> str:
@@ -97,7 +117,7 @@ def match_regex(value: str, pattern: str, case_sensitive: bool = False) -> bool:
         logger.debug("Regex value contains unencodable code points; sanitizing")
         value = value.encode("utf-8", errors="replace").decode("utf-8")
     try:
-        return bool(re2.search(pattern, value, options=_re2_options(case_sensitive)))
+        return bool(_compiled_pattern(pattern, case_sensitive).search(value))
     except re2.error as e:
         # Invalid or RE2-unsupported pattern - log but don't match
         logger.warning(f"Invalid regex pattern '{pattern[:100]}': {_re2_error_reason(e)}")

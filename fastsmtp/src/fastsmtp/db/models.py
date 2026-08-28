@@ -343,7 +343,8 @@ class Rule(Base, TimestampMixin):
     order: Mapped[int] = mapped_column(nullable=False)
     field: Mapped[str] = mapped_column(
         String(100), nullable=False
-    )  # from, to, subject, header:X-Custom, body, has_attachment, dkim_result, spf_result
+    )  # from, to, subject, header:X-Custom, body, has_attachment,
+    # attachment_names, attachment_types, dkim_result, spf_result
     operator: Mapped[str] = mapped_column(
         String(50), nullable=False
     )  # equals, contains, regex, starts_with, ends_with, exists

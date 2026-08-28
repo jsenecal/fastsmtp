@@ -30,6 +30,8 @@ VALID_FIELDS = (
     "subject",
     "body",
     "has_attachment",
+    "attachment_names",
+    "attachment_types",
     "dkim_result",
     "spf_result",
 )

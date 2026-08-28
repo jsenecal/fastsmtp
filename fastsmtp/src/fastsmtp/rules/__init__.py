@@ -17,6 +17,7 @@ from fastsmtp.rules.engine import (
     evaluate_rule,
     evaluate_rules,
     extract_field_value,
+    extract_field_values,
 )
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "evaluate_rule",
     "evaluate_rules",
     "extract_field_value",
+    "extract_field_values",
     "match_contains",
     "match_ends_with",
     "match_equals",

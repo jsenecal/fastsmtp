@@ -11,9 +11,50 @@ The rule engine allows conditional processing of emails based on various attribu
   field. Everything else the message carries does, including a part that claims
   an inline disposition without being referenced from the body; see
   [Inline images and Content-ID](webhooks.md#inline-images-and-content-id)
+- `attachment_names`, `attachment_types` - the filename and content type of each
+  part the message carries; see [Matching on attachments](#matching-on-attachments)
 - `dkim_result`, `spf_result` - a mechanism this rule's own domain does not verify
   reads as `none`, whatever another recipient's domain asked for; see
   [Per-domain overrides](configuration.md#per-domain-overrides)
+
+### Matching on attachments
+
+`attachment_names` and `attachment_types` hold one value per part rather than one per
+message, and a rule matches when **any single part** satisfies the condition. So this
+fires whether the executable arrives first, last, or alone:
+
+```bash
+fsmtp rules rule create <domain-id> <ruleset-id> \
+  --field attachment_names \
+  --operator regex \
+  --value '\.(exe|scr|vbs|js)$' \
+  --action forward \
+  --webhook-url https://n8n.example.com/webhook/mail-inspect
+```
+
+Per-part matching is why these are not one joined string. Against `a.pdf` then `b.exe`
+an `ends_with ".exe"` would pass, and against `b.exe` then `a.pdf` it would fail - the
+rule would silently test whichever part sorted last while reading as though it tested
+all of them. For the same reason a pattern cannot match across a boundary: two parts
+named `a.pdf` and `b.exe` do not contain `pdfb`.
+
+A message carrying no parts matches nothing, `exists` included.
+
+Unlike `has_attachment`, these fields include inline images the body renders. A rule is
+where policy is expressed, so nothing the message carries is hidden from it - a part
+able to hide from matching would be worth more to a sender than a signature logo is to
+anyone else.
+
+### Both fields are sender-controlled
+
+Treat them as a way to narrow what gets inspected, not as a verdict. A filename tells
+you what the sender chose to call the file: it does not survive `invoice.pdf.exe`, a
+right-to-left override rendering a `.exe` as a `.pdf`, or anything inside an archive.
+A content type is likewise whatever the sender typed, and need not describe the bytes.
+
+Deciding whether a file is dangerous means reading magic bytes, unpacking archives and
+running a scanner, which belongs in the consumer. What these fields buy is routing the
+candidates there cheaply.
 
 ## Rule Operators
 
