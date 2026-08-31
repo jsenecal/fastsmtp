@@ -16,6 +16,7 @@ from fastsmtp.smtp.server import (
     find_recipient_for_address,
     lookup_recipient,
 )
+from mime_helpers import new_envelope
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -145,9 +146,7 @@ class TestExtractEmailPayload:
     @pytest.mark.asyncio
     async def test_extract_simple_text_email(self):
         """Test extracting payload from simple text email."""
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         message = EmailMessage()
         message["From"] = "sender@example.com"
@@ -168,9 +167,7 @@ class TestExtractEmailPayload:
     @pytest.mark.asyncio
     async def test_extract_html_email(self):
         """Test extracting payload from HTML email."""
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         message = EmailMessage()
         message["From"] = "sender@example.com"
@@ -186,9 +183,7 @@ class TestExtractEmailPayload:
     @pytest.mark.asyncio
     async def test_extract_multipart_email(self):
         """Test extracting payload from multipart email."""
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         message = EmailMessage()
         message["From"] = "sender@example.com"
@@ -205,9 +200,7 @@ class TestExtractEmailPayload:
     @pytest.mark.asyncio
     async def test_extract_email_with_attachment(self):
         """Test extracting payload from email with attachment."""
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         message = EmailMessage()
         message["From"] = "sender@example.com"

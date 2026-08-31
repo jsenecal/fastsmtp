@@ -18,9 +18,9 @@ from aiosmtpd.smtp import Envelope
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image data"
 
 
-def envelope() -> Envelope:
+def new_envelope() -> Envelope:
     """An envelope as it stands after MAIL FROM and a single RCPT TO."""
-    env = Envelope()
-    env.mail_from = "sender@example.com"
-    env.rcpt_tos = ["recipient@example.com"]
-    return env
+    envelope = Envelope()
+    envelope.mail_from = "sender@example.com"
+    envelope.rcpt_tos = ["recipient@example.com"]
+    return envelope
