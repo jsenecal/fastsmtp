@@ -39,7 +39,7 @@ from email.message import EmailMessage
 
 import pytest
 from fastsmtp.smtp.server import extract_email_payload
-from mime_helpers import PNG_BYTES, envelope
+from mime_helpers import PNG_BYTES, new_envelope
 
 
 def _outlook_style_message(disposition: str = "inline") -> bytes:
@@ -78,7 +78,7 @@ class TestInlineParts:
     async def test_inline_image_is_captured(self):
         message = message_from_bytes(_outlook_style_message())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 1
         attachment = payload["attachments"][0]
@@ -92,7 +92,7 @@ class TestInlineParts:
     async def test_content_id_has_angle_brackets_stripped(self):
         message = message_from_bytes(_outlook_style_message())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["attachments"][0]["content_id"] == "image001.png@01DA1234.5678"
 
@@ -100,7 +100,7 @@ class TestInlineParts:
     async def test_inline_part_is_marked_inline(self):
         message = message_from_bytes(_outlook_style_message())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["attachments"][0]["disposition"] == "inline"
 
@@ -109,7 +109,7 @@ class TestInlineParts:
         """Outlook marks cid-referenced images "attachment" as often as "inline"."""
         message = message_from_bytes(_outlook_style_message(disposition="attachment"))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         attachment = payload["attachments"][0]
         assert attachment["content_id"] == "image001.png@01DA1234.5678"
@@ -120,7 +120,7 @@ class TestInlineParts:
         """Capturing the sibling part must not consume the body it belongs to."""
         message = message_from_bytes(_outlook_style_message())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "cid:image001.png@01DA1234.5678" in payload["body_html"]
 
@@ -149,7 +149,7 @@ Content-Transfer-Encoding: base64
 """.encode()
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 1
         assert payload["attachments"][0]["filename"] == "photo.png"
@@ -162,7 +162,7 @@ class TestHasAttachmentsSemantics:
     async def test_inline_only_message_reports_no_attachments(self):
         message = message_from_bytes(_outlook_style_message())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["attachments"], "inline part should still be captured"
         assert payload["has_attachments"] is False
@@ -181,7 +181,7 @@ class TestHasAttachmentsSemantics:
             filename="test.txt",
         )
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["has_attachments"] is True
         assert payload["attachments"][0]["disposition"] == "attachment"
@@ -220,7 +220,7 @@ Content-Disposition: attachment; filename="invoice.pdf"
 """.encode()
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 2
         by_name = {a["filename"]: a for a in payload["attachments"]}
@@ -256,7 +256,7 @@ Content-Disposition: inline
 """
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Plain text body" in payload["body_text"]
         assert "HTML body" in payload["body_html"]
@@ -288,7 +288,7 @@ Note contents
 """
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Body text" in payload["body_text"]
         assert len(payload["attachments"]) == 1
@@ -335,7 +335,7 @@ Content-Disposition: inline
     async def test_root_part_stays_the_body(self):
         message = message_from_bytes(self._related_with_start())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Real body" in payload["body_html"]
 
@@ -343,7 +343,7 @@ Content-Disposition: inline
     async def test_root_part_is_not_also_an_attachment(self):
         message = message_from_bytes(self._related_with_start())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert [a["content_type"] for a in payload["attachments"]] == ["image/png"]
 
@@ -366,7 +366,7 @@ Plain body
 """
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Plain body" in payload["body_text"]
         assert payload["attachments"] == []
@@ -418,7 +418,7 @@ Content-Disposition: inline
     async def test_nameless_parts_get_distinct_filenames(self):
         message = message_from_bytes(self._two_nameless_images())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         filenames = [a["filename"] for a in payload["attachments"]]
         assert len(filenames) == 2
@@ -428,7 +428,7 @@ Content-Disposition: inline
     async def test_fallback_filename_carries_the_content_type_extension(self):
         message = message_from_bytes(self._two_nameless_images())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert all(a["filename"].endswith(".png") for a in payload["attachments"])
 
@@ -436,7 +436,7 @@ Content-Disposition: inline
     async def test_sender_supplied_filenames_are_left_alone(self):
         message = message_from_bytes(_outlook_style_message())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["attachments"][0]["filename"] == "image001.png"
 
@@ -487,7 +487,7 @@ Content-Transfer-Encoding: base64
             self._inline_file('Content-Disposition: inline; filename="invoice.exe"')
         )
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["attachments"][0]["filename"] == "invoice.exe"
         assert payload["has_attachments"] is True
@@ -502,7 +502,7 @@ Content-Transfer-Encoding: base64
             )
         )
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["has_attachments"] is True
 
@@ -516,7 +516,7 @@ Content-Transfer-Encoding: base64
             )
         )
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["has_attachments"] is False
 
@@ -532,7 +532,7 @@ Content-Transfer-Encoding: base64
             )
         )
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["has_attachments"] is True
 
@@ -576,7 +576,7 @@ Content-Disposition: inline
     async def test_markup_bearing_content_id_is_dropped(self):
         message = message_from_bytes(self._with_content_id('<a"><script>alert(1)</script><b>'))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 1
         assert "content_id" not in payload["attachments"][0]
@@ -585,7 +585,7 @@ Content-Disposition: inline
     async def test_overlong_content_id_is_dropped(self):
         message = message_from_bytes(self._with_content_id("<" + "a" * 600 + "@example.com>"))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "content_id" not in payload["attachments"][0]
 
@@ -593,7 +593,7 @@ Content-Disposition: inline
     async def test_well_formed_content_id_survives(self):
         message = message_from_bytes(self._with_content_id("<image001.png@01DA1234.5678>"))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["attachments"][0]["content_id"] == "image001.png@01DA1234.5678"
 
@@ -645,7 +645,7 @@ Content-Disposition: inline; filename="{filename}"
             self._hidden_reference("application/x-msdownload", "invoice.exe")
         )
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["attachments"][0]["filename"] == "invoice.exe"
         assert payload["has_attachments"] is True
@@ -655,7 +655,7 @@ Content-Disposition: inline; filename="{filename}"
         """The signature logo this rule exists to protect."""
         message = message_from_bytes(_outlook_style_message())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["has_attachments"] is False
 
@@ -686,7 +686,7 @@ Content-Type: text/html; charset="utf-8"; name="message.html"
 """
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Real body" in payload["body_html"]
         assert payload["attachments"] == []
@@ -715,7 +715,7 @@ Note contents
 """
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Body text" in payload["body_text"]
         assert [a["filename"] for a in payload["attachments"]] == ["notes.txt"]
@@ -750,6 +750,6 @@ Content-Disposition: inline
 """.encode()
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["has_attachments"] is False

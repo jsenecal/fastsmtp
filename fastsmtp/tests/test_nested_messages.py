@@ -51,7 +51,7 @@ from email import message_from_bytes
 
 import pytest
 from fastsmtp.smtp.server import extract_email_payload
-from mime_helpers import PNG_BYTES, envelope
+from mime_helpers import PNG_BYTES, new_envelope
 
 
 def _forwarded_message_bytes(subject: str = "Original subject", boundary: str = "inner") -> bytes:
@@ -142,7 +142,7 @@ class TestWrapperBodySurvives:
     async def test_wrapper_text_body_is_kept(self):
         message = message_from_bytes(_wrapper_message(_forwarded_message_bytes()))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Wrapper's own body text." in payload["body_text"]
         assert "Forwarded plain text body" not in payload["body_text"]
@@ -154,7 +154,7 @@ class TestWrapperBodySurvives:
         """
         message = message_from_bytes(_wrapper_message(_forwarded_message_bytes()))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["body_html"] == ""
 
@@ -166,7 +166,7 @@ class TestForwardedAttachmentsDoNotLeak:
     async def test_only_the_rfc822_part_is_a_top_level_attachment(self):
         message = message_from_bytes(_wrapper_message(_forwarded_message_bytes()))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 1
         assert payload["attachments"][0]["content_type"] == "message/rfc822"
@@ -175,7 +175,7 @@ class TestForwardedAttachmentsDoNotLeak:
     async def test_inner_pdf_filename_does_not_appear(self):
         message = message_from_bytes(_wrapper_message(_forwarded_message_bytes()))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         filenames = [a["filename"] for a in payload["attachments"]]
         assert "invoice.pdf" not in filenames
@@ -188,7 +188,7 @@ class TestForwardedInlinePartsDoNotLeak:
     async def test_inner_content_id_does_not_appear(self):
         message = message_from_bytes(_wrapper_message(_forwarded_message_bytes()))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         content_ids = [a.get("content_id") for a in payload["attachments"]]
         assert "innerlogo@forwarded.example" not in content_ids
@@ -197,7 +197,7 @@ class TestForwardedInlinePartsDoNotLeak:
     async def test_attachment_count_excludes_the_inline_image(self):
         message = message_from_bytes(_wrapper_message(_forwarded_message_bytes()))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         # Just the message/rfc822 part - not the inline image nor the pdf that
         # live inside it.
@@ -212,7 +212,7 @@ class TestRfc822AttachmentCarriesRealBytes:
         inner = _forwarded_message_bytes(subject="Quarterly numbers")
         message = message_from_bytes(_wrapper_message(inner))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         attachment = payload["attachments"][0]
         assert attachment["size"] == len(inner)
@@ -231,7 +231,7 @@ class TestRfc822AttachmentCarriesRealBytes:
     async def test_nameless_forward_falls_back_to_an_eml_extension(self):
         message = message_from_bytes(_wrapper_message(_forwarded_message_bytes(), filename=None))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 1
         assert payload["attachments"][0]["filename"].endswith(".eml")
@@ -244,7 +244,7 @@ class TestHasAttachmentsForForwardedMessage:
     async def test_forwarded_message_alone_sets_has_attachments(self):
         message = message_from_bytes(_wrapper_message(_forwarded_message_bytes()))
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["has_attachments"] is True
 
@@ -269,7 +269,7 @@ class TestNestedForwardDoesNotDescend:
         )
         message = message_from_bytes(outer)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 1
         attachment = payload["attachments"][0]
@@ -320,7 +320,7 @@ Content-Type: message/rfc822
         )
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 1
         attachment = payload["attachments"][0]
@@ -370,7 +370,7 @@ class TestPathologicalNestingDegradesGracefully:
             raw = _minimal_wrap(raw, f"b{i}")
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert len(payload["attachments"]) == 1
         attachment = payload["attachments"][0]
@@ -422,7 +422,7 @@ Action: failed
     async def test_bounce_carries_no_attachment_entry(self):
         message = message_from_bytes(self._bounce())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Delivery to the following recipient failed" in payload["body_text"]
         assert payload["attachments"] == []
@@ -431,7 +431,7 @@ Action: failed
     async def test_bounce_does_not_set_has_attachments(self):
         message = message_from_bytes(self._bounce())
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert payload["has_attachments"] is False
 
@@ -472,7 +472,7 @@ Content-Disposition: attachment; filename="forwarded.eml"
 """.encode()
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         entry = next(a for a in payload["attachments"] if a["content_type"] == "message/rfc822")
         assert entry["size"] == 0
@@ -516,7 +516,7 @@ not actually split into parts
 """
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Body text" in payload["body_text"]
         assert payload["attachments"] == []
@@ -550,7 +550,7 @@ aGVsbG8gd29ybGQ=
 """
         message = message_from_bytes(raw)
 
-        payload = await extract_email_payload(message, envelope())
+        payload = await extract_email_payload(message, new_envelope())
 
         assert "Body text" in payload["body_text"]
         assert payload["attachments"] == []

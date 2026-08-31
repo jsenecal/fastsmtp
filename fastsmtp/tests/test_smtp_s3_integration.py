@@ -6,7 +6,6 @@ from email.message import EmailMessage
 from unittest.mock import AsyncMock
 
 import pytest
-from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
 from fastsmtp.smtp.server import extract_email_payload, key_safe_message_id
 from fastsmtp.storage.s3 import (
@@ -15,6 +14,7 @@ from fastsmtp.storage.s3 import (
     S3UploadError,
     sanitize_key_component,
 )
+from mime_helpers import new_envelope
 
 
 class TestExtractEmailPayloadWithS3:
@@ -58,9 +58,7 @@ class TestExtractEmailPayloadWithS3:
             filename="report.pdf",
         )
 
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         # Mock S3 storage
         mock_s3 = AsyncMock(spec=S3Storage)
@@ -94,9 +92,7 @@ class TestExtractEmailPayloadWithS3:
         msg.set_content("Body")
         msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
 
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         mock_s3 = AsyncMock(spec=S3Storage)
         mock_s3.upload_attachment.return_value = S3AttachmentInfo(
@@ -125,9 +121,7 @@ class TestExtractEmailPayloadWithS3:
         msg.set_content("Body")
         msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
 
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         mock_s3 = AsyncMock(spec=S3Storage)
         mock_s3.upload_attachment.return_value = S3AttachmentInfo(
@@ -165,9 +159,7 @@ class TestExtractEmailPayloadWithS3:
                 b"content", maintype="application", subtype="pdf", filename="file.pdf"
             )
 
-            envelope = Envelope()
-            envelope.mail_from = "sender@example.com"
-            envelope.rcpt_tos = ["recipient@example.com"]
+            envelope = new_envelope()
 
             mock_s3 = AsyncMock(spec=S3Storage)
             mock_s3.upload_attachment.return_value = S3AttachmentInfo(
@@ -216,9 +208,7 @@ class TestExtractEmailPayloadWithS3:
             parsed = message_from_bytes(on_the_wire)
             assert parsed.get("Message-ID") == degenerate.decode()
 
-            envelope = Envelope()
-            envelope.mail_from = "sender@example.com"
-            envelope.rcpt_tos = ["recipient@example.com"]
+            envelope = new_envelope()
 
             mock_s3 = AsyncMock(spec=S3Storage)
             mock_s3.upload_attachment.return_value = S3AttachmentInfo(
@@ -249,9 +239,7 @@ class TestExtractEmailPayloadWithS3:
         msg.set_content("Body")
         msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
 
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         mock_s3 = AsyncMock(spec=S3Storage)
         mock_s3.upload_attachment.return_value = S3AttachmentInfo(
@@ -277,9 +265,7 @@ class TestExtractEmailPayloadWithS3:
         msg.set_content("Body")
         msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
 
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         # Mock S3 storage to fail
         mock_s3 = AsyncMock(spec=S3Storage)
@@ -306,9 +292,7 @@ class TestExtractEmailPayloadWithS3:
         msg.set_content("Body")
         msg.add_attachment(b"content", maintype="application", subtype="pdf", filename="file.pdf")
 
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         # No S3 storage provided
         payload = await extract_email_payload(
@@ -335,9 +319,7 @@ class TestExtractEmailPayloadWithS3:
         )
         msg.add_attachment(b"image content", maintype="image", subtype="png", filename="image.png")
 
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         # Mock S3 storage
         mock_s3 = AsyncMock(spec=S3Storage)
@@ -380,9 +362,7 @@ class TestExtractEmailPayloadWithS3:
         )
         msg.add_attachment(b"image content", maintype="image", subtype="png", filename="image.png")
 
-        envelope = Envelope()
-        envelope.mail_from = "sender@example.com"
-        envelope.rcpt_tos = ["recipient@example.com"]
+        envelope = new_envelope()
 
         # First upload succeeds, second fails
         mock_s3 = AsyncMock(spec=S3Storage)
