@@ -6,6 +6,7 @@ import pytest
 from fastsmtp_cli.output import (
     _format_expiry,
     console,
+    error_console,
     field,
     format_datetime,
     format_deleted,
@@ -1390,3 +1391,33 @@ class TestServerTextEscaping:
         output = capsys.readouterr().out
         assert "(catch-all)" in output
         assert "[dim]" not in output
+
+
+class TestOutputIsEnvironmentIndependent:
+    """Rendering must not depend on the terminal the suite happens to run in.
+
+    Both consoles are module-level, so they resolve their colour system and
+    their width when ``output`` is imported - before any test runs, and from
+    whatever environment the developer has. Two variables leak in:
+
+    * ``FORCE_COLOR``, which editors and agent harnesses set routinely, makes
+      rich emit ANSI escapes even though pytest's captured stdout is not a
+      tty. Assertions here match plain substrings, so they meet
+      ``\\x1b[1m[\\x1b[0mfrom, to, subject`` instead of ``[from, to, subject]``.
+    * ``COLUMNS``, which decides whether a table cell is padded or truncated
+      to an ellipsis.
+
+    Both used to fail a clean ``main`` outside CI. See issue #159.
+    """
+
+    def test_stdout_carries_no_ansi_escapes(self, capsys):
+        print_info("hello")
+        assert "\x1b[" not in capsys.readouterr().out
+
+    def test_stderr_carries_no_ansi_escapes(self, capsys):
+        print_error("Invalid field 'x'. Valid fields: [from, to, subject]")
+        assert "\x1b[" not in capsys.readouterr().err
+
+    def test_both_consoles_are_pinned_to_a_known_width(self):
+        assert console.width == 80
+        assert error_console.width == 80
