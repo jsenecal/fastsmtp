@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -21,7 +21,7 @@ COPY fastsmtp-cli/src fastsmtp-cli/src
 # to free in layer size - see issue #142.
 RUN uv sync --frozen --no-dev --package fastsmtp --package fastsmtp-cli
 
-FROM python:3.14-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 # Create non-root user
 RUN useradd -m -u 1000 fastsmtp
