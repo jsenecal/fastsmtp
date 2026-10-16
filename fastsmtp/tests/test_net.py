@@ -1,7 +1,7 @@
 """Tests for shared IP address and network helpers."""
 
 import pytest
-from fastsmtp.net import ip_in_networks, parse_networks
+from fastsmtp.net import ip_in_networks, parse_networks, unmap_ipv4
 
 
 class TestParseNetworks:
@@ -104,3 +104,19 @@ class TestIpInNetworks:
         in the middle of a request.
         """
         assert ip_in_networks("unknown", parse_networks(["10.0.0.0/8"])) is False
+
+
+class TestUnmapIpv4:
+    """Tests for normalising IPv4-mapped IPv6 peers."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("::ffff:203.0.113.10", "203.0.113.10"),
+            ("203.0.113.10", "203.0.113.10"),
+            ("2001:db8::1", "2001:db8::1"),
+            ("unknown", "unknown"),
+        ],
+    )
+    def test_unmap(self, value, expected):
+        assert unmap_ipv4(value) == expected

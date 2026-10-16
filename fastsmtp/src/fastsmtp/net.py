@@ -10,6 +10,27 @@ import ipaddress
 from collections.abc import Iterable
 
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+def _unmapped(ip: IPAddress) -> IPAddress:
+    # A dual-stack socket reports IPv4 peers as ::ffff:10.1.2.3.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
+
+
+def unmap_ipv4(ip_str: str) -> str:
+    """Return an IPv4-mapped IPv6 address in its IPv4 form.
+
+    A listener bound dual-stack (see ``bind_dualstack``) reports IPv4 peers as
+    ``::ffff:a.b.c.d``. Anything else, including a value that is not an
+    address at all, is returned unchanged.
+    """
+    try:
+        return str(_unmapped(ipaddress.ip_address(ip_str)))
+    except ValueError:
+        return ip_str
 
 
 def parse_networks(entries: Iterable[str] | None) -> list[IPNetwork]:
@@ -56,9 +77,7 @@ def ip_in_networks(ip_str: str, networks: Iterable[IPNetwork]) -> bool:
     except ValueError:
         return False
 
-    # A dual-stack socket reports IPv4 peers as ::ffff:10.1.2.3. Without
-    # unwrapping those, an IPv4 entry would never match a real IPv4 client.
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-
+    # Without unwrapping IPv4-mapped peers, an IPv4 entry would never match a
+    # real IPv4 client on a dual-stack socket.
+    ip = _unmapped(ip)
     return any(ip in network for network in networks)

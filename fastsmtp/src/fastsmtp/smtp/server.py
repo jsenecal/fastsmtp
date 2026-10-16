@@ -36,6 +36,7 @@ from fastsmtp.metrics.definitions import (
     SMTP_MESSAGES_TOTAL,
     SMTP_RATE_LIMITED,
 )
+from fastsmtp.net import unmap_ipv4
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import (
     MECHANISM_DKIM,
@@ -273,7 +274,7 @@ class FastSMTPHandler:
         decision back to the sending MTA, which bounces to a human who can see
         it and can resend to the lenient address alone.
         """
-        client_ip = session.peer[0] if session.peer else "unknown"
+        client_ip = unmap_ipv4(session.peer[0]) if session.peer else "unknown"
         mail_from = envelope.mail_from or ""
         helo = session.host_name or ""
 

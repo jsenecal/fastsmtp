@@ -24,10 +24,11 @@ all reach the same database.
 
 `0.0.0.0` listens on IPv4 only. To serve both address families, as an MX with
 both A and AAAA records needs, set `FASTSMTP_SMTP_HOST=::`: the plain and TLS
-listeners then accept IPv4 (as IPv4-mapped addresses) and IPv6 on one socket,
-regardless of the `net.ipv6.bindv6only` sysctl. Any other IPv6 address binds that
-address alone. On a platform without dual-stack socket support, `::` falls back
-to IPv6 only.
+listeners then accept IPv4 and IPv6 on one socket, regardless of the
+`net.ipv6.bindv6only` sysctl. IPv4 senders are still reported in their IPv4 form
+(`203.0.113.50`, not `::ffff:203.0.113.50`) to SPF and in the webhook
+`client_ip`. Any other IPv6 address binds that address alone. On a platform
+without dual-stack socket support, `::` falls back to IPv6 only.
 
 `FASTSMTP_API_HOST` does not get this treatment yet: the API is served by
 uvicorn, and `::` there binds IPv6 only.
