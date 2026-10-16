@@ -307,6 +307,7 @@ def run_smtp_data(session_factory: async_sessionmaker[AsyncSession]):
         dkim: str = RESULT_NONE,
         spf: str = RESULT_NONE,
         subject: str = "Data run",
+        peer: str = "203.0.113.10",
     ) -> SMTPDataRun:
         envelope.mail_from = envelope.mail_from or "sender@external.com"
         envelope.content = (
@@ -319,7 +320,7 @@ def run_smtp_data(session_factory: async_sessionmaker[AsyncSession]):
         spf_spy = AsyncMock(return_value=(spf, "external.com"))
         enqueue_spy = AsyncMock()
         smtp_session = MagicMock()
-        smtp_session.peer = ("203.0.113.10", 54321)
+        smtp_session.peer = (peer, 54321)
         smtp_session.host_name = "external.com"
 
         with (

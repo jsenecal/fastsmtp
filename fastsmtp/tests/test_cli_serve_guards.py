@@ -25,6 +25,8 @@ is why the fixture has to write the table rather than leave the check to find
 nothing.
 """
 
+import socket
+
 import pytest
 import pytest_asyncio
 from alembic.script import ScriptDirectory
@@ -50,6 +52,7 @@ class StartedFlag:
 
     def __init__(self) -> None:
         self.started = False
+        self.sockets: list[socket.socket] | None = None
 
 
 class FakeWorker:
@@ -88,8 +91,9 @@ class FakeUvicornServer:
     def __call__(self, config) -> "FakeUvicornServer":
         return self
 
-    async def serve(self) -> None:
+    async def serve(self, sockets: list[socket.socket] | None = None) -> None:
         self._flag.started = True
+        self._flag.sockets = sockets
 
 
 @pytest.fixture
@@ -198,3 +202,30 @@ class TestEncryptionGuardIsReportedTheSameWay:
         assert "headers are encrypted, no key configured" in out
         assert "Traceback" not in out
         assert not components["worker"].started
+
+
+class TestApiListenerBinding:
+    """``api_host="::"`` must serve IPv4 as well as IPv6 (issue #167).
+
+    uvicorn hands its host to asyncio, which sets IPV6_V6ONLY on every AF_INET6
+    listener, so ``serve`` binds the wildcard itself and passes the socket in.
+    """
+
+    @pytest.mark.skipif(not socket.has_dualstack_ipv6(), reason="host has no dual-stack IPv6")
+    def test_ipv6_wildcard_is_bound_dual_stack(self, run, serve_settings, components):
+        serve_settings(api_host="::", api_port=0)
+        code, out = run("serve", "--api-only")
+        assert code == 0, out
+
+        sockets = components["api"].sockets
+        assert sockets is not None and len(sockets) == 1
+        with sockets[0] as sock:
+            assert sock.family == socket.AF_INET6
+            assert sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 0
+
+    def test_ipv4_wildcard_is_left_to_uvicorn(self, run, serve_settings, components):
+        serve_settings(api_host="0.0.0.0", api_port=0)
+        code, out = run("serve", "--api-only")
+        assert code == 0, out
+        assert components["api"].started
+        assert components["api"].sockets is None

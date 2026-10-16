@@ -1,5 +1,7 @@
 """Extended tests for SMTP server module to improve coverage."""
 
+import asyncio
+import socket
 from collections.abc import Callable
 from email.message import EmailMessage
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -299,5 +301,36 @@ class TestSMTPServer:
             port = server.bound_smtp_port
             assert isinstance(port, int)
             assert port != 0  # the OS assigned a real ephemeral port
+        finally:
+            await server.stop()
+
+
+@pytest.mark.skipif(not socket.has_dualstack_ipv6(), reason="host has no dual-stack IPv6")
+class TestDualStackListener:
+    """``smtp_host="::"`` must serve IPv4 as well as IPv6 (issue #166).
+
+    asyncio sets IPV6_V6ONLY on every AF_INET6 listener it creates, so handing
+    "::" straight to loop.create_server() silently drops IPv4.
+    """
+
+    @staticmethod
+    async def _banner(host: str, port: int) -> bytes:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), 2.0)
+        try:
+            return await asyncio.wait_for(reader.readline(), 2.0)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("client_host", ["127.0.0.1", "::1"])
+    async def test_ipv6_wildcard_accepts_both_families(
+        self, make_smtp_settings: Callable[..., Settings], client_host: str
+    ):
+        server = SMTPServer(settings=make_smtp_settings(smtp_host="::"))
+        try:
+            await server.start()
+            banner = await self._banner(client_host, server.bound_smtp_port)
+            assert banner.startswith(b"220")
         finally:
             await server.stop()

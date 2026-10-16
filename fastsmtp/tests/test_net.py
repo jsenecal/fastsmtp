@@ -1,7 +1,9 @@
 """Tests for shared IP address and network helpers."""
 
+import socket
+
 import pytest
-from fastsmtp.net import ip_in_networks, parse_networks
+from fastsmtp.net import bind_dualstack, ip_in_networks, parse_networks, unmap_ipv4
 
 
 class TestParseNetworks:
@@ -104,3 +106,37 @@ class TestIpInNetworks:
         in the middle of a request.
         """
         assert ip_in_networks("unknown", parse_networks(["10.0.0.0/8"])) is False
+
+
+class TestBindDualstack:
+    """Tests for the dual-stack wildcard listener (issues #166, #167)."""
+
+    @pytest.mark.skipif(not socket.has_dualstack_ipv6(), reason="host has no dual-stack IPv6")
+    @pytest.mark.parametrize("client_host", ["127.0.0.1", "::1"])
+    def test_ipv6_wildcard_accepts_both_families(self, client_host):
+        """Test "::" yields one listening socket reachable over IPv4 and IPv6."""
+        sock = bind_dualstack("::", 0)
+        assert sock is not None
+        with sock, socket.create_connection((client_host, sock.getsockname()[1]), timeout=2.0):
+            pass
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "::1", "2001:db8::1", "localhost"])
+    def test_other_hosts_are_left_to_the_caller(self, host):
+        """Test anything but the IPv6 wildcard returns None and binds nothing."""
+        assert bind_dualstack(host, 0) is None
+
+
+class TestUnmapIpv4:
+    """Tests for normalising IPv4-mapped IPv6 peers."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("::ffff:203.0.113.10", "203.0.113.10"),
+            ("203.0.113.10", "203.0.113.10"),
+            ("2001:db8::1", "2001:db8::1"),
+            ("unknown", "unknown"),
+        ],
+    )
+    def test_unmap(self, value, expected):
+        assert unmap_ipv4(value) == expected

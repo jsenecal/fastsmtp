@@ -1,7 +1,8 @@
 """Operations API endpoints (health, ready, delivery logs, test webhook)."""
 
 import asyncio
-import socket
+import contextlib
+import ipaddress
 import time
 import uuid
 
@@ -55,21 +56,22 @@ async def _check_smtp_port(host: str, port: int, connect_timeout: float = 2.0) -
 
     Returns 'ok' if accepting, 'unavailable' if not.
     """
+    # A wildcard bind address is not something to connect to; probe loopback
+    # in the same family. open_connection resolves the family itself, so an
+    # IPv6 smtp_host is not forced through an AF_INET socket.
+    with contextlib.suppress(ValueError):
+        addr = ipaddress.ip_address(host)
+        if addr.is_unspecified:
+            host = "::1" if addr.version == 6 else "127.0.0.1"
     try:
-        loop = asyncio.get_running_loop()
-        # Use async socket check to avoid blocking
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setblocking(False)
-        try:
-            await asyncio.wait_for(
-                loop.sock_connect(sock, (host, port)),
-                timeout=connect_timeout,
-            )
-            return "ok"
-        finally:
-            sock.close()
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=connect_timeout,
+        )
     except (OSError, TimeoutError):
         return "unavailable"
+    writer.close()
+    return "ok"
 
 
 async def _get_queue_stats(session: AsyncSession) -> QueueStats:

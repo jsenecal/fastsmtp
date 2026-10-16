@@ -7,7 +7,7 @@ import logging
 import mimetypes
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email import message_from_bytes
@@ -34,6 +34,7 @@ from fastsmtp.metrics.definitions import (
     SMTP_MESSAGES_TOTAL,
     SMTP_RATE_LIMITED,
 )
+from fastsmtp.net import bind_dualstack, unmap_ipv4
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import (
     MECHANISM_DKIM,
@@ -271,7 +272,7 @@ class FastSMTPHandler:
         decision back to the sending MTA, which bounces to a human who can see
         it and can resend to the lenient address alone.
         """
-        client_ip = session.peer[0] if session.peer else "unknown"
+        client_ip = unmap_ipv4(session.peer[0]) if session.peer else "unknown"
         mail_from = envelope.mail_from or ""
         helo = session.host_name or ""
 
@@ -1053,6 +1054,13 @@ class FastSMTPController(UnthreadedController):
 
     def factory(self) -> SMTP:
         return AuthParamTolerantSMTP(self.handler, **self.SMTP_kwargs)
+
+    def _create_server(self) -> Awaitable[asyncio.AbstractServer]:
+        # Serve "::" on both families; see bind_dualstack (#166).
+        sock = bind_dualstack(self.hostname, self.port)
+        if sock is None:
+            return super()._create_server()
+        return self.loop.create_server(self._factory_invoker, sock=sock, ssl=self.ssl_context)
 
 
 class SMTPServer:

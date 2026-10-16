@@ -870,6 +870,25 @@ class TestPerDomainAuthPolicy:
         run.spf.assert_awaited_once()
         assert run.reply == "250 Message accepted for delivery"
 
+    @pytest.mark.asyncio
+    async def test_ipv4_mapped_peer_is_checked_and_reported_as_ipv4(
+        self, make_smtp_settings, make_domain, run_smtp_data
+    ):
+        """A dual-stack "::" listener sees IPv4 senders as ::ffff:a.b.c.d (#166).
+
+        SPF ip4 mechanisms and webhook consumers both expect the IPv4 form, so
+        the handler unwraps it before using the address.
+        """
+        await make_domain(self.STRICT, verify_spf=True)
+        handler = FastSMTPHandler(make_smtp_settings())
+
+        run = await run_smtp_data(
+            handler, self._envelope(f"user@{self.STRICT}"), peer="::ffff:203.0.113.10"
+        )
+
+        assert run.spf.await_args.args[0] == "203.0.113.10"
+        assert run.payloads[0]["client_ip"] == "203.0.113.10"
+
     # -- whom a failed check refuses -------------------------------------
 
     @pytest.mark.asyncio

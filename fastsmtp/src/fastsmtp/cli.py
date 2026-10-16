@@ -153,6 +153,7 @@ def serve(
     import uvicorn
 
     from fastsmtp.config import get_settings
+    from fastsmtp.net import bind_dualstack
     from fastsmtp.smtp import SMTPServer
     from fastsmtp.webhook import WebhookWorker
 
@@ -249,7 +250,11 @@ def serve(
                 proxy_headers=False,
             )
             uvicorn_server = uvicorn.Server(config)
-            tasks.append(asyncio.create_task(uvicorn_server.serve()))
+            # uvicorn binds through asyncio, which makes "::" IPv6-only; hand it
+            # a dual-stack socket instead (#167). None leaves the bind to uvicorn.
+            api_sock = bind_dualstack(settings.api_host, settings.api_port)
+            api_sockets = None if api_sock is None else [api_sock]
+            tasks.append(asyncio.create_task(uvicorn_server.serve(sockets=api_sockets)))
             console.print(
                 f"[green]API server started on {settings.api_host}:{settings.api_port}[/green]"
             )

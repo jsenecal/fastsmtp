@@ -1,6 +1,8 @@
 """Extended tests for operations API endpoints to improve coverage."""
 
+import asyncio
 import hashlib
+import socket
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -398,6 +400,27 @@ class TestHealthCheckDepth:
         # server could legitimately occupy.
         result = await _check_smtp_port("127.0.0.1", 1, connect_timeout=1.0)
         assert result == "unavailable"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bind_host", ["0.0.0.0", "::"])
+    async def test_check_smtp_port_wildcard_bind_host(self, bind_host: str):
+        """A wildcard smtp_host is probed over loopback in its own family.
+
+        The probe used to always open an AF_INET socket, so smtp_host="::"
+        reported "unavailable" for a listener that was up (issue #166).
+        """
+        from fastsmtp.api.operations import _check_smtp_port
+
+        family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+        if family == socket.AF_INET6 and not socket.has_ipv6:
+            pytest.skip("host has no IPv6")
+        server = await asyncio.start_server(lambda r, w: w.close(), bind_host, 0, family=family)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            assert await _check_smtp_port(bind_host, port, connect_timeout=1.0) == "ok"
+        finally:
+            server.close()
+            await server.wait_closed()
 
     @pytest.mark.asyncio
     async def test_check_smtp_port_timeout(self):
