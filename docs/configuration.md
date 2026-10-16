@@ -12,7 +12,7 @@ all reach the same database.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FASTSMTP_SMTP_HOST` | `0.0.0.0` | SMTP bind address |
+| `FASTSMTP_SMTP_HOST` | `0.0.0.0` | SMTP bind address. `::` listens on IPv4 and IPv6 |
 | `FASTSMTP_SMTP_PORT` | `2525` | Plain SMTP port |
 | `FASTSMTP_SMTP_TLS_PORT` | `4650` | TLS SMTP port |
 | `FASTSMTP_SMTP_TLS_CERT` | - | Path to TLS certificate |
@@ -21,6 +21,16 @@ all reach the same database.
 | `FASTSMTP_SMTP_MAX_MESSAGE_SIZE` | `10485760` | Largest message accepted, in bytes (10 MB) |
 | `FASTSMTP_SMTP_TLS_HOT_RELOAD` | `false` | Watch the certificate and key files and reload them without a restart |
 | `FASTSMTP_SMTP_TLS_RELOAD_INTERVAL` | `300` | Seconds between hot-reload checks |
+
+`0.0.0.0` listens on IPv4 only. To serve both address families, as an MX with
+both A and AAAA records needs, set `FASTSMTP_SMTP_HOST=::`: the plain and TLS
+listeners then accept IPv4 (as IPv4-mapped addresses) and IPv6 on one socket,
+regardless of the `net.ipv6.bindv6only` sysctl. Any other IPv6 address binds that
+address alone. On a platform without dual-stack socket support, `::` falls back
+to IPv6 only.
+
+`FASTSMTP_API_HOST` does not get this treatment yet: the API is served by
+uvicorn, and `::` there binds IPv6 only.
 
 Hot reload only starts when both `FASTSMTP_SMTP_TLS_CERT` and `FASTSMTP_SMTP_TLS_KEY`
 are set; without it a renewed certificate is picked up on the next restart.
