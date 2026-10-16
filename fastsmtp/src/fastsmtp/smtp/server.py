@@ -3,11 +3,9 @@
 import asyncio
 import base64
 import contextlib
-import ipaddress
 import logging
 import mimetypes
 import re
-import socket
 import uuid
 from collections.abc import Awaitable, Iterator
 from dataclasses import dataclass
@@ -36,7 +34,7 @@ from fastsmtp.metrics.definitions import (
     SMTP_MESSAGES_TOTAL,
     SMTP_RATE_LIMITED,
 )
-from fastsmtp.net import unmap_ipv4
+from fastsmtp.net import bind_dualstack, unmap_ipv4
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import (
     MECHANISM_DKIM,
@@ -1051,13 +1049,6 @@ class AuthParamTolerantSMTP(SMTP):
         await super().smtp_MAIL(arg)
 
 
-def _is_ipv6_wildcard(host: str) -> bool:
-    try:
-        return ipaddress.ip_address(host) == ipaddress.IPv6Address("::")
-    except ValueError:
-        return False
-
-
 class FastSMTPController(UnthreadedController):
     """UnthreadedController that serves AuthParamTolerantSMTP sessions."""
 
@@ -1065,14 +1056,10 @@ class FastSMTPController(UnthreadedController):
         return AuthParamTolerantSMTP(self.handler, **self.SMTP_kwargs)
 
     def _create_server(self) -> Awaitable[asyncio.AbstractServer]:
-        # asyncio sets IPV6_V6ONLY on every AF_INET6 listener it builds, which
-        # overrides net.ipv6.bindv6only and turns "::" into IPv6-only. Build
-        # the wildcard socket ourselves so "::" serves both families (#166).
-        if not (_is_ipv6_wildcard(self.hostname) and socket.has_dualstack_ipv6()):
+        # Serve "::" on both families; see bind_dualstack (#166).
+        sock = bind_dualstack(self.hostname, self.port)
+        if sock is None:
             return super()._create_server()
-        sock = socket.create_server(
-            (self.hostname, self.port), family=socket.AF_INET6, dualstack_ipv6=True
-        )
         return self.loop.create_server(self._factory_invoker, sock=sock, ssl=self.ssl_context)
 
 

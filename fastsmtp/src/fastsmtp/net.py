@@ -4,9 +4,13 @@ Several parts of the application match an address against a list of networks:
 SSRF protection blocks webhook targets in private ranges, and the metrics
 endpoint restricts scraping to an operator-supplied allowlist. They share these
 helpers so the parsing and matching rules stay identical.
+
+The SMTP and API listeners share ``bind_dualstack`` so a bind address of ``::``
+means the same thing on both.
 """
 
 import ipaddress
+import socket
 from collections.abc import Iterable
 
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -81,3 +85,29 @@ def ip_in_networks(ip_str: str, networks: Iterable[IPNetwork]) -> bool:
     # real IPv4 client on a dual-stack socket.
     ip = _unmapped(ip)
     return any(ip in network for network in networks)
+
+
+def bind_dualstack(host: str, port: int) -> socket.socket | None:
+    """Bind a listener that serves IPv4 and IPv6 when ``host`` is ``::``.
+
+    asyncio sets IPV6_V6ONLY on every AF_INET6 listener it creates, overriding
+    ``net.ipv6.bindv6only``, so passing ``::`` to ``loop.create_server()``
+    silently drops IPv4 (issue #166). A caller that gets a socket back hands it
+    to the server instead of the host.
+
+    Args:
+        host: Configured bind address
+        port: Port to bind; 0 lets the OS choose
+
+    Returns:
+        A bound, listening dual-stack socket for the IPv6 wildcard. None for
+        any other host, or where the platform cannot do dual-stack, in which
+        case the caller binds ``host`` itself as before.
+    """
+    try:
+        is_wildcard = ipaddress.ip_address(host) == ipaddress.IPv6Address("::")
+    except ValueError:
+        return None
+    if not (is_wildcard and socket.has_dualstack_ipv6()):
+        return None
+    return socket.create_server((host, port), family=socket.AF_INET6, dualstack_ipv6=True)

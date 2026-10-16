@@ -29,9 +29,7 @@ listeners then accept IPv4 and IPv6 on one socket, regardless of the
 (`203.0.113.50`, not `::ffff:203.0.113.50`) to SPF and in the webhook
 `client_ip`. Any other IPv6 address binds that address alone. On a platform
 without dual-stack socket support, `::` falls back to IPv6 only.
-
-`FASTSMTP_API_HOST` does not get this treatment yet: the API is served by
-uvicorn, and `::` there binds IPv6 only.
+`FASTSMTP_API_HOST=::` binds the API the same way.
 
 Hot reload only starts when both `FASTSMTP_SMTP_TLS_CERT` and `FASTSMTP_SMTP_TLS_KEY`
 are set; without it a renewed certificate is picked up on the next restart.
@@ -78,7 +76,7 @@ domain:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FASTSMTP_API_HOST` | `0.0.0.0` | API bind address |
+| `FASTSMTP_API_HOST` | `0.0.0.0` | API bind address. `::` listens on IPv4 and IPv6 |
 | `FASTSMTP_API_PORT` | `8000` | API port |
 | `FASTSMTP_CORS_ORIGINS` | *(empty)* | Allowed CORS origins. Empty leaves CORS middleware off entirely |
 
