@@ -35,6 +35,7 @@ from fastsmtp.metrics.definitions import (
     SMTP_RATE_LIMITED,
 )
 from fastsmtp.net import bind_dualstack, unmap_ipv4
+from fastsmtp.smtp.headers import decoded_header
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import (
     MECHANISM_DKIM,
@@ -834,15 +835,16 @@ async def extract_email_payload(
     settings = settings or get_settings()
     max_inline_attachment_size = settings.webhook_max_inline_attachment_size
 
-    # Get basic headers
+    # The convenience fields are decoded and unfolded for display and matching;
+    # "headers" keeps the wire values for anything that needs them verbatim.
     payload: dict[str, Any] = {
         "message_id": message.get("Message-ID", ""),
-        "from": message.get("From", ""),
-        "to": message.get("To", ""),
-        "cc": message.get("Cc", ""),
-        "subject": message.get("Subject", ""),
+        "from": decoded_header(message, "From"),
+        "to": decoded_header(message, "To"),
+        "cc": decoded_header(message, "Cc"),
+        "subject": decoded_header(message, "Subject"),
         "date": message.get("Date", ""),
-        "reply_to": message.get("Reply-To", ""),
+        "reply_to": decoded_header(message, "Reply-To"),
         "envelope_from": envelope.mail_from,
         "envelope_to": envelope.rcpt_tos,
         "headers": dict(message.items()),

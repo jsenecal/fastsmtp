@@ -42,6 +42,64 @@ With `FASTSMTP_ATTACHMENT_STORAGE=inline` (default), attachments are base64-enco
 }
 ```
 
+## Decoded header fields
+
+`from`, `to`, `cc`, `reply_to` and `subject` are decoded for display and matching.
+RFC 2047 encoded-words are decoded to Unicode, folded lines are unfolded, and raw UTF-8
+(RFC 6532) headers are decoded as UTF-8. For a message sent with these headers:
+
+```
+From: =?iso-8859-1?Q?J=E9r=F4me?= Dupont <jd@example.com>
+Cc: =?utf-8?B?RHVwb250LCBKZWFu?= <a@example.com>
+Subject: =?utf-8?B?Q291cHVyZSBkZSBzZXJ2aWNl?=
+ =?utf-8?Q?_pr=C3=A9vue?= demain
+```
+
+the payload carries (non-ASCII shown as JSON escapes):
+
+```json
+{
+  "from": "J\u00e9r\u00f4me Dupont <jd@example.com>",
+  "cc": "\"Dupont, Jean\" <a@example.com>",
+  "subject": "Coupure de service pr\u00e9vue demain",
+  "headers": {
+    "From": "=?iso-8859-1?Q?J=E9r=F4me?= Dupont <jd@example.com>",
+    "Cc": "=?utf-8?B?RHVwb250LCBKZWFu?= <a@example.com>",
+    "Subject": "=?utf-8?B?Q291cHVyZSBkZSBzZXJ2aWNl?=\r\n =?utf-8?Q?_pr=C3=A9vue?= demain"
+  }
+}
+```
+
+- **`headers` stays undecoded.** It holds every header with its encoded-words and folds
+  intact, for anything that needs the wire form. `date` and `message_id` are also passed
+  through unchanged. For a byte-exact copy of the message (DKIM, archival, replay), use
+  [Preserved Raw Message](#preserved-raw-message).
+- **Addresses are kept as sent.** Only encoded-words change. Addresses, comments
+  (including the legacy `addr (Name)` form) and malformed values are left exactly as
+  they arrived. The one addition: in an address field, a decoded name that contains a
+  comma or another special character is quoted, as with `Cc` above, so the field still
+  parses as the same list of addresses.
+- **Bad charsets do not fail delivery.** An unknown or mislabelled charset decodes with
+  U+FFFD replacement characters instead of raising.
+- **Decoded fields are single-line.** A control character produced by decoding, such as
+  an encoded CR or LF, becomes a space, so an encoded-word cannot put a line break back
+  into a field.
+- **Rules match the decoded text.** The `from`, `to` and `subject` rule fields read these
+  same decoded values; `header:<name>` reads the raw one. See
+  [Rule Fields](rules.md#rule-fields).
+
+### This changes the payload for existing consumers
+
+Before this change those five fields carried the wire value, encoded-words and folds
+included. A consumer that already decodes them mostly sees no difference, since
+decoding text that has no encoded-words leaves it unchanged. The exception is a display
+name that decodes to something needing quotes, which now arrives quoted. A consumer
+that relied on the raw form there - to compare against a stored raw string, say -
+should read the field from `headers` instead.
+
+The same applies to rules: see
+[Rules written against encoded-words](rules.md#rules-written-against-encoded-words).
+
 ## S3 Storage
 
 With `FASTSMTP_ATTACHMENT_STORAGE=s3`, attachments are uploaded to S3 and the payload contains bucket/key references:

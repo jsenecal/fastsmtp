@@ -4,8 +4,11 @@ The rule engine allows conditional processing of emails based on various attribu
 
 ## Rule Fields
 
-- `from`, `to`, `subject`, `body`
-- `header:<name>` (e.g., `header:X-Priority`)
+- `from`, `to`, `subject`, `body` - `from`, `to` and `subject` match the decoded,
+  unfolded text, so `subject contains Coupure` matches a subject the sending client
+  wrote as RFC 2047 encoded-words; see [Decoded header fields](webhooks.md#decoded-header-fields)
+- `header:<name>` (e.g., `header:X-Priority`) - matches the undecoded value, encoded-words
+  and folding included, the same value the payload's `headers` object carries
 - `has_attachment` - inline images that the HTML body actually renders, such as
   signature logos, are delivered in the webhook payload but do not set this
   field. Everything else the message carries does, including a part that claims
@@ -16,6 +19,14 @@ The rule engine allows conditional processing of emails based on various attribu
 - `dkim_result`, `spf_result` - a mechanism this rule's own domain does not verify
   reads as `none`, whatever another recipient's domain asked for; see
   [Per-domain overrides](configuration.md#per-domain-overrides)
+
+### Rules written against encoded-words
+
+Before `from`, `to` and `subject` were decoded, they matched the raw header, so a rule
+could only catch a non-ASCII subject by matching its encoding, for example
+`subject regex ^=\?utf-8\?`. Such a rule no longer matches through those fields after
+upgrading. Rewrite it either against the decoded text, or against `header:Subject`
+(`header:From`, `header:To`), which still reads the raw value.
 
 ### Matching on attachments
 
