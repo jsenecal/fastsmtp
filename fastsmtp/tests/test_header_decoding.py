@@ -12,9 +12,10 @@ from fastsmtp.rules.engine import extract_field_value
 from fastsmtp.smtp.headers import (
     PartFilename,
     decoded_header,
+    first_occurrences,
+    header_list,
     part_filename,
     raw_header,
-    raw_headers,
 )
 from fastsmtp.smtp.server import extract_email_payload
 from mime_helpers import new_envelope
@@ -304,7 +305,7 @@ class TestRawHeaders:
         # str() turns each byte into its own U+FFFD.
         message = parse("X-A: \u00e9t\u00e9\r\n".encode())
         assert raw_header(message, "X-A") == "\u00e9t\u00e9"
-        assert raw_headers(message) == {"X-A": "\u00e9t\u00e9"}
+        assert first_occurrences(header_list(message)) == {"X-A": "\u00e9t\u00e9"}
 
     def test_encoded_words_and_folds_are_kept(self):
         message = parse(ENCODED_SUBJECT)
@@ -316,11 +317,37 @@ class TestRawHeaders:
         message = parse(b"X-A: caf\xe9\r\n")
         assert raw_header(message, "X-A") == "caf\ufffd"
 
-    def test_first_occurrence_for_one_header_last_for_the_dict(self):
-        # Matches what message.get() and dict(message.items()) did before.
-        message = parse(b"X-A: one\r\n", b"X-A: two\r\n")
-        assert raw_header(message, "x-a") == "one"
-        assert raw_headers(message) == {"X-A": "two"}
+    def test_repeated_header_resolves_to_the_first_occurrence(self):
+        # Trace fields, Authentication-Results (RFC 8601 section 4.1) and
+        # filter verdicts are prepended, so the first is from the nearest hop.
+        # The last may be the sender's own forgery. The dict and the
+        # header:<name> rule field must agree on which one they mean.
+        message = parse(
+            b"Authentication-Results: mx.local; dkim=fail\r\n",
+            b"Authentication-Results: mx.local; dkim=pass\r\n",
+        )
+        assert raw_header(message, "authentication-results") == "mx.local; dkim=fail"
+        assert first_occurrences(header_list(message)) == {
+            "Authentication-Results": "mx.local; dkim=fail"
+        }
+
+    def test_dict_keeps_the_first_spelling_of_a_name(self):
+        message = parse(b"X-A: one\r\n", b"x-a: two\r\n")
+        assert first_occurrences(header_list(message)) == {"X-A": "one"}
+
+    def test_header_list_keeps_every_header_in_wire_order(self):
+        message = parse(
+            b"Received: from b\r\n",
+            "X-A: \u00e9t\u00e9\r\n".encode(),
+            b"Received: from a\r\n",
+            ENCODED_SUBJECT,
+        )
+        assert header_list(message) == [
+            ["Received", "from b"],
+            ["X-A", "\u00e9t\u00e9"],
+            ["Received", "from a"],
+            ["Subject", raw_header(message, "Subject")],
+        ]
 
     def test_lone_surrogate_does_not_raise(self):
         # Only reachable from a Message built from a str, never from the wire.
@@ -441,6 +468,13 @@ class TestPayloadFields:
         assert attachment["disposition"] == "attachment"
         assert attachment["content_id"] == "\u00e9@x"
         assert attachment["filename"] == "caf\u00e9.pdf"
+
+    @pytest.mark.asyncio
+    async def test_header_list_is_in_the_payload(self):
+        message = parse(b"Received: from b\r\n", b"Received: from a\r\n")
+        payload = await extract_email_payload(message, new_envelope())
+        assert payload["header_list"] == [["Received", "from b"], ["Received", "from a"]]
+        assert payload["headers"]["Received"] == "from b"
 
     @pytest.mark.asyncio
     async def test_headers_carry_raw_utf8_as_text(self):

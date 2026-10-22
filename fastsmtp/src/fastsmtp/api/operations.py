@@ -328,6 +328,11 @@ async def test_webhook(
         auth.require_scope("recipients:write")
 
     # Build test payload
+    headers = [
+        ["From", data.from_address],
+        ["To", data.to_address],
+        ["Subject", data.subject],
+    ]
     payload = {
         "message_id": "<test@fastsmtp.local>",
         "from": data.from_address,
@@ -335,11 +340,8 @@ async def test_webhook(
         "subject": data.subject,
         "body_text": data.body,
         "body_html": "",
-        "headers": {
-            "From": data.from_address,
-            "To": data.to_address,
-            "Subject": data.subject,
-        },
+        "headers": dict(headers),
+        "header_list": headers,
         "envelope_from": data.from_address,
         "envelope_to": [data.to_address],
         "attachments": [],
