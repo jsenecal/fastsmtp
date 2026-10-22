@@ -617,6 +617,10 @@ class _PartInfo(NamedTuple):
 _UNSAFE_CONTENT_ID_CHARS = re.compile(r"""[\x00-\x1f\x7f<>"'\s]""")
 _MAX_CONTENT_ID_LENGTH = 512
 
+# The only content types written to body_text / body_html. Every other leaf
+# part, text/* included, is a file or is skipped - see _classify_part.
+_BODY_TYPES = frozenset({"text/plain", "text/html"})
+
 # The message/* subtypes that encapsulate a whole email. Other subtypes under
 # message/*, notably a DSN's message/delivery-status, are report data rather
 # than a forwarded message and keep the treatment they had before #148.
@@ -680,8 +684,13 @@ def _counts_as_attachment(attachment: dict[str, Any], referenced: set[str]) -> b
     return content_id is None or content_id not in referenced
 
 
-def _classify_part(part: Message) -> _PartInfo:
+def _classify_part(part: Message, container: str | None) -> _PartInfo:
     """Decide whether a MIME part is an attachment, an inline part, or body.
+
+    ``container`` is the subtype of the multipart directly holding the part
+    (``"mixed"``, ``"alternative"``, ``"report"``...), or ``None`` for the
+    message's own single part when it is not multipart. Whether a text part
+    is a file depends on it; see the text/* rules below.
 
     The distinction cannot be read off Content-Disposition alone: Outlook and
     Apple Mail both mark the body parts themselves ``inline``. What separates
@@ -703,8 +712,24 @@ def _classify_part(part: Message) -> _PartInfo:
     # parts do carry - some clients send text/html; name="message.html". Only a
     # filename the sender put on the Content-Disposition marks a text part as a
     # file; keying on the filename alone here empties the body for that mail.
+    content_type = part.get_content_type()
     if part.get_content_maintype() == "text" and not on_disposition:
-        return _PartInfo(None, filename, content_id)
+        if content_type in _BODY_TYPES:
+            return _PartInfo(None, filename, content_id)
+        if container == "alternative" and content_type != "text/calendar":
+            # RFC 2046 section 5.1.4: each part of multipart/alternative is
+            # another version of the same content. Gmail's text/x-amp-html and
+            # Apple Mail's text/watch-html are renderings of the body, not
+            # files; capturing them set has_attachments on every newsletter.
+            # text/calendar is the exception: Outlook sends a meeting invite
+            # as an alternative, and the consumer needs the invite itself.
+            return _PartInfo(None, filename, content_id)
+        if container == "report":
+            # multipart/report (RFC 6522) carries machine-readable report
+            # data, such as a bounce's text/rfc822-headers. Like
+            # message/delivery-status it is not a file, and capturing it would
+            # set has_attachments on every bounce.
+            return _PartInfo(None, filename, content_id)
 
     if disposition == "inline" or content_id:
         return _PartInfo("inline", filename, content_id)
@@ -712,7 +737,15 @@ def _classify_part(part: Message) -> _PartInfo:
         # No disposition header at all, but a name= on the Content-Type. Some
         # clients emit exactly that for a genuine attachment.
         return _PartInfo("attachment", filename, content_id)
-    if part.get_content_type() in _ENCAPSULATED_MESSAGE_TYPES:
+    if part.get_content_maintype() == "text":
+        # Any other text/* - a text/calendar invite, a text/csv export - is
+        # never written to the body, so returning None here dropped it: a
+        # meeting invite with no Content-Disposition vanished (issue #178), and
+        # a bare one as the whole message was decoded as body text (#177).
+        # Only text/plain and text/html are body, as in nodemailer's
+        # mailparser.
+        return _PartInfo("attachment", filename, content_id)
+    if content_type in _ENCAPSULATED_MESSAGE_TYPES:
         # A forwarded email with no disposition, Content-ID or filename of its
         # own - unlike a bare text part, this is never body content. Falling
         # through to None here would drop the whole forwarded message with no
@@ -720,6 +753,18 @@ def _classify_part(part: Message) -> _PartInfo:
         # maintype: a DSN's message/delivery-status is report data, and
         # capturing it would put a zero-byte stub in every bounce and set
         # has_attachments on mail that carries nothing.
+        return _PartInfo("attachment", filename, content_id)
+    if container is None and part.get_content_maintype() not in ("multipart", "message"):
+        # The message's only part, and not text: there is no body for it to
+        # be, so it is the file. Decoding it as body_text delivered a PDF or
+        # image as replacement characters and no attachment (issue #175).
+        # message/* is left out for the reason above, and a multipart the
+        # parser could not split keeps its raw text as the body.
+        #
+        # Only the root gets this rule. Inside multipart mail a bare non-text
+        # part with no disposition, name or Content-ID is still skipped:
+        # application/pgp-signature arrives exactly like that, and capturing
+        # it would set has_attachments on all signed mail.
         return _PartInfo("attachment", filename, content_id)
     return _PartInfo(None, filename, content_id)
 
@@ -741,8 +786,14 @@ def _fallback_filename(content_type: str, index: int) -> str:
     return f"part-{index}{extension}"
 
 
-def _iter_payload_parts(message: Message) -> Iterator[Message]:
+def _iter_payload_parts(
+    message: Message, container: str | None = None
+) -> Iterator[tuple[Message, str | None]]:
     """Yield the parts of ``message`` that belong in the webhook payload.
+
+    Each comes with the subtype of the multipart directly holding it, which
+    _classify_part needs, or ``container`` for ``message`` itself: ``None``
+    when called on the whole message.
 
     Mirrors ``Message.walk()`` for ordinary ``multipart/*`` containers, but
     treats an attached ``message/rfc822`` part as a single leaf instead of
@@ -758,7 +809,7 @@ def _iter_payload_parts(message: Message) -> Iterator[Message]:
     ``multipart/*`` container has maintype ``"multipart"``.
     """
     if message.get_content_maintype() != "multipart":
-        yield message
+        yield message, container
         return
 
     payload = message.get_payload()
@@ -768,7 +819,7 @@ def _iter_payload_parts(message: Message) -> Iterator[Message]:
         return
     # Every element of a split multipart payload is a Message by construction.
     for subpart in cast(list[Message], payload):
-        yield from _iter_payload_parts(subpart)
+        yield from _iter_payload_parts(subpart, message.get_content_subtype())
 
 
 def _attached_message_bytes(part: Message) -> bytes | None:
@@ -874,31 +925,14 @@ async def extract_email_payload(
     body_text = ""
     body_html = ""
 
-    # A message that is not multipart is its own single part, and is classified
-    # by the same rules as a part of multipart mail - see issue #175. So is one
-    # that declares multipart but has no parseable boundary: it has no parts of
-    # its own, and its raw text is handled like a lone text part.
-    parts = _iter_payload_parts(message) if message.is_multipart() else [message]
-    for part in parts:
+    # A message that is not multipart is its own single part, with no
+    # container, and is classified by the same rules as a part of multipart
+    # mail (issue #175). So is one that declares multipart but has no
+    # parseable boundary: it has no parts of its own.
+    parts = _iter_payload_parts(message) if message.is_multipart() else iter([(message, None)])
+    for part, container in parts:
         content_type = part.get_content_type()
-        disposition, declared_filename, content_id = _classify_part(part)
-        if (
-            disposition is None
-            and part is message
-            and part.get_content_maintype() not in ("text", "multipart", "message")
-        ):
-            # The message's only part, and not text: there is no body for it
-            # to be, so it is the file. Decoding it as body_text delivered a
-            # PDF or image as replacement characters and no attachment.
-            # message/* is left out for the reason _classify_part gives: a
-            # bare message/delivery-status is report data, and capturing it
-            # would add a zero-byte stub. message/rfc822 is already captured.
-            #
-            # Only the root gets this rule. Inside multipart mail a bare
-            # non-text part with no disposition, name or Content-ID is still
-            # skipped: application/pgp-signature arrives exactly like that,
-            # and capturing it would set has_attachments on all signed mail.
-            disposition = "attachment"
+        disposition, declared_filename, content_id = _classify_part(part, container)
 
         if disposition is not None:
             # Handle attachment or inline part
@@ -957,9 +991,9 @@ async def extract_email_payload(
             attachments.append(attachment_info)
         elif content_type == "text/html":
             body_html = _part_text(part)
-        elif content_type == "text/plain" or part is message:
-            # Any other text/* as the whole message is still the body, as is a
-            # multipart that could not be split.
+        elif content_type == "text/plain" or container is None:
+            # The rest of the whole-message cases: a multipart that could not be
+            # split, whose raw text is the body, and a lone message/* report.
             body_text = _part_text(part)
 
     payload["body_text"] = body_text
