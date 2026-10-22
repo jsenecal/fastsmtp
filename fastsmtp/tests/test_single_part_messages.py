@@ -129,6 +129,21 @@ class TestTextPartIsTheBody:
         assert payload["has_attachments"] is False
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "charset, content, expected",
+        [
+            # An unknown charset, and bytes that are not valid in the one declared.
+            ("x-no-such-charset", b"caf\xc3\xa9", "caf\u00e9"),
+            ("utf-8", b"caf\xe9", "caf\ufffd"),
+        ],
+    )
+    async def test_undecodable_charset_falls_back_to_utf8(self, charset, content, expected):
+        payload = await extract(
+            single_part(content, f"Content-Type: text/plain; charset={charset}\r\n")
+        )
+        assert payload["body_text"] == expected
+
+    @pytest.mark.asyncio
     async def test_inline_disposition_without_a_filename_is_still_the_body(self):
         payload = await extract(
             single_part(
