@@ -113,8 +113,6 @@ class TestTextPartIsTheBody:
         [
             ("text/plain", "body_text"),
             ("text/html", "body_html"),
-            # Not plain or html, but the whole message: still the body, as before.
-            ("text/calendar", "body_text"),
         ],
     )
     async def test_text_is_decoded_into_the_body(self, content_type, field):
@@ -142,6 +140,24 @@ class TestTextPartIsTheBody:
             single_part(content, f"Content-Type: text/plain; charset={charset}\r\n")
         )
         assert payload["body_text"] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content_type, extension",
+        [("text/calendar; method=REQUEST", ".ics"), ("text/csv", ".csv")],
+    )
+    async def test_other_text_is_a_file_not_the_body(self, content_type, extension):
+        # Issue #177: only text/plain and text/html are ever body, as in
+        # nodemailer's mailparser. A bare invite is invite.ics, not body text.
+        payload = await extract(
+            single_part(b"BEGIN:VCALENDAR", f"Content-Type: {content_type}\r\n")
+        )
+        [attachment] = payload["attachments"]
+        assert attachment["disposition"] == "attachment"
+        assert attachment["filename"].endswith(extension)
+        assert base64.b64decode(attachment["content"]) == b"BEGIN:VCALENDAR"
+        assert payload["body_text"] == ""
+        assert payload["has_attachments"] is True
 
     @pytest.mark.asyncio
     async def test_inline_disposition_without_a_filename_is_still_the_body(self):

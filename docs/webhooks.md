@@ -359,29 +359,52 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
 }
 ```
 
-## Single-part messages
+## Which parts are the body
 
-A message that is not multipart has exactly one part. It follows the same rules as a
-part inside multipart mail, plus one that applies only to this lone part:
+Only two content types are ever the body: `text/plain` goes to `body_text` and
+`text/html` to `body_html`, unless the part is marked `Content-Disposition: attachment`
+or has a filename on its `Content-Disposition`, which makes it a file. nodemailer's
+`mailparser` draws the same line. Every other part is either captured in `attachments`
+with its decoded bytes or skipped:
 
-- A text part (`text/plain`, `text/html`, or any other `text/*` type) is the body,
-  unless it is marked `Content-Disposition: attachment` or has a filename on its
-  `Content-Disposition`. Then it is a file, as it would be inside multipart mail.
-- Any other part - a lone PDF, an image sent on its own by a scanner, or a bare
-  `application/json` - is captured with its decoded bytes, stored inline or in S3 as
-  configured, with a fallback filename if it has none. Its `disposition` is `inline`
-  if it says so or has a `Content-ID`, otherwise `attachment`. `body_text` and
-  `body_html` are empty, so a `body` rule no longer sees it; `attachment_names`,
-  `attachment_types` and `has_attachment` do.
-- A lone `message/*` part other than a forwarded message (`message/rfc822`) is not
-  captured. A bare `message/delivery-status`, for example, is report data, not a file.
+- **Other `text/*` types are files.** A `text/calendar` meeting invite or a `text/csv`
+  export is captured, with a fallback filename such as `part-1.ics` if it has none. Its
+  `disposition` is `inline` if it says so or has a `Content-ID`, otherwise `attachment`.
+  Two kinds of container are the exception:
+  - Inside `multipart/alternative`, each part is another version of the same content
+    (RFC 2046 section 5.1.4), so a text alternative such as Gmail's `text/x-amp-html`
+    or Apple Mail's `text/watch-html` is skipped, not captured. `text/calendar` is
+    still captured there: Outlook sends meeting invites as an alternative.
+  - Inside `multipart/report` (a bounce), text parts such as `text/rfc822-headers`
+    are report data and are skipped.
+- **Non-text parts are files** when they have a `Content-Disposition`, a name or a
+  `Content-ID`, and a forwarded message (`message/rfc822`) always is.
+- **Skipped:** a `message/delivery-status` part with no disposition or Content-ID, which
+  is report data rather than a file, and, inside multipart mail, a non-text part with no
+  disposition, name or Content-ID. `application/pgp-signature` arrives exactly like
+  that and is not an attachment.
 
-The lone-part rule is what makes a part without any disposition, name or Content-ID a
-file. Inside multipart mail such a part is still skipped, because
-`application/pgp-signature` arrives exactly like that and is not an attachment.
+### Single-part messages
 
-Up to v0.8.0 such a part was decoded into `body_text`: a PDF or image arrived as
-replacement characters, with no attachment and `has_attachments: false`.
+A message that is not multipart has exactly one part, and the same rules apply, plus
+one: a lone non-text part has no body to belong to, so it is captured even with no
+disposition, name or Content-ID. A lone PDF, an image sent on its own by a scanner, or
+a bare `application/json` arrives in `attachments`, and `body_text` and `body_html`
+are empty, so a `body` rule no longer sees it; `attachment_names`, `attachment_types`
+and `has_attachment` do. A lone `message/*` part other than `message/rfc822` is still
+not captured.
+
+### Changes from v0.8.0
+
+Up to v0.8.0:
+
+- A single-part message was always decoded into `body_text`. A lone PDF or image
+  arrived as replacement characters, with no attachment and `has_attachments: false`,
+  and a bare calendar invite arrived as iCalendar source in `body_text`.
+- Inside multipart mail, a `text/*` part other than plain or html with no filename on
+  its `Content-Disposition` was dropped: a meeting invite with no disposition never
+  reached the consumer. It is now captured, except for the text alternatives and
+  report parts described above, which are still skipped.
 
 ## Inline Images and Content-ID
 
