@@ -815,6 +815,18 @@ def _attached_message_bytes(part: Message) -> bytes | None:
         return None
 
 
+def _part_text(part: Message) -> str:
+    """Decode a body part's bytes with its declared charset, else as UTF-8 with replacement."""
+    payload_bytes = part.get_payload(decode=True)
+    if not isinstance(payload_bytes, bytes):
+        return ""
+    try:
+        return payload_bytes.decode(part.get_content_charset() or "utf-8")
+    except Exception:
+        # An unknown or mislabelled charset.
+        return payload_bytes.decode("utf-8", errors="replace")
+
+
 async def extract_email_payload(
     message: Message,
     envelope: Envelope,
@@ -862,103 +874,93 @@ async def extract_email_payload(
     body_text = ""
     body_html = ""
 
-    if message.is_multipart():
-        for part in _iter_payload_parts(message):
-            content_type = part.get_content_type()
-            disposition, declared_filename, content_id = _classify_part(part)
+    # A message that is not multipart is its own single part, and is classified
+    # by the same rules as a part of multipart mail - see issue #175. So is one
+    # that declares multipart but has no parseable boundary: it has no parts of
+    # its own, and its raw text is handled like a lone text part.
+    parts = _iter_payload_parts(message) if message.is_multipart() else [message]
+    for part in parts:
+        content_type = part.get_content_type()
+        disposition, declared_filename, content_id = _classify_part(part)
+        if (
+            disposition is None
+            and part is message
+            and part.get_content_maintype() not in ("text", "multipart", "message")
+        ):
+            # The message's only part, and not text: there is no body for it
+            # to be, so it is the file. Decoding it as body_text delivered a
+            # PDF or image as replacement characters and no attachment.
+            # message/* is left out for the reason _classify_part gives: a
+            # bare message/delivery-status is report data, and capturing it
+            # would add a zero-byte stub. message/rfc822 is already captured.
+            #
+            # Only the root gets this rule. Inside multipart mail a bare
+            # non-text part with no disposition, name or Content-ID is still
+            # skipped: application/pgp-signature arrives exactly like that,
+            # and capturing it would set has_attachments on all signed mail.
+            disposition = "attachment"
 
-            if disposition is not None:
-                # Handle attachment or inline part
-                if declared_filename:
-                    filename = declared_filename
-                else:
-                    nameless_parts += 1
-                    filename = _fallback_filename(content_type, nameless_parts)
-                part_payload = part.get_payload(decode=True)
-                if part_payload is None and content_type in _ENCAPSULATED_MESSAGE_TYPES:
-                    part_payload = _attached_message_bytes(part)
-                size = len(part_payload) if isinstance(part_payload, bytes) else 0
+        if disposition is not None:
+            # Handle attachment or inline part
+            if declared_filename:
+                filename = declared_filename
+            else:
+                nameless_parts += 1
+                filename = _fallback_filename(content_type, nameless_parts)
+            part_payload = part.get_payload(decode=True)
+            if part_payload is None and content_type in _ENCAPSULATED_MESSAGE_TYPES:
+                part_payload = _attached_message_bytes(part)
+            size = len(part_payload) if isinstance(part_payload, bytes) else 0
 
-                attachment_info: dict[str, Any] = {
-                    "filename": filename,
-                    "content_type": content_type,
-                    "size": size,
-                    "disposition": disposition,
-                }
-                if content_id:
-                    attachment_info["content_id"] = content_id
+            attachment_info: dict[str, Any] = {
+                "filename": filename,
+                "content_type": content_type,
+                "size": size,
+                "disposition": disposition,
+            }
+            if content_id:
+                attachment_info["content_id"] = content_id
 
-                if isinstance(part_payload, bytes) and s3_storage and domain:
-                    # Upload to S3
-                    try:
-                        s3_info = await s3_storage.upload_attachment(
-                            content=part_payload,
-                            domain=domain,
-                            message_id=s3_message_id,
-                            filename=filename,
-                            content_type=content_type,
-                        )
-                        attachment_info["storage"] = "s3"
-                        attachment_info["bucket"] = s3_info.bucket
-                        attachment_info["key"] = s3_info.key
-                        attachment_info["url"] = s3_info.url
-                        if s3_info.presigned_url:
-                            attachment_info["presigned_url"] = s3_info.presigned_url
-                    except Exception as e:
-                        # Fallback to inline on S3 failure
-                        logger.warning(
-                            f"S3 upload failed for {filename}, falling back to inline: {e}"
-                        )
-                        attachment_info["storage"] = "inline"
-                        attachment_info["storage_fallback"] = True
-                        if size <= max_inline_attachment_size:
-                            attachment_info["content"] = base64.b64encode(part_payload).decode(
-                                "ascii"
-                            )
-                            attachment_info["content_transfer_encoding"] = "base64"
-                elif isinstance(part_payload, bytes) and size <= max_inline_attachment_size:
-                    # Inline storage
+            if isinstance(part_payload, bytes) and s3_storage and domain:
+                # Upload to S3
+                try:
+                    s3_info = await s3_storage.upload_attachment(
+                        content=part_payload,
+                        domain=domain,
+                        message_id=s3_message_id,
+                        filename=filename,
+                        content_type=content_type,
+                    )
+                    attachment_info["storage"] = "s3"
+                    attachment_info["bucket"] = s3_info.bucket
+                    attachment_info["key"] = s3_info.key
+                    attachment_info["url"] = s3_info.url
+                    if s3_info.presigned_url:
+                        attachment_info["presigned_url"] = s3_info.presigned_url
+                except Exception as e:
+                    # Fallback to inline on S3 failure
+                    logger.warning(f"S3 upload failed for {filename}, falling back to inline: {e}")
                     attachment_info["storage"] = "inline"
-                    attachment_info["content"] = base64.b64encode(part_payload).decode("ascii")
-                    attachment_info["content_transfer_encoding"] = "base64"
-                else:
-                    # Metadata only (too large for inline, no S3)
-                    attachment_info["storage"] = "inline"
+                    attachment_info["storage_fallback"] = True
+                    if size <= max_inline_attachment_size:
+                        attachment_info["content"] = base64.b64encode(part_payload).decode("ascii")
+                        attachment_info["content_transfer_encoding"] = "base64"
+            elif isinstance(part_payload, bytes) and size <= max_inline_attachment_size:
+                # Inline storage
+                attachment_info["storage"] = "inline"
+                attachment_info["content"] = base64.b64encode(part_payload).decode("ascii")
+                attachment_info["content_transfer_encoding"] = "base64"
+            else:
+                # Metadata only (too large for inline, no S3)
+                attachment_info["storage"] = "inline"
 
-                attachments.append(attachment_info)
-            elif content_type == "text/plain":
-                payload_bytes = part.get_payload(decode=True)
-                if isinstance(payload_bytes, bytes):
-                    charset = part.get_content_charset() or "utf-8"
-                    try:
-                        body_text = payload_bytes.decode(charset)
-                    except Exception:
-                        body_text = payload_bytes.decode("utf-8", errors="replace")
-            elif content_type == "text/html":
-                payload_bytes = part.get_payload(decode=True)
-                if isinstance(payload_bytes, bytes):
-                    charset = part.get_content_charset() or "utf-8"
-                    try:
-                        body_html = payload_bytes.decode(charset)
-                    except Exception:
-                        body_html = payload_bytes.decode("utf-8", errors="replace")
-    else:
-        # Simple message
-        charset = message.get_content_charset() or "utf-8"
-        body_bytes = message.get_payload(decode=True)
-        body_str = ""
-        if isinstance(body_bytes, bytes):
-            try:
-                body_str = body_bytes.decode(charset)
-            except Exception:
-                body_str = body_bytes.decode("utf-8", errors="replace")
-        elif isinstance(body_bytes, str):
-            body_str = body_bytes
-
-        if message.get_content_type() == "text/html":
-            body_html = body_str
-        else:
-            body_text = body_str
+            attachments.append(attachment_info)
+        elif content_type == "text/html":
+            body_html = _part_text(part)
+        elif content_type == "text/plain" or part is message:
+            # Any other text/* as the whole message is still the body, as is a
+            # multipart that could not be split.
+            body_text = _part_text(part)
 
     payload["body_text"] = body_text
     payload["body_html"] = body_html

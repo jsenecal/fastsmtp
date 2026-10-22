@@ -282,6 +282,29 @@ class TestExtractEmailPayloadWithS3:
         assert "content" in att
 
     @pytest.mark.asyncio
+    async def test_s3_failure_with_oversized_attachment_keeps_metadata_only(self, s3_settings):
+        """A failed upload too large to inline still reports the part, without content."""
+        msg = EmailMessage()
+        msg["From"] = "sender@example.com"
+        msg["Message-ID"] = "<test@example.com>"
+        msg.set_content("Body")
+        msg.add_attachment(b"x" * 64, maintype="application", subtype="pdf", filename="big.pdf")
+        settings = s3_settings.model_copy(update={"webhook_max_inline_attachment_size": 16})
+        mock_s3 = AsyncMock(spec=S3Storage)
+        mock_s3.upload_attachment.side_effect = S3UploadError("Failed", "big.pdf")
+
+        payload = await extract_email_payload(
+            msg, new_envelope(), settings, s3_storage=mock_s3, domain="example.com"
+        )
+
+        [att] = payload["attachments"]
+        assert att["filename"] == "big.pdf"
+        assert att["size"] == 64
+        assert att["storage"] == "inline"
+        assert att["storage_fallback"] is True
+        assert "content" not in att
+
+    @pytest.mark.asyncio
     async def test_inline_storage_without_s3(self, inline_settings):
         """Test email payload uses inline storage when S3 not configured."""
         msg = EmailMessage()

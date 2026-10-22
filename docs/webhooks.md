@@ -359,6 +359,30 @@ If S3 upload fails, FastSMTP gracefully falls back to inline storage. The attach
 }
 ```
 
+## Single-part messages
+
+A message that is not multipart has exactly one part. It follows the same rules as a
+part inside multipart mail, plus one that applies only to this lone part:
+
+- A text part (`text/plain`, `text/html`, or any other `text/*` type) is the body,
+  unless it is marked `Content-Disposition: attachment` or has a filename on its
+  `Content-Disposition`. Then it is a file, as it would be inside multipart mail.
+- Any other part - a lone PDF, an image sent on its own by a scanner, or a bare
+  `application/json` - is captured with its decoded bytes, stored inline or in S3 as
+  configured, with a fallback filename if it has none. Its `disposition` is `inline`
+  if it says so or has a `Content-ID`, otherwise `attachment`. `body_text` and
+  `body_html` are empty, so a `body` rule no longer sees it; `attachment_names`,
+  `attachment_types` and `has_attachment` do.
+- A lone `message/*` part other than a forwarded message (`message/rfc822`) is not
+  captured. A bare `message/delivery-status`, for example, is report data, not a file.
+
+The lone-part rule is what makes a part without any disposition, name or Content-ID a
+file. Inside multipart mail such a part is still skipped, because
+`application/pgp-signature` arrives exactly like that and is not an attachment.
+
+Up to v0.8.0 such a part was decoded into `body_text`: a PDF or image arrived as
+replacement characters, with no attachment and `has_attachments: false`.
+
 ## Inline Images and Content-ID
 
 HTML mail embeds images by reference rather than by value: the body carries
