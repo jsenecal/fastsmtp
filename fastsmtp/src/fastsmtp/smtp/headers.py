@@ -63,9 +63,30 @@ def raw_header(message: Message, name: str) -> str:
     return "" if raw is None else _wire_text(raw)
 
 
-def raw_headers(message: Message) -> dict[str, str]:
-    """Every header undecoded, keyed by name; a repeated header keeps its last value."""
-    return {key: _wire_text(value) for key, value in message.raw_items()}
+def header_list(message: Message) -> list[list[str]]:
+    """Every header undecoded, as ``[name, value]`` pairs in the order received."""
+    return [[key, _wire_text(value)] for key, value in message.raw_items()]
+
+
+def first_occurrences(pairs: list[list[str]]) -> dict[str, str]:
+    """Collapse :func:`header_list` output to one value per name: the first.
+
+    First, not last, because the headers that legitimately repeat are added at
+    the top: trace fields (RFC 5321 section 4.4), Authentication-Results (RFC
+    8601 section 4.1) and, by convention, filter verdicts such as X-Spam-*.
+    Behind a relay that prepends them, the first is from the nearest hop and
+    the last may be the sender's own forgery. :func:`raw_header`, behind
+    ``header:<name>`` rules, agrees. Names are case-insensitive, so one that
+    differs only in case is the same header and keeps the spelling it first
+    arrived with.
+    """
+    headers: dict[str, str] = {}
+    seen: set[str] = set()
+    for key, value in pairs:
+        if key.lower() not in seen:
+            seen.add(key.lower())
+            headers[key] = value
+    return headers
 
 
 class PartFilename(NamedTuple):

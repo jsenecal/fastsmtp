@@ -16,11 +16,19 @@ With `FASTSMTP_ATTACHMENT_STORAGE=inline` (default), attachments are base64-enco
   "envelope_from": "sender@example.com",
   "envelope_to": ["recipient@yourdomain.com"],
   "headers": {
+    "Received": "from mx.example.com by mx.yourdomain.com; Mon, 06 Jan 2025 10:00:01 +0000",
     "From": "John Doe <sender@example.com>",
     "To": "recipient@yourdomain.com",
     "Subject": "Invoice for January",
     "Content-Type": "multipart/mixed"
   },
+  "header_list": [
+    ["Received", "from mx.example.com by mx.yourdomain.com; Mon, 06 Jan 2025 10:00:01 +0000"],
+    ["From", "John Doe <sender@example.com>"],
+    ["To", "recipient@yourdomain.com"],
+    ["Subject", "Invoice for January"],
+    ["Content-Type", "multipart/mixed"]
+  ],
   "body_text": "Please find attached the invoice for January 2025.",
   "body_html": "<p>Please find attached the invoice for January 2025.</p>",
   "has_attachments": true,
@@ -71,7 +79,8 @@ the payload carries (non-ASCII shown as JSON escapes):
 ```
 
 - **`headers` stays undecoded.** It holds every header with its encoded-words and folds
-  intact, for anything that needs the wire form. `date` and `message_id` are also passed
+  intact, for anything that needs the wire form; for a repeated header, see
+  [Repeated headers](#repeated-headers). `date` and `message_id` are also passed
   through unchanged. A header sent as raw UTF-8 (RFC 6532) arrives as that text; bytes
   that are not valid UTF-8 become U+FFFD, since JSON cannot carry them. For a byte-exact
   copy of the message (DKIM, archival, replay), use
@@ -124,6 +133,56 @@ key; objects already stored keep theirs.
 The same applies to rules: see
 [Rules written against encoded-words](rules.md#rules-written-against-encoded-words).
 
+## Repeated headers
+
+`headers` is a JSON object, so it holds one value per name. For a header that appears
+more than once it holds the **first** occurrence, as received from the top of the
+message, and keeps the spelling of the name it first arrived with. `header_list` holds
+every header as a `[name, value]` pair, in the order received, repeats included, so
+a consumer that needs every `Received` or `Authentication-Results` line reads it from
+there. Values in both are undecoded.
+
+First, not last, because the headers that legitimately repeat are added at the top:
+
+- Each server a message passes through MUST insert its `Received` line "at the
+  beginning of the message content" (RFC 5321 section 4.4).
+- `Authentication-Results` "MUST be prepended to the message" (RFC 8601 section 4.1).
+- Spam and virus filters conventionally prepend their verdicts (`X-Spam-Status` and
+  the like); no RFC requires it.
+
+So when FastSMTP sits behind a relay or filter that prepends its own headers, the
+first occurrence came from that hop, and the last may be one the sender wrote into
+their own message: a sender can put `Authentication-Results: ... dkim=pass` or
+`X-Spam-Flag: NO` at the bottom, below the real verdict added upstream.
+`header:<name>` rules read the first occurrence too, so a rule and `headers` always
+see the same value.
+
+**Headers are not authenticated.** FastSMTP does not add its own `Received` or
+`Authentication-Results` line, and does not remove forged ones. When it is the
+internet-facing MX, nothing upstream prepends anything, so every header, first or
+last, is whatever the sender wrote. For authentication, use the payload's own
+`dkim_result`, `dkim_domain`, `spf_result` and `spf_domain`, which FastSMTP computed
+itself. Trust a header's first occurrence only when you know which relay added it.
+
+Fields that RFC 5322 section 3.6 allows only once (`From`, `To`, `Subject`,
+`Message-ID`, `Date` and others) have no right answer when repeated: the message is
+malformed. Reading the first one everywhere at least keeps `from` and
+`headers["From"]` in agreement.
+
+### This changes `headers` for existing consumers
+
+Before this change `headers` held the **last** occurrence of a repeated header. A
+consumer that relied on that sees the first one now. One that needs a specific
+occurrence should read `header_list`, which is new and does not replace `headers`.
+
+Header names are also matched case-insensitively now. RFC 5322 defines each name as a
+quoted literal in its grammar (`"Date:"`), and section 1.2.2 makes those literals
+case-insensitive. Before,
+`x-spam-status` and `X-Spam-Status` in one message were two separate keys in `headers`.
+Now there is one key, spelled as the first occurrence arrived, so look keys up
+case-insensitively.
+The test payload sent by `POST /api/v1/test-webhook` carries `header_list` too.
+
 ## S3 Storage
 
 With `FASTSMTP_ATTACHMENT_STORAGE=s3`, attachments are uploaded to S3 and the payload contains bucket/key references:
@@ -142,6 +201,11 @@ With `FASTSMTP_ATTACHMENT_STORAGE=s3`, attachments are uploaded to S3 and the pa
     "To": "recipient@yourdomain.com",
     "Subject": "Invoice for January"
   },
+  "header_list": [
+    ["From", "John Doe <sender@example.com>"],
+    ["To", "recipient@yourdomain.com"],
+    ["Subject", "Invoice for January"]
+  ],
   "body_text": "Please find attached the invoice for January 2025.",
   "body_html": "<p>Please find attached the invoice for January 2025.</p>",
   "has_attachments": true,

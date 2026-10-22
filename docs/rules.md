@@ -9,8 +9,8 @@ The rule engine allows conditional processing of emails based on various attribu
   wrote as RFC 2047 encoded-words; see [Decoded header fields](webhooks.md#decoded-header-fields)
 - `header:<name>` (e.g., `header:X-Priority`) - matches the undecoded value, encoded-words
   and folding included, as the payload's `headers` object carries it. For a header that
-  appears more than once, the rule reads the **first** occurrence, while `headers`, a
-  JSON object with one key per name, holds the **last**
+  appears more than once, both read the **first** occurrence, the one added nearest to
+  FastSMTP; see [Repeated headers](webhooks.md#repeated-headers)
 - `has_attachment` - inline images that the HTML body actually renders, such as
   signature logos, are delivered in the webhook payload but do not set this
   field. Everything else the message carries does, including a part that claims

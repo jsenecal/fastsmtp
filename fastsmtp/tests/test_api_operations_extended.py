@@ -259,6 +259,29 @@ class TestTestWebhook:
         assert "response_time_ms" in data
 
     @pytest.mark.asyncio
+    async def test_test_webhook_payload_has_the_delivery_shape(self, auth_client: AsyncClient):
+        """The sample carries header_list as well as headers, as real deliveries do."""
+        with patch("fastsmtp.api.operations.send_webhook", return_value=(True, 200, None)) as send:
+            response = await auth_client.post(
+                "/api/v1/test-webhook",
+                json={
+                    "webhook_url": "https://example.com/hook",
+                    "from_address": "test@example.com",
+                    "to_address": "recipient@example.com",
+                    "subject": "Test Subject",
+                    "body": "Test body",
+                },
+            )
+        assert response.status_code == 200
+        payload = send.await_args.kwargs["payload"]
+        assert payload["header_list"] == [
+            ["From", "test@example.com"],
+            ["To", "recipient@example.com"],
+            ["Subject", "Test Subject"],
+        ]
+        assert payload["headers"] == dict(payload["header_list"])
+
+    @pytest.mark.asyncio
     async def test_test_webhook_invalid_url(self, auth_client: AsyncClient):
         """Test webhook testing with invalid URL."""
         response = await auth_client.post(

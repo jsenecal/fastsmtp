@@ -35,7 +35,13 @@ from fastsmtp.metrics.definitions import (
     SMTP_RATE_LIMITED,
 )
 from fastsmtp.net import bind_dualstack, unmap_ipv4
-from fastsmtp.smtp.headers import decoded_header, part_filename, raw_header, raw_headers
+from fastsmtp.smtp.headers import (
+    decoded_header,
+    first_occurrences,
+    header_list,
+    part_filename,
+    raw_header,
+)
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import (
     MECHANISM_DKIM,
@@ -835,6 +841,7 @@ async def extract_email_payload(
 
     # The convenience fields are decoded and unfolded for display and matching;
     # "headers" keeps the undecoded values for anything that needs the wire form.
+    headers = header_list(message)
     payload: dict[str, Any] = {
         "message_id": raw_header(message, "Message-ID"),
         "from": decoded_header(message, "From"),
@@ -845,7 +852,8 @@ async def extract_email_payload(
         "reply_to": decoded_header(message, "Reply-To"),
         "envelope_from": envelope.mail_from,
         "envelope_to": envelope.rcpt_tos,
-        "headers": raw_headers(message),
+        "headers": first_occurrences(headers),
+        "header_list": headers,
     }
 
     # Extract body
