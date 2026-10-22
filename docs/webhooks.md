@@ -72,18 +72,29 @@ the payload carries (non-ASCII shown as JSON escapes):
 
 - **`headers` stays undecoded.** It holds every header with its encoded-words and folds
   intact, for anything that needs the wire form. `date` and `message_id` are also passed
-  through unchanged. For a byte-exact copy of the message (DKIM, archival, replay), use
+  through unchanged. A header sent as raw UTF-8 (RFC 6532) arrives as that text; bytes
+  that are not valid UTF-8 become U+FFFD, since JSON cannot carry them. For a byte-exact
+  copy of the message (DKIM, archival, replay), use
   [Preserved Raw Message](#preserved-raw-message).
-- **Addresses are kept as sent.** Only encoded-words change. Addresses, comments
-  (including the legacy `addr (Name)` form) and malformed values are left exactly as
-  they arrived. The one addition: in an address field, a decoded name that contains a
-  comma or another special character is quoted, as with `Cc` above, so the field still
-  parses as the same list of addresses.
+- **Addresses are kept as sent.** Only encoded-words in display names and comments
+  are decoded. Addresses, comments (including the legacy `addr (Name)` form) and
+  malformed values are left as they arrived. An encoded-word anywhere else - inside
+  `<...>`, in a quoted local-part, or in an address with no `<...>` after it - is part
+  of the address (RFC 2047 forbids one there) and stays encoded, so an encoded
+  `boss@corp.com` can never pass for a sender. A decoded display name that contains a
+  comma, `@`, `<` or another special character is quoted, as with `Cc` above. As a
+  final check, the field is parsed before and after decoding; if the addresses differ
+  at all, the field is delivered undecoded.
 - **Bad charsets do not fail delivery.** An unknown or mislabelled charset decodes with
   U+FFFD replacement characters instead of raising.
-- **Decoded fields are single-line.** A control character produced by decoding, such as
-  an encoded CR or LF, becomes a space, so an encoded-word cannot put a line break back
-  into a field.
+- **Decoded text is made safe.** This applies to these fields and to attachment
+  filenames, whether the text arrived encoded or as raw UTF-8. Control characters and
+  line separators (CR, LF, NEL, U+2028, U+2029), bidi overrides, embeddings and isolates
+  (U+202A-U+202E, U+2066-U+2069), and lone surrogates are neutralised, so nothing can
+  put a line break into a field or make it render reversed. In `subject` and filenames
+  controls become spaces and bidi characters are removed. In the address fields every
+  one of them becomes U+FFFD instead, because removing a character could turn one
+  mailbox into another (`ceo<U+2066>@corp.com` into `ceo@corp.com`).
 - **Rules match the decoded text.** The `from`, `to` and `subject` rule fields read these
   same decoded values; `header:<name>` reads the raw one. See
   [Rule Fields](rules.md#rule-fields).
@@ -96,6 +107,19 @@ decoding text that has no encoded-words leaves it unchanged. The exception is a 
 name that decodes to something needing quotes, which now arrives quoted. A consumer
 that relied on the raw form there - to compare against a stored raw string, say -
 should read the field from `headers` instead.
+
+`headers` changes too, for raw UTF-8 headers only. Each of their non-ASCII bytes used to
+arrive as its own U+FFFD, so `\u00e9t\u00e9` was delivered as four replacement
+characters around a `t`. It now arrives as the text that was sent. The same fix applies
+to `header:<name>` rules, which could not match non-ASCII text in such a header before.
+
+Attachment `filename` values change the same way. A name sent as raw UTF-8 used to lose
+its non-ASCII bytes the same way, and a name written as an RFC 2047 encoded-word inside
+quotes (`filename="=?utf-8?Q?caf=C3=A9.pdf?="`, which Outlook and many libraries
+send) arrived undecoded. Both now arrive as the name that was meant (`caf\u00e9.pdf`),
+as an RFC 2231 name (`filename*=utf-8''caf%C3%A9.pdf`) already did. The S3 object
+key is built from the filename, so new uploads of such attachments get a different
+key; objects already stored keep theirs.
 
 The same applies to rules: see
 [Rules written against encoded-words](rules.md#rules-written-against-encoded-words).

@@ -8,14 +8,18 @@ The rule engine allows conditional processing of emails based on various attribu
   unfolded text, so `subject contains Coupure` matches a subject the sending client
   wrote as RFC 2047 encoded-words; see [Decoded header fields](webhooks.md#decoded-header-fields)
 - `header:<name>` (e.g., `header:X-Priority`) - matches the undecoded value, encoded-words
-  and folding included, the same value the payload's `headers` object carries
+  and folding included, as the payload's `headers` object carries it. For a header that
+  appears more than once, the rule reads the **first** occurrence, while `headers`, a
+  JSON object with one key per name, holds the **last**
 - `has_attachment` - inline images that the HTML body actually renders, such as
   signature logos, are delivered in the webhook payload but do not set this
   field. Everything else the message carries does, including a part that claims
   an inline disposition without being referenced from the body; see
   [Inline images and Content-ID](webhooks.md#inline-images-and-content-id)
 - `attachment_names`, `attachment_types` - the filename and content type of each
-  part the message carries; see [Matching on attachments](#matching-on-attachments)
+  part the message carries; see [Matching on attachments](#matching-on-attachments).
+  Filenames are decoded, as described in
+  [Decoded header fields](webhooks.md#decoded-header-fields)
 - `dkim_result`, `spf_result` - a mechanism this rule's own domain does not verify
   reads as `none`, whatever another recipient's domain asked for; see
   [Per-domain overrides](configuration.md#per-domain-overrides)
