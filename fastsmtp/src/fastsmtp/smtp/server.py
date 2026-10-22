@@ -35,6 +35,7 @@ from fastsmtp.metrics.definitions import (
     SMTP_RATE_LIMITED,
 )
 from fastsmtp.net import bind_dualstack, unmap_ipv4
+from fastsmtp.smtp.headers import decoded_header, part_filename, raw_header, raw_headers
 from fastsmtp.smtp.rate_limiter import get_smtp_rate_limiter
 from fastsmtp.smtp.validation import (
     MECHANISM_DKIM,
@@ -331,7 +332,7 @@ class FastSMTPHandler:
             return "550 Failed to parse message"
 
         # Get Message-ID (use UUID if unusable, for reliable deduplication)
-        message_id = key_safe_message_id(message.get("Message-ID"))
+        message_id = key_safe_message_id(raw_header(message, "Message-ID"))
 
         # Each recipient domain decides which checks apply to its own mail, so
         # the recipients have to be resolved before anything is verified. This
@@ -631,10 +632,10 @@ def _content_id_value(part: Message) -> str | None:
     URL, so strip the brackets here rather than making every one of them do it.
     A bare ``Content-ID: <>``, which some relays emit, reduces to ``None``.
     """
-    raw = part.get("Content-ID")
+    raw = raw_header(part, "Content-ID")
     if not raw:
         return None
-    value = str(raw).strip().lstrip("<").rstrip(">").strip()
+    value = raw.strip().lstrip("<").rstrip(">").strip()
     if not value or len(value) > _MAX_CONTENT_ID_LENGTH:
         return None
     if _UNSAFE_CONTENT_ID_CHARS.search(value):
@@ -685,20 +686,18 @@ def _classify_part(part: Message) -> _PartInfo:
     is that part's Content-ID, so an HTML body legitimately carries the header.
     Treating it as a file marker empties ``body_html`` for that mail.
     """
-    filename = part.get_filename()
+    filename, on_disposition = part_filename(part)
     content_id = _content_id_value(part)
-    disposition = (part.get("Content-Disposition") or "").split(";")[0].strip().lower()
+    disposition = raw_header(part, "Content-Disposition").split(";")[0].strip().lower()
 
     if disposition == "attachment":
         return _PartInfo("attachment", filename, content_id)
 
-    # get_filename() falls back to the Content-Type name parameter, which body
+    # part_filename() falls back to the Content-Type name parameter, which body
     # parts do carry - some clients send text/html; name="message.html". Only a
     # filename the sender put on the Content-Disposition marks a text part as a
-    # file; keying on get_filename() here empties the body for that mail.
-    if part.get_content_maintype() == "text" and not part.get_param(
-        "filename", header="content-disposition"
-    ):
+    # file; keying on the filename alone here empties the body for that mail.
+    if part.get_content_maintype() == "text" and not on_disposition:
         return _PartInfo(None, filename, content_id)
 
     if disposition == "inline" or content_id:
@@ -792,7 +791,7 @@ def _attached_message_bytes(part: Message) -> bytes | None:
     generator. Degrading that one attachment to the pre-fix "no content" stub
     keeps a single crafted message from failing delivery outright.
     """
-    encoding = (part.get("Content-Transfer-Encoding") or "").strip().lower()
+    encoding = raw_header(part, "Content-Transfer-Encoding").strip().lower()
     if encoding not in _IDENTITY_TRANSFER_ENCODINGS:
         logger.warning(
             f"Encapsulated message uses Content-Transfer-Encoding {encoding!r}, "
@@ -830,22 +829,23 @@ async def extract_email_payload(
             Message-ID header, then a generated UUID, so messages without a
             usable Message-ID never share (and overwrite) the same S3 key prefix
     """
-    s3_message_id = key_safe_message_id(message_id or message.get("Message-ID"))
+    s3_message_id = key_safe_message_id(message_id or raw_header(message, "Message-ID"))
     settings = settings or get_settings()
     max_inline_attachment_size = settings.webhook_max_inline_attachment_size
 
-    # Get basic headers
+    # The convenience fields are decoded and unfolded for display and matching;
+    # "headers" keeps the undecoded values for anything that needs the wire form.
     payload: dict[str, Any] = {
-        "message_id": message.get("Message-ID", ""),
-        "from": message.get("From", ""),
-        "to": message.get("To", ""),
-        "cc": message.get("Cc", ""),
-        "subject": message.get("Subject", ""),
-        "date": message.get("Date", ""),
-        "reply_to": message.get("Reply-To", ""),
+        "message_id": raw_header(message, "Message-ID"),
+        "from": decoded_header(message, "From"),
+        "to": decoded_header(message, "To"),
+        "cc": decoded_header(message, "Cc"),
+        "subject": decoded_header(message, "Subject"),
+        "date": raw_header(message, "Date"),
+        "reply_to": decoded_header(message, "Reply-To"),
         "envelope_from": envelope.mail_from,
         "envelope_to": envelope.rcpt_tos,
-        "headers": dict(message.items()),
+        "headers": raw_headers(message),
     }
 
     # Extract body
@@ -857,12 +857,12 @@ async def extract_email_payload(
     if message.is_multipart():
         for part in _iter_payload_parts(message):
             content_type = part.get_content_type()
-            disposition, part_filename, content_id = _classify_part(part)
+            disposition, declared_filename, content_id = _classify_part(part)
 
             if disposition is not None:
                 # Handle attachment or inline part
-                if part_filename:
-                    filename = part_filename
+                if declared_filename:
+                    filename = declared_filename
                 else:
                     nameless_parts += 1
                     filename = _fallback_filename(content_type, nameless_parts)

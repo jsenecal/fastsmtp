@@ -346,7 +346,9 @@ fsmtp rules rule delete <domain-id> <rule-id>
 
 Valid fields are `from`, `to`, `subject`, `body`, `has_attachment`,
 `attachment_names`, `attachment_types`, `dkim_result`, `spf_result`, or
-`header:X-Custom-Header`. The two attachment fields hold one value per part and match
+`header:X-Custom-Header`. `from`, `to` and `subject` match the decoded, unfolded
+text, while `header:<name>` matches the raw wire value; see
+[Rule Fields](../rules.md#rule-fields). The two attachment fields hold one value per part and match
 when any single part satisfies the condition; see
 [Matching on attachments](../rules.md#matching-on-attachments). Valid operators are `equals`, `contains`,
 `regex`, `starts_with`, `ends_with` and `exists`. Valid actions are `forward`, `drop`,

@@ -333,6 +333,30 @@ This is a test message body.
         assert delivery.status == "pending"
 
     @pytest.mark.asyncio
+    async def test_handle_data_accepts_raw_utf8_message_id(
+        self,
+        test_settings: Settings,
+        test_domain_with_recipient: Domain,
+        run_smtp_data,
+    ):
+        """An RFC 6532 Message-ID is text, not an email.header.Header (issue #172)."""
+        envelope = Envelope()
+        envelope.rcpt_tos = ["user@handler-test.com"]
+        content = (
+            "From: sender@example.com\r\n"
+            "Subject: caf\u00e9\r\n"
+            "Message-ID: <caf\u00e9@example.com>\r\n\r\n"
+            "Body\r\n"
+        ).encode()
+
+        run = await run_smtp_data(FastSMTPHandler(test_settings), envelope, content=content)
+
+        assert run.reply == "250 Message accepted for delivery"
+        [payload] = run.payloads
+        assert payload["message_id"] == "<caf\u00e9@example.com>"
+        assert payload["subject"] == "caf\u00e9"
+
+    @pytest.mark.asyncio
     async def test_handle_data_rejects_unparseable_message(
         self,
         test_settings: Settings,

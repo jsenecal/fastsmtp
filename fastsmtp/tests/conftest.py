@@ -308,9 +308,10 @@ def run_smtp_data(session_factory: async_sessionmaker[AsyncSession]):
         spf: str = RESULT_NONE,
         subject: str = "Data run",
         peer: str = "203.0.113.10",
+        content: bytes | None = None,
     ) -> SMTPDataRun:
         envelope.mail_from = envelope.mail_from or "sender@external.com"
-        envelope.content = (
+        envelope.content = content or (
             b"From: sender@external.com\r\n"
             b"Subject: " + subject.encode() + b"\r\n"
             b"Message-ID: <data-run@external.com>\r\n\r\n"

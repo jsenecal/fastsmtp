@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from fastsmtp.config import Settings, get_settings
 from fastsmtp.db.models import Domain, Rule, RuleSet
 from fastsmtp.rules.conditions import evaluate_condition
+from fastsmtp.smtp.headers import decoded_header, raw_header
 from fastsmtp.smtp.validation import EmailAuthResult
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,11 @@ MULTI_VALUE_FIELDS = {
     "attachment_names": "filename",
     "attachment_types": "content_type",
 }
+
+
+# Fields the payload carries decoded (see decoded_header), mapped to the header
+# each one is read from.
+DECODED_FIELDS = {"from": "From", "to": "To", "subject": "Subject"}
 
 
 def extract_field_values(
@@ -127,12 +133,11 @@ def _single_field_value(
     settings = settings or get_settings()
 
     # Handle special fields
-    if field_name == "from":
-        return message.get("From", "")
-    elif field_name == "to":
-        return message.get("To", "")
-    elif field_name == "subject":
-        return message.get("Subject", "")
+    if header := DECODED_FIELDS.get(field_name):
+        # extract_email_payload has already decoded these. Decoding again for
+        # every rule condition would multiply whatever a crafted header costs.
+        value = payload.get(field_name)
+        return value if isinstance(value, str) else decoded_header(message, header)
     elif field_name == "body":
         # Combine text and html body with size limit to prevent memory issues
         text = payload.get("body_text", "") or ""
@@ -154,7 +159,7 @@ def _single_field_value(
         return auth_result.spf_result if auth_result else "none"
     elif field_name.startswith("header:"):
         header_name = field_name[7:]  # Remove "header:" prefix
-        return message.get(header_name, "")
+        return raw_header(message, header_name)
     else:
         return None
 
