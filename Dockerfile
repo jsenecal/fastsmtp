@@ -19,6 +19,12 @@ COPY fastsmtp-cli/src fastsmtp-cli/src
 # Install both workspace packages and their dependencies. The CLI's deps
 # (typer, httpx, rich) are already pulled in for the server, so this is close
 # to free in layer size - see issue #142.
+#
+# Compile bytecode here: the runtime sets PYTHONDONTWRITEBYTECODE, so without
+# it every start recompiles every module in memory and re-emits compile-time
+# warnings, such as pyspf 2.0.14's SyntaxWarning for an invalid escape (fixed
+# upstream, unreleased - sdgathman/pyspf#45).
+ENV UV_COMPILE_BYTECODE=1
 RUN uv sync --frozen --no-dev --package fastsmtp --package fastsmtp-cli
 
 FROM python:3.14-slim AS runtime
