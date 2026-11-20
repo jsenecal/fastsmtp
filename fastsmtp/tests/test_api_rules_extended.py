@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 from fastsmtp.db.models import Domain, Rule, RuleSet
 from httpx import AsyncClient
+from rule_helpers import make_rule
 from sqlalchemy import false
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,7 +107,7 @@ class TestRuleUpdateExtended:
         """Test updating rule with invalid field fails."""
         domain, ruleset = test_domain_and_ruleset
 
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -137,7 +138,7 @@ class TestRuleUpdateExtended:
         """Test updating rule with invalid operator fails."""
         domain, ruleset = test_domain_and_ruleset
 
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -168,7 +169,7 @@ class TestRuleUpdateExtended:
         """Test updating rule with invalid action fails."""
         domain, ruleset = test_domain_and_ruleset
 
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -224,7 +225,7 @@ class TestRuleUpdateExtended:
         """Test updating rule value."""
         domain, ruleset = test_domain_and_ruleset
 
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="subject",
@@ -285,7 +286,7 @@ class TestRulesReorderExtended:
 
         rules = []
         for i in range(3):
-            rule = Rule(
+            rule = make_rule(
                 ruleset_id=ruleset.id,
                 order=i,
                 field="from",

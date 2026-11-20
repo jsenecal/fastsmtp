@@ -330,9 +330,23 @@ fsmtp rules rule create <domain-id> <ruleset-id> \
   --tag urgent \
   --case-sensitive
 
+# Combine conditions: --match all (the default) or any, with repeatable
+# --condition and --not-condition, each 'FIELD OPERATOR [VALUE]'
+fsmtp rules rule create <domain-id> <ruleset-id> \
+  --match all \
+  --condition 'from regex ^(noreply|support)@example\.com$' \
+  --condition 'header:Auto-Submitted exists' \
+  --not-condition 'header:Auto-Submitted equals no' \
+  --action drop
+
 # Update a rule (rules are addressed by domain, not by ruleset)
 fsmtp rules rule update <domain-id> <rule-id> --action drop
 fsmtp rules rule update <domain-id> <rule-id> --no-preserve-raw
+
+# Replace a rule's whole condition list, or just change how it combines
+fsmtp rules rule update <domain-id> <rule-id> \
+  --condition 'subject contains invoice' --condition 'has_attachment equals true'
+fsmtp rules rule update <domain-id> <rule-id> --match any
 
 # Remove a rule's webhook override so it falls back to the recipient's URL
 fsmtp rules rule update <domain-id> <rule-id> --webhook-url ''
@@ -355,6 +369,24 @@ when any single part satisfies the condition; see
 `tag` and `quarantine`. `regex` patterns use
 [RE2 syntax](https://github.com/google/re2/wiki/Syntax) (no backreferences or
 lookaround); the server rejects patterns RE2 cannot compile.
+
+A rule holds 1 to 16 conditions; see [The Rule Model](../rules.md#the-rule-model).
+In `--condition` and `--not-condition`, VALUE is everything after the single space
+that follows the operator, leading and inner spaces included. It is required except
+for `exists`, so a forgotten value cannot turn into a rule matching every message.
+`--case-sensitive` applies to every condition given on the command line. The `--condition` entries are stored
+first and the `--not-condition` entries after them, each in the order given;
+order only decides which condition stops evaluation early, never the result. A
+negated condition on a field the message lacks is true, so
+`--not-condition 'header:X-Foo exists'` means "no `X-Foo` header"; see
+[A missing field is false](../rules.md#a-missing-field-is-false-so-its-negation-is-true).
+
+`--field/--operator/--value` remain as the one-condition shorthand (and are
+prompted for when no condition is given), and cannot be combined with
+`--condition`. On `rule update` they edit the condition of a rule holding exactly
+one non-negated condition; the server refuses them on any other rule, where
+`--condition` replaces the list instead. `rule get` prints the conditions one per
+line, with `NOT` in front of a negated one.
 
 ## Operations
 

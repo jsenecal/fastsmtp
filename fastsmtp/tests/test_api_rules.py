@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 from fastsmtp.db.models import Domain, Rule, RuleSet
 from httpx import AsyncClient
+from rule_helpers import make_rule
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -379,7 +380,7 @@ class TestRulesCRUD:
     ):
         """Test updating a rule."""
         domain, ruleset = test_domain_and_ruleset
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -412,7 +413,7 @@ class TestRulesCRUD:
     ):
         """Changing the value of a regex rule to a non-RE2 pattern fails with 422."""
         domain, ruleset = test_domain_and_ruleset
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -440,7 +441,7 @@ class TestRulesCRUD:
     ):
         """Switching operator to regex fails with 422 when the stored value cannot compile."""
         domain, ruleset = test_domain_and_ruleset
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="subject",
@@ -468,7 +469,7 @@ class TestRulesCRUD:
     ):
         """Updating operator and value together to a non-RE2 pattern fails with 422."""
         domain, ruleset = test_domain_and_ruleset
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="subject",
@@ -497,7 +498,7 @@ class TestRulesCRUD:
     ):
         """Changing the value of a regex rule to another valid pattern succeeds."""
         domain, ruleset = test_domain_and_ruleset
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -529,7 +530,7 @@ class TestRulesCRUD:
         ``fsmtp rules rule update --webhook-url ''``.
         """
         domain, ruleset = test_domain_and_ruleset
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -558,7 +559,7 @@ class TestRulesCRUD:
     ):
         """Test deleting a rule."""
         domain, ruleset = test_domain_and_ruleset
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -597,7 +598,7 @@ class TestRulesReorder:
 
         rules = []
         for i in range(3):
-            rule = Rule(
+            rule = make_rule(
                 ruleset_id=ruleset.id,
                 order=i,
                 field="from",

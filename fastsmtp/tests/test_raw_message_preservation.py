@@ -7,10 +7,11 @@ import pytest
 import pytest_asyncio
 from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
-from fastsmtp.db.models import Domain, Recipient, Rule, RuleSet
+from fastsmtp.db.models import Domain, Recipient, RuleSet
 from fastsmtp.smtp.server import FastSMTPHandler
 from fastsmtp.storage.raw_message import RawMessagePreserver, should_preserve_raw
 from fastsmtp.storage.s3 import S3RawMessageInfo, S3Storage, S3UploadError
+from rule_helpers import make_rule
 
 
 def _handler(settings: Settings, s3: S3Storage | None) -> FastSMTPHandler:
@@ -366,7 +367,7 @@ class TestHandlerRawPreservation:
             session.add(ruleset)
             await session.flush()
             session.add(
-                Rule(
+                make_rule(
                     ruleset_id=ruleset.id,
                     order=0,
                     field="subject",

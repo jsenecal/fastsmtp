@@ -9,9 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
-from fastsmtp.db.models import DeliveryLog, Domain, DomainMember, Recipient, Rule, RuleSet, User
+from fastsmtp.db.models import DeliveryLog, Domain, DomainMember, Recipient, RuleSet, User
 from fastsmtp.schemas.recipient import RecipientCreate, RecipientUpdate
 from fastsmtp.schemas.rule import RuleCreate, RuleSetCreate, RuleSetUpdate, RuleUpdate
+from rule_helpers import make_rule
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -515,7 +516,7 @@ class TestRulesAPIUnit:
         test_session.add(ruleset)
         await test_session.flush()
 
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -555,7 +556,7 @@ class TestRulesAPIUnit:
         test_session.add(ruleset)
         await test_session.flush()
 
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",

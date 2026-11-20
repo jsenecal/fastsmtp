@@ -21,6 +21,7 @@ from fastsmtp.db.models import (
 )
 from fastsmtp.db.soft_delete import soft_delete_domain, soft_delete_recipient, soft_delete_user
 from httpx import ASGITransport, AsyncClient
+from rule_helpers import make_rule
 from sqlalchemy import false, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -745,7 +746,9 @@ class TestDomainSoftDelete:
         recipient = Recipient(domain_id=domain.id, local_part="sales", webhook_url="https://x/s")
         ruleset = RuleSet(domain_id=domain.id, name="rs")
         await _persist(test_session, recipient, ruleset)
-        rule = Rule(ruleset_id=ruleset.id, order=0, field="subject", operator="contains", value="a")
+        rule = make_rule(
+            ruleset_id=ruleset.id, order=0, field="subject", operator="contains", value="a"
+        )
         await _persist(test_session, rule)
         ids = {
             "recipient_id": str(recipient.id),
@@ -790,7 +793,9 @@ class TestDomainSoftDelete:
         earlier = Recipient(domain_id=domain.id, local_part="old", webhook_url="https://x/o")
         ruleset = RuleSet(domain_id=domain.id, name="rs")
         await _persist(test_session, sales, earlier, ruleset)
-        rule = Rule(ruleset_id=ruleset.id, order=0, field="subject", operator="contains", value="a")
+        rule = make_rule(
+            ruleset_id=ruleset.id, order=0, field="subject", operator="contains", value="a"
+        )
         await _persist(test_session, rule)
         await soft_delete_recipient(test_session, earlier)
         await test_session.commit()
@@ -917,7 +922,9 @@ class TestDomainSoftDelete:
         recipient = Recipient(domain_id=domain.id, local_part="sales", webhook_url="https://x/s")
         ruleset = RuleSet(domain_id=domain.id, name="rs")
         await _persist(test_session, recipient, ruleset)
-        rule = Rule(ruleset_id=ruleset.id, order=0, field="subject", operator="contains", value="a")
+        rule = make_rule(
+            ruleset_id=ruleset.id, order=0, field="subject", operator="contains", value="a"
+        )
         await _persist(test_session, rule)
         delivery = await _add_delivery(test_session, domain, recipient, DeliveryStatus.DELIVERED)
         assert (await auth_client.delete(f"/api/v1/domains/{domain.id}")).status_code == 200

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from fastsmtp.config import Settings, get_settings
-from fastsmtp.db.models import Domain, Rule, RuleSet
+from fastsmtp.db.models import Domain, Rule, RuleCondition, RuleSet
 from fastsmtp.rules.conditions import evaluate_condition
 from fastsmtp.smtp.headers import decoded_header, raw_header
 from fastsmtp.smtp.validation import EmailAuthResult
@@ -164,6 +164,44 @@ def _single_field_value(
         return None
 
 
+def evaluate_rule_condition(
+    condition: RuleCondition,
+    message: Message,
+    payload: dict,
+    auth_result: EmailAuthResult | None = None,
+    settings: Settings | None = None,
+) -> bool:
+    """Evaluate one condition of a rule against an email.
+
+    A field the message lacks (an absent header, an unknown field) is false,
+    so its negation is true: ``negate`` + ``exists`` means "absent".
+
+    Any one value satisfying the condition makes it true. For the
+    single-valued fields that is the only value; for the attachment fields it
+    means whichever part matches, regardless of its position. Negation is
+    applied to that verdict, so a negated attachment condition holds when *no*
+    part matches - not when some part fails to, which would almost always be
+    true.
+    """
+    field_values = extract_field_values(condition.field, message, payload, auth_result, settings)
+    matched = field_values is not None and any(
+        evaluate_condition(
+            operator=condition.operator,
+            value=field_value,
+            pattern=condition.value,
+            case_sensitive=condition.case_sensitive,
+        )
+        for field_value in field_values
+    )
+    return matched != condition.negate
+
+
+def describe_condition(condition: RuleCondition) -> str:
+    """``[NOT ]field operator``, for logs. The value is left out: it can be long."""
+    prefix = "NOT " if condition.negate else ""
+    return f"{prefix}{condition.field} {condition.operator}"
+
+
 def evaluate_rule(
     rule: Rule,
     message: Message,
@@ -172,6 +210,15 @@ def evaluate_rule(
     settings: Settings | None = None,
 ) -> bool:
     """Evaluate a single rule against an email.
+
+    Conditions run in stored order and short-circuit: under ``all`` the first
+    false condition decides, under ``any`` the first true one. When none
+    decides early, the last condition evaluated does. The debug log names the
+    deciding condition, so "why did (or didn't) this match" has an answer.
+
+    A rule with no conditions matches nothing. The API refuses to create one,
+    but ``all`` over an empty list is vacuously true, and a drop rule that
+    matched every message is not a failure mode worth leaving open.
 
     Args:
         rule: Rule to evaluate
@@ -183,30 +230,26 @@ def evaluate_rule(
     Returns:
         True if the rule matches
     """
-    field_values = extract_field_values(rule.field, message, payload, auth_result, settings)
-
-    if field_values is None:
-        logger.debug(f"Rule {rule.id}: field '{rule.field}' not found")
+    conditions = sorted(rule.conditions, key=lambda c: c.order)
+    if not conditions:
+        logger.debug(f"Rule {rule.id} has no conditions; not matching")
         return False
 
-    # Any one value satisfying the condition matches the rule. For the
-    # single-valued fields that is the only value; for the attachment fields it
-    # means a rule fires on whichever part matches, regardless of its position.
-    result = any(
-        evaluate_condition(
-            operator=rule.operator,
-            value=field_value,
-            pattern=rule.value,
-            case_sensitive=rule.case_sensitive,
-        )
-        for field_value in field_values
+    # The verdict that ends evaluation early: one true condition settles
+    # "any", one false condition settles "all".
+    deciding = rule.match == "any"
+    result = not deciding
+    index = len(conditions) - 1
+    for position, condition in enumerate(conditions):
+        if evaluate_rule_condition(condition, message, payload, auth_result, settings) == deciding:
+            result, index = deciding, position
+            break
+
+    logger.debug(
+        f"Rule {rule.id} {'matched' if result else 'did not match'} "
+        f"(match={rule.match}): decided by conditions[{index}] "
+        f"{describe_condition(conditions[index])}"
     )
-
-    if result:
-        logger.debug(f"Rule {rule.id} matched: {rule.field} {rule.operator} '{rule.value}'")
-    else:
-        logger.debug(f"Rule {rule.id} did not match: {rule.field} {rule.operator} '{rule.value}'")
-
     return result
 
 

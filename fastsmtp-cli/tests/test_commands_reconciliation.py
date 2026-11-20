@@ -614,6 +614,256 @@ class TestRuleCommands:
         assert "Order" in output
 
 
+def condition(field: str, operator: str, value: str = "", **flags: bool) -> dict:
+    """A condition as the CLI sends it."""
+    return {
+        "field": field,
+        "operator": operator,
+        "value": value,
+        "case_sensitive": flags.get("case_sensitive", False),
+        "negate": flags.get("negate", False),
+    }
+
+
+class TestRuleConditionCommands:
+    """``--match``/``--condition``/``--not-condition`` build compound rules (issue #182)."""
+
+    LOOP_GUARD_ARGS = [
+        "--match",
+        "all",
+        "--condition",
+        r"from regex ^(noreply|support)@example\.com$",
+        "--condition",
+        "header:Auto-Submitted exists",
+        "--not-condition",
+        "header:Auto-Submitted equals no",
+        "--action",
+        "drop",
+    ]
+
+    @pytest.fixture
+    def create_route(self, domain_id, ruleset_id, rule_id):
+        with respx.mock:
+            yield respx.post(f"{BASE}/api/v1/domains/{domain_id}/rulesets/{ruleset_id}/rules").mock(
+                return_value=httpx.Response(201, json=rule_payload(rule_id, ruleset_id))
+            )
+
+    def _create(self, domain_id: str, ruleset_id: str, *args: str):
+        return runner.invoke(app, ["rules", "rule", "create", domain_id, ruleset_id, *args])
+
+    def test_a_value_keeps_its_leading_spaces(
+        self, temp_config, domain_id, ruleset_id, create_route
+    ):
+        result = self._create(domain_id, ruleset_id, "--condition", "subject starts_with   [EXT]")
+
+        assert result.exit_code == 0, result.output
+        assert body_of(create_route)["conditions"][0]["value"] == "  [EXT]"
+
+    def test_a_missing_value_is_refused_before_any_request(
+        self, temp_config, domain_id, ruleset_id, create_route
+    ):
+        result = self._create(domain_id, ruleset_id, "--condition", "from contains")
+
+        assert result.exit_code == 1
+        assert "needs a VALUE" in strip_ansi(result.output)
+        assert not create_route.called
+
+    def test_create_sends_the_condition_list(
+        self, temp_config, domain_id, ruleset_id, create_route
+    ):
+        result = self._create(domain_id, ruleset_id, *self.LOOP_GUARD_ARGS)
+
+        assert result.exit_code == 0, result.output
+        assert body_of(create_route) == {
+            "match": "all",
+            "conditions": [
+                condition("from", "regex", r"^(noreply|support)@example\.com$"),
+                condition("header:Auto-Submitted", "exists"),
+                condition("header:Auto-Submitted", "equals", "no", negate=True),
+            ],
+            "action": "drop",
+            "preserve_raw": False,
+        }
+
+    def test_value_keeps_its_spaces(self, temp_config, domain_id, ruleset_id, create_route):
+        result = self._create(domain_id, ruleset_id, "--condition", "subject contains hello  world")
+
+        assert result.exit_code == 0, result.output
+        assert body_of(create_route)["conditions"] == [
+            condition("subject", "contains", "hello  world")
+        ]
+
+    def test_case_sensitive_applies_to_every_condition(
+        self, temp_config, domain_id, ruleset_id, create_route
+    ):
+        result = self._create(
+            domain_id,
+            ruleset_id,
+            "--condition",
+            "subject contains X",
+            "--not-condition",
+            "from contains Y",
+            "--case-sensitive",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert body_of(create_route)["conditions"] == [
+            condition("subject", "contains", "X", case_sensitive=True),
+            condition("from", "contains", "Y", case_sensitive=True, negate=True),
+        ]
+
+    def test_shorthand_still_sends_the_flat_shape(
+        self, temp_config, domain_id, ruleset_id, create_route
+    ):
+        """Flat on the wire, so the shorthand keeps working against a pre-#182 server."""
+        result = self._create(
+            domain_id, ruleset_id, "--field", "subject", "--operator", "exists", "--value", ""
+        )
+
+        assert result.exit_code == 0, result.output
+        body = body_of(create_route)
+        assert "conditions" not in body
+        assert (body["field"], body["operator"], body["value"]) == ("subject", "exists", "")
+
+    def test_without_either_shape_it_prompts_for_one_condition(
+        self, temp_config, domain_id, ruleset_id, create_route
+    ):
+        result = runner.invoke(
+            app,
+            ["rules", "rule", "create", domain_id, ruleset_id],
+            input="subject\ncontains\nhello\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        body = body_of(create_route)
+        assert (body["field"], body["operator"], body["value"]) == ("subject", "contains", "hello")
+
+    def test_shorthand_and_conditions_cannot_mix(
+        self, temp_config, domain_id, ruleset_id, create_route
+    ):
+        result = self._create(
+            domain_id, ruleset_id, "--condition", "subject exists", "--field", "from"
+        )
+
+        assert result.exit_code == 1
+        assert "not both" in strip_ansi(result.output)
+        assert not create_route.called
+
+    @pytest.mark.parametrize(
+        ("spec", "message"),
+        [
+            ("subject", "FIELD OPERATOR"),
+            ("subject not_equals x", "Invalid operator"),
+            ("nope equals x", "Invalid field"),
+        ],
+    )
+    def test_malformed_conditions_are_refused_locally(
+        self, temp_config, domain_id, ruleset_id, create_route, spec, message
+    ):
+        result = self._create(domain_id, ruleset_id, "--condition", spec)
+
+        assert result.exit_code == 1
+        assert message in strip_ansi(result.output)
+        assert not create_route.called
+
+    @respx.mock
+    def test_update_replaces_the_conditions(self, temp_config, domain_id, rule_id, ruleset_id):
+        route = respx.put(f"{BASE}/api/v1/domains/{domain_id}/rules/{rule_id}").mock(
+            return_value=httpx.Response(200, json=rule_payload(rule_id, ruleset_id))
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "rules",
+                "rule",
+                "update",
+                domain_id,
+                rule_id,
+                "--match",
+                "any",
+                "--condition",
+                "subject contains a",
+                "--not-condition",
+                "to exists",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert body_of(route) == {
+            "match": "any",
+            "conditions": [
+                condition("subject", "contains", "a"),
+                condition("to", "exists", negate=True),
+            ],
+        }
+
+    @respx.mock
+    def test_update_match_alone(self, temp_config, domain_id, rule_id, ruleset_id):
+        route = respx.put(f"{BASE}/api/v1/domains/{domain_id}/rules/{rule_id}").mock(
+            return_value=httpx.Response(200, json=rule_payload(rule_id, ruleset_id))
+        )
+
+        result = runner.invoke(
+            app, ["rules", "rule", "update", domain_id, rule_id, "--match", "any"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert body_of(route) == {"match": "any"}
+
+    @respx.mock
+    def test_update_shorthand_and_conditions_cannot_mix(self, temp_config, domain_id, rule_id):
+        route = respx.put(f"{BASE}/api/v1/domains/{domain_id}/rules/{rule_id}")
+
+        result = runner.invoke(
+            app,
+            [
+                "rules",
+                "rule",
+                "update",
+                domain_id,
+                rule_id,
+                "--value",
+                "x",
+                "--condition",
+                "subject exists",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert not route.called
+
+    @respx.mock
+    def test_get_prints_conditions_one_per_line(self, temp_config, domain_id, ruleset_id, rule_id):
+        rule = rule_payload(
+            rule_id,
+            ruleset_id,
+            match="all",
+            conditions=[
+                condition("from", "ends_with", "@example.com"),
+                condition("header:Auto-Submitted", "equals", "no", negate=True),
+            ],
+            field=None,
+            operator=None,
+            value=None,
+            case_sensitive=None,
+        )
+        respx.get(f"{BASE}/api/v1/domains/{domain_id}/rulesets/{ruleset_id}").mock(
+            return_value=httpx.Response(
+                200, json=ruleset_payload(ruleset_id, domain_id, rules=[rule])
+            )
+        )
+
+        result = runner.invoke(app, ["rules", "rule", "get", domain_id, ruleset_id, rule_id])
+        lines = strip_ansi(result.output).splitlines()
+
+        assert result.exit_code == 0, result.output
+        assert any("from ends_with '@example.com'" in line for line in lines)
+        negated = [line for line in lines if "NOT header:Auto-Submitted equals 'no'" in line]
+        assert negated and "from ends_with" not in negated[0]
+        assert any("Match" in line and "all" in line for line in lines)
+
+
 class TestMemberCommands:
     """Member role updates use PUT, which is what the server serves."""
 

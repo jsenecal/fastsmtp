@@ -871,7 +871,9 @@ class TestServerShapedOutput:
         assert "Order" in output
         assert "Preserve Raw" in output
         assert "spam, review" in output
-        assert "Case Sensitive" in output
+        # No ``conditions`` key, as from a pre-#182 server: the flat fields
+        # render as the one condition they describe.
+        assert "subject contains '[SPAM]' (case-sensitive)" in output
 
     def test_rules_table_reads_order_not_priority(self, capsys):
         print_rules_table(

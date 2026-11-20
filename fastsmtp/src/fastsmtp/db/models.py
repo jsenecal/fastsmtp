@@ -341,15 +341,9 @@ class Rule(Base, TimestampMixin):
         index=True,
     )
     order: Mapped[int] = mapped_column(nullable=False)
-    field: Mapped[str] = mapped_column(
-        String(100), nullable=False
-    )  # from, to, subject, header:X-Custom, body, has_attachment,
-    # attachment_names, attachment_types, dkim_result, spf_result
-    operator: Mapped[str] = mapped_column(
-        String(50), nullable=False
-    )  # equals, contains, regex, starts_with, ends_with, exists
-    value: Mapped[str] = mapped_column(Text, nullable=False)
-    case_sensitive: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # How the conditions combine: "all" (AND) or "any" (OR). A single level,
+    # no nesting (issue #182).
+    match: Mapped[str] = mapped_column(String(10), default="all", nullable=False)
     action: Mapped[str] = mapped_column(
         String(50), default="forward", nullable=False
     )  # forward, drop, tag, quarantine
@@ -360,11 +354,57 @@ class Rule(Base, TimestampMixin):
 
     # Relationships
     ruleset: Mapped["RuleSet"] = relationship(back_populates="rules")
+    # selectin: every reader of a rule needs its conditions - the engine to
+    # evaluate it, the API to serialise it - and an async session cannot
+    # lazy-load them on attribute access.
+    conditions: Mapped[list["RuleCondition"]] = relationship(
+        back_populates="rule",
+        cascade="all, delete-orphan",
+        order_by="RuleCondition.order",
+        lazy="selectin",
+        passive_deletes=True,
+    )
 
     __table_args__ = (Index("ix_rules_ruleset_order", "ruleset_id", "order"),)
 
     def __repr__(self) -> str:
-        return f"<Rule {self.field} {self.operator} '{self.value[:20]}...'>"
+        return f"<Rule {self.id} match={self.match}>"
+
+
+class RuleCondition(Base):
+    """One test a rule applies to a message; a rule holds 1..16 of them."""
+
+    __tablename__ = "rule_conditions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    rule_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("rules.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    order: Mapped[int] = mapped_column(nullable=False)
+    field: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )  # from, to, subject, header:X-Custom, body, has_attachment,
+    # attachment_names, attachment_types, dkim_result, spf_result
+    operator: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # equals, contains, regex, starts_with, ends_with, exists
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    case_sensitive: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # Inverts the result, including for a field the message lacks: a missing
+    # field is false, so its negation is true.
+    negate: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    rule: Mapped["Rule"] = relationship(back_populates="conditions")
+
+    __table_args__ = (Index("ix_rule_conditions_rule_order", "rule_id", "order"),)
+
+    def __repr__(self) -> str:
+        prefix = "NOT " if self.negate else ""
+        return f"<RuleCondition {prefix}{self.field} {self.operator} '{self.value[:20]}'>"
 
 
 class DeliveryLog(Base, TimestampMixin):
