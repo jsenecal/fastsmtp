@@ -1,12 +1,20 @@
 """Email authentication validation (DKIM and SPF)."""
 
 import asyncio
+import binascii
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from email.parser import BytesHeaderParser
+from email.policy import compat32
+from email.utils import getaddresses
 from functools import partial
 from typing import TYPE_CHECKING, TypeVar
 
 import dkim
+import dkim.dnsplug
+import dkim.util
 import spf
 
 if TYPE_CHECKING:
@@ -149,47 +157,186 @@ def resolve_auth_policy(domain: "Domain | None", settings: "Settings") -> Effect
     )
 
 
-def _verify_dkim_sync(message: bytes) -> tuple[str, str | None, str | None]:
-    """Synchronously verify DKIM signature.
+# A message can carry any number of DKIM-Signature headers and every one costs a
+# key lookup, so only a few are checked, and all their lookups share one time
+# budget: a sender cannot hold a worker thread for MAX x the per-lookup timeout
+# by stacking signatures whose d= points at a dead nameserver. Mail
+# legitimately carries one to three (author, ESP, mailing list).
+MAX_DKIM_SIGNATURES = 5
+DKIM_LOOKUP_BUDGET_SECONDS = 10.0
+
+# Which result to report when no signature passes. A temperror outranks a fail
+# because the signature that timed out may pass on retry, and reporting fail
+# would let ``reject_dkim_fail`` refuse a message that could be genuine. A fail
+# outranks a permerror: a broken signature says nothing about the message,
+# while a fail is a positive verdict from the signer's own key.
+_DKIM_RANK = {RESULT_TEMPERROR: 0, RESULT_FAIL: 1, RESULT_PERMERROR: 2}
+
+TxtLookup = Callable[..., bytes | None]
+
+
+def _signer(d: "dkim.DKIM") -> tuple[str | None, str | None]:
+    """The ``d=`` and ``s=`` of the signature ``d`` last parsed.
+
+    Read from ``signature_fields``, which dkimpy fills in before validating the
+    signature, rather than ``d.domain``/``d.selector``, which it sets only once
+    validation passes and which default to ``None`` and ``'default'``.
+    """
+
+    def tag(name: bytes) -> str | None:
+        value = d.signature_fields.get(name)
+        return value.decode("ascii", errors="replace") if value else None
+
+    return tag(b"d"), tag(b"s")
+
+
+def _from_domain(message: bytes) -> str | None:
+    """The ``From:`` address's domain, lowercased, for ordering signatures."""
+    addresses = getaddresses(
+        BytesHeaderParser(policy=compat32).parsebytes(message).get_all("From", [])
+    )
+    for _, address in addresses:
+        if "@" in address:
+            return address.rsplit("@", 1)[1].lower()
+    return None
+
+
+def _aligned(signing_domain: str | None, from_domain: str | None) -> bool:
+    """``From:`` is the signing domain or below it.
+
+    A heuristic for which signature to check and report first, nothing more:
+    without a public suffix list it cannot tell ``d=co.uk`` from a real
+    organizational domain, so nothing may trust it as DMARC alignment.
+    """
+    if not signing_domain or not from_domain:
+        return False
+    signing_domain = signing_domain.lower()
+    return from_domain == signing_domain or from_domain.endswith("." + signing_domain)
+
+
+def _signature_order(sig_values: list[bytes], from_domain: str | None) -> list[int]:
+    """Indices of the signatures to check, ``From``-aligned ones first.
+
+    Anyone relaying the message can prepend signatures, so checking strictly
+    top-down would let a handful of junk ones push the author's own past
+    ``MAX_DKIM_SIGNATURES``. Otherwise topmost first, as RFC 6376 suggests.
+    """
+
+    def signing_domain(value: bytes) -> str | None:
+        try:
+            d = dkim.util.parse_tag_value(value).get(b"d")
+        except Exception:
+            return None
+        return d.decode("ascii", errors="replace") if d else None
+
+    aligned = [i for i, v in enumerate(sig_values) if _aligned(signing_domain(v), from_domain)]
+    rest = [i for i in range(len(sig_values)) if i not in aligned]
+    return (aligned + rest)[:MAX_DKIM_SIGNATURES]
+
+
+def _verify_one_signature(
+    message: bytes, idx: int, dnsfunc: TxtLookup, deadline: float
+) -> tuple[str, str | None, str | None]:
+    """Verify the ``idx``-th DKIM-Signature (0 is topmost).
+
+    dkimpy's ``verify()`` swallows key-lookup failures and returns False, so a
+    missing key, an unparseable key and a DNS timeout all look like a bad
+    signature. The lookup is wrapped to see which of those it was, and to hold
+    it to what is left of ``deadline``. The domain and selector are read back
+    from the same ``DKIM`` object that verified, the only one dkimpy fills in.
+    """
+    lookup: dict[str, object] = {}
+
+    def recording_dnsfunc(name: bytes, timeout: float = 5) -> bytes | None:
+        remaining = deadline - time.monotonic()
+        try:
+            if remaining <= 0:
+                raise dkim.DnsTimeoutError("DKIM lookup budget exhausted")
+            record = dnsfunc(name, timeout=min(timeout, remaining))
+        except dkim.DnsTimeoutError:
+            lookup["outcome"] = RESULT_TEMPERROR
+            raise
+        lookup["outcome"] = "answered" if record else RESULT_PERMERROR
+        lookup["record"] = record
+        return record
+
+    d = dkim.DKIM(message)
+    try:
+        ok = d.verify(idx=idx, dnsfunc=recording_dnsfunc)
+    except dkim.ValidationError as e:
+        # Raised before the key is fetched for a malformed signature, and after
+        # it for a body hash mismatch or a key unusable for this message (its
+        # s= service type). Only the body hash is a verdict on the message.
+        body_mismatch = "outcome" in lookup and str(e).startswith("body hash mismatch")
+        return (RESULT_FAIL if body_mismatch else RESULT_PERMERROR, *_signer(d))
+    except dkim.DKIMException as e:
+        logger.info(f"DKIM signature {idx} unverifiable: {e}")
+        return (RESULT_PERMERROR, *_signer(d))
+
+    domain, selector = _signer(d)
+    if ok:
+        return RESULT_PASS, domain, selector
+    outcome = lookup.get("outcome")
+    if outcome in (RESULT_TEMPERROR, RESULT_PERMERROR):
+        return str(outcome), domain, selector
+    if outcome == "answered":
+        try:
+            dkim.evaluate_pk(b"", lookup["record"])
+        except (dkim.KeyFormatError, binascii.Error):
+            return RESULT_PERMERROR, domain, selector
+    return RESULT_FAIL, domain, selector
+
+
+def _verify_dkim_sync(
+    message: bytes, dnsfunc: TxtLookup | None = None
+) -> tuple[str, str | None, str | None]:
+    """Verify the message's DKIM signatures (up to a cap) and summarise.
+
+    Any passing signature makes the message pass, preferring one whose ``d=``
+    is the ``From:`` domain or a parent of it. Otherwise the most hopeful
+    failure is reported, see ``_DKIM_RANK``. Unsigned mail is ``none``.
 
     Args:
         message: Raw email message bytes
+        dnsfunc: TXT lookup, for tests. Defaults to dkimpy's resolver, looked up
+            at call time so it can be patched.
 
     Returns:
         Tuple of (result, domain, selector)
     """
+    if dnsfunc is None:
+        dnsfunc = dkim.dnsplug.get_txt
     try:
-        # dkim.verify returns True/False
-        result = dkim.verify(message)
-        if result:
-            # Try to extract domain and selector from signature
-            try:
-                sig = dkim.DKIM(message)
-                domain = sig.domain.decode() if sig.domain else None
-                selector = sig.selector.decode() if sig.selector else None
-                return RESULT_PASS, domain, selector
-            except Exception:
-                return RESULT_PASS, None, None
-        else:
-            # Check if there was a signature at all
-            try:
-                sig = dkim.DKIM(message)
-                if sig.signature_fields:
-                    domain = sig.domain.decode() if sig.domain else None
-                    selector = sig.selector.decode() if sig.selector else None
-                    return RESULT_FAIL, domain, selector
-                else:
-                    return RESULT_NONE, None, None
-            except Exception:
-                return RESULT_FAIL, None, None
+        sig_values = [
+            value for name, value in dkim.DKIM(message).headers if name.lower() == b"dkim-signature"
+        ]
     except dkim.DKIMException as e:
-        logger.warning(f"DKIM verification error: {e}")
-        if "DNS" in str(e) or "timeout" in str(e).lower():
-            return RESULT_TEMPERROR, None, None
+        logger.warning(f"DKIM: unparseable message: {e}")
         return RESULT_PERMERROR, None, None
     except Exception as e:
         logger.error(f"Unexpected DKIM error: {e}")
         return RESULT_TEMPERROR, None, None
+    if not sig_values:
+        return RESULT_NONE, None, None
+
+    from_domain = _from_domain(message)
+    deadline = time.monotonic() + DKIM_LOOKUP_BUDGET_SECONDS
+    results = []
+    for idx in _signature_order(sig_values, from_domain):
+        try:
+            result = _verify_one_signature(message, idx, dnsfunc, deadline)
+        except Exception as e:
+            logger.error(f"Unexpected DKIM error on signature {idx}: {e}")
+            result = (RESULT_TEMPERROR, None, None)
+        if result[0] == RESULT_PASS and _aligned(result[1], from_domain):
+            return result
+        results.append(result)
+
+    passes = [r for r in results if r[0] == RESULT_PASS]
+    if passes:
+        return passes[0]
+    # min() keeps the first of equal rank, so ties go to the first one checked.
+    return min(results, key=lambda r: _DKIM_RANK[r[0]])
 
 
 async def verify_dkim(message: bytes) -> tuple[str, str | None, str | None]:
