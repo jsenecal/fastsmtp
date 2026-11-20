@@ -8,6 +8,7 @@ from fastsmtp.db.models import (
     DomainMember,
     Recipient,
     Rule,
+    RuleCondition,
     RuleSet,
     User,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "DomainMember",
     "Recipient",
     "Rule",
+    "RuleCondition",
     "RuleSet",
     "User",
     "async_session",

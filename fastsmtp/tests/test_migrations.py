@@ -16,6 +16,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from email.message import EmailMessage
 from functools import partial
 from typing import Any
 
@@ -24,10 +25,14 @@ import pytest_asyncio
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from anyio import to_thread
-from fastsmtp.db.models import Base
-from sqlalchemy import Connection, make_url, text
+from fastsmtp.db.migrations import expected_head_revision
+from fastsmtp.db.models import Base, Rule
+from fastsmtp.rules.conditions import evaluate_condition
+from fastsmtp.rules.engine import evaluate_rule, extract_field_values
+from fastsmtp.smtp.validation import EmailAuthResult
+from sqlalchemy import Connection, make_url, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, create_async_engine
 
 pytestmark = pytest.mark.migrations
 
@@ -257,8 +262,243 @@ async def test_008_downgrade_refuses_live_and_tombstone_pair(
     )
     assert result.returncode != 0, "downgrade 007 succeeded over a live/tombstone name pair"
 
+    # The whole downgrade is one transaction, so a failure in 008 also rolls
+    # back any later revision undone before it: the database stays at head.
     async with connected(migration_database_url) as connection:
         version = await connection.execute(text("SELECT version_num FROM alembic_version"))
-        assert version.scalar_one() == "008"
+        assert version.scalar_one() == expected_head_revision()
 
     await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+
+
+# -- 009: rule conditions -----------------------------------------------------
+
+# Every flat rule shape worth having an opinion about: each field against each
+# operator, values that hit one of the messages below and values that miss,
+# both case modes. "Property-style": the whole grid, not a hand-picked example,
+# has to evaluate the same before and after.
+FLAT_RULE_FIELDS = {
+    "from": ["Alice@Example.com", "@example.com", r"^alice@"],
+    "to": ["inbox@example.org", "nobody"],
+    "subject": ["Invoice", "invoice 42", r"\d+$"],
+    "body": ["hello", "HELLO WORLD"],
+    "has_attachment": ["true", "false"],
+    "attachment_names": [".exe", "report.pdf", r"\.(exe|bat)$"],
+    "attachment_types": ["application/pdf", "pdf"],
+    "dkim_result": ["pass", "fail"],
+    "spf_result": ["pass", "softfail"],
+    "header:Auto-Submitted": ["auto-generated", "no"],
+    "header:X-Absent": ["anything"],
+}
+FLAT_RULE_OPERATORS = ("equals", "contains", "starts_with", "ends_with", "regex", "exists")
+
+
+def _auth(dkim: str, spf: str) -> EmailAuthResult:
+    return EmailAuthResult(
+        dkim_result=dkim,
+        dkim_domain=None,
+        dkim_selector=None,
+        spf_result=spf,
+        spf_domain=None,
+        client_ip="192.0.2.1",
+    )
+
+
+def _migration_samples() -> list[tuple[EmailMessage, dict[str, Any], EmailAuthResult | None]]:
+    """(message, payload, auth_result) triples the flat-rule grid is judged against."""
+    automated = EmailMessage()
+    automated["From"] = "alice@example.com"
+    automated["To"] = "inbox@example.org"
+    automated["Subject"] = "Invoice 42"
+    automated["Auto-Submitted"] = "auto-generated"
+    automated_payload = {
+        "from": "alice@example.com",
+        "to": "inbox@example.org",
+        "subject": "Invoice 42",
+        "body_text": "Hello world",
+        "has_attachments": True,
+        "attachments": [
+            {"filename": "report.pdf", "content_type": "application/pdf"},
+            {"filename": "run.exe", "content_type": "application/x-msdownload"},
+        ],
+    }
+
+    plain = EmailMessage()
+    plain["From"] = "bob@other.net"
+    plain["Subject"] = "lunch?"
+    plain_payload = {"from": "bob@other.net", "subject": "lunch?", "body_text": "hi"}
+
+    return [
+        (automated, automated_payload, _auth("pass", "softfail")),
+        (plain, plain_payload, _auth("fail", "pass")),
+        (plain, plain_payload, None),
+    ]
+
+
+def _flat_verdict(
+    flat: tuple[str, str, str, bool],
+    sample: tuple[EmailMessage, dict[str, Any], EmailAuthResult | None],
+) -> bool:
+    """How a flat rule evaluated before 009: any extracted value satisfies the condition."""
+    field, operator, value, case_sensitive = flat
+    values = extract_field_values(field, *sample)
+    if values is None:
+        return False
+    return any(evaluate_condition(operator, v, value, case_sensitive) for v in values)
+
+
+async def _insert_ruleset(connection: AsyncConnection) -> str:
+    domain = await connection.execute(
+        text(
+            "INSERT INTO domains (id, domain_name) "
+            "VALUES (gen_random_uuid(), 'm.test') RETURNING id"
+        )
+    )
+    ruleset = await connection.execute(
+        text(
+            "INSERT INTO rulesets (id, domain_id, name) "
+            "VALUES (gen_random_uuid(), :domain, 'rs') RETURNING id"
+        ),
+        {"domain": domain.scalar_one()},
+    )
+    return str(ruleset.scalar_one())
+
+
+async def _insert_flat_rules(database_url: str) -> dict[str, tuple[str, str, str, bool]]:
+    """Insert, at 008, one flat rule per grid point; map each id to its shape."""
+    grid = [
+        (field, operator, value, case_sensitive)
+        for field, values in FLAT_RULE_FIELDS.items()
+        for operator in FLAT_RULE_OPERATORS
+        for value in values
+        for case_sensitive in (False, True)
+    ]
+    flat_rules = {}
+    async with connected(database_url) as connection:
+        ruleset_id = await _insert_ruleset(connection)
+        for order, (field, operator, value, case_sensitive) in enumerate(grid):
+            inserted = await connection.execute(
+                text(
+                    'INSERT INTO rules (id, ruleset_id, "order", field, operator, value, '
+                    "case_sensitive, action, add_tags, preserve_raw) "
+                    "VALUES (gen_random_uuid(), :ruleset, :order, :field, :operator, :value, "
+                    ":case_sensitive, 'tag', '[]'::jsonb, false) RETURNING id"
+                ),
+                {
+                    "ruleset": ruleset_id,
+                    "order": order,
+                    "field": field,
+                    "operator": operator,
+                    "value": value,
+                    "case_sensitive": case_sensitive,
+                },
+            )
+            flat_rules[str(inserted.scalar_one())] = (field, operator, value, case_sensitive)
+        await connection.commit()
+    return flat_rules
+
+
+async def test_009_every_flat_rule_evaluates_identically(
+    scrubbed_environ: dict[str, str], migration_database_url: str
+) -> None:
+    """Each pre-009 rule becomes one plain condition and keeps its verdict on every sample."""
+    await alembic(scrubbed_environ, migration_database_url, "upgrade", "008")
+    flat_rules = await _insert_flat_rules(migration_database_url)
+    await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+
+    engine = create_async_engine(migration_database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            rules = (await session.execute(select(Rule))).scalars().all()
+    finally:
+        await engine.dispose()
+
+    assert len(rules) == len(flat_rules)
+    samples = _migration_samples()
+    mismatches = []
+    for rule in rules:
+        flat = flat_rules[str(rule.id)]
+        (condition,) = rule.conditions
+        assert rule.match == "all"
+        assert (condition.order, condition.negate) == (0, False)
+        assert (
+            condition.field,
+            condition.operator,
+            condition.value,
+            condition.case_sensitive,
+        ) == flat
+        for index, sample in enumerate(samples):
+            before = _flat_verdict(flat, sample)
+            after = evaluate_rule(rule, *sample)
+            if before != after:
+                mismatches.append((flat, index, before, after))
+    assert not mismatches, mismatches
+
+
+async def _insert_rule_with_conditions(database_url: str, *negations: bool) -> str:
+    """Insert, at 009, one rule holding a condition per entry in ``negations``."""
+    async with connected(database_url) as connection:
+        ruleset_id = await _insert_ruleset(connection)
+        inserted = await connection.execute(
+            text(
+                'INSERT INTO rules (id, ruleset_id, "order", action, add_tags, preserve_raw) '
+                "VALUES (gen_random_uuid(), :ruleset, 0, 'drop', '[]'::jsonb, false) "
+                "RETURNING id"
+            ),
+            {"ruleset": ruleset_id},
+        )
+        rule_id = inserted.scalar_one()
+        for order, negate in enumerate(negations):
+            await connection.execute(
+                text(
+                    'INSERT INTO rule_conditions (id, rule_id, "order", field, operator, value, '
+                    "case_sensitive, negate) VALUES (gen_random_uuid(), :rule, :order, "
+                    "'subject', 'contains', :value, true, :negate)"
+                ),
+                {"rule": rule_id, "order": order, "value": f"v{order}", "negate": negate},
+            )
+        await connection.commit()
+    return str(rule_id)
+
+
+async def test_009_downgrade_restores_a_single_condition_rule(
+    scrubbed_environ: dict[str, str], migration_database_url: str
+) -> None:
+    await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+    rule_id = await _insert_rule_with_conditions(migration_database_url, False)
+
+    await alembic(scrubbed_environ, migration_database_url, "downgrade", "008")
+
+    async with connected(migration_database_url) as connection:
+        row = await connection.execute(
+            text("SELECT field, operator, value, case_sensitive FROM rules WHERE id = :id"),
+            {"id": rule_id},
+        )
+        assert tuple(row.one()) == ("subject", "contains", "v0", True)
+
+    await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+
+
+@pytest.mark.parametrize(
+    "negations",
+    [pytest.param((False, False), id="two-conditions"), pytest.param((True,), id="negated")],
+)
+async def test_009_downgrade_refuses_rules_the_flat_shape_cannot_hold(
+    scrubbed_environ: dict[str, str], migration_database_url: str, negations: tuple[bool, ...]
+) -> None:
+    """Dropping a condition broadens a rule and dropping a negation inverts it: refuse.
+
+    The failure is transactional, so the database is left at 009.
+    """
+    await alembic(scrubbed_environ, migration_database_url, "upgrade", "head")
+    await _insert_rule_with_conditions(migration_database_url, *negations)
+
+    result = await to_thread.run_sync(
+        partial(_run_alembic, scrubbed_environ, migration_database_url, "downgrade", "008")
+    )
+    assert result.returncode != 0, "downgrade 008 succeeded over a rule it cannot represent"
+    assert "Cannot downgrade past 009" in result.stdout + result.stderr
+
+    async with connected(migration_database_url) as connection:
+        version = await connection.execute(text("SELECT version_num FROM alembic_version"))
+        assert version.scalar_one() == "009"

@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from aiosmtpd.smtp import Envelope
 from fastsmtp.config import Settings
-from fastsmtp.db.models import Domain, Recipient, Rule, RuleSet
+from fastsmtp.db.models import Domain, Recipient, RuleSet
 from fastsmtp.db.soft_delete import soft_delete_domain, soft_delete_recipient
 from fastsmtp.smtp.server import (
     FastSMTPHandler,
@@ -24,6 +24,7 @@ from fastsmtp.smtp.validation import (
     RESULT_SOFTFAIL,
     EmailAuthResult,
 )
+from rule_helpers import make_rule
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -458,7 +459,9 @@ class TestLookupRecipientTombstones:
         session.add(ruleset)
         await session.flush()
         session.add(
-            Rule(ruleset_id=ruleset.id, order=0, field="from", operator="exists", value="", **rule)
+            make_rule(
+                ruleset_id=ruleset.id, order=0, field="from", operator="exists", value="", **rule
+            )
         )
         await session.commit()
 
@@ -828,7 +831,7 @@ class TestPerDomainAuthPolicy:
         session.add(ruleset)
         await session.flush()
         session.add(
-            Rule(
+            make_rule(
                 ruleset_id=ruleset.id,
                 order=0,
                 field="dkim_result",

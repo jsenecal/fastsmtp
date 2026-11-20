@@ -302,3 +302,18 @@ def test_clearable_fields_accept_null(
         f"{http_method.upper()} {template} no longer accepts null for {field!r}, "
         f"but the CLI sends one to clear it (schema: {field_schema})"
     )
+
+
+def test_condition_payload_matches_server_schema(openapi: dict[str, Any]) -> None:
+    """The nested condition objects the CLI builds must match ``RuleConditionSchema``.
+
+    The generic check above only sees top-level body fields; ``conditions`` is
+    a list of objects, so its shape gets its own assertion.
+    """
+    from fastsmtp_cli.commands.rules import parse_condition
+
+    schema = openapi["components"]["schemas"]["RuleConditionSchema"]
+    sent = parse_condition("header:X-Test equals a value", negate=True, case_sensitive=True)
+
+    assert set(sent) <= set(schema["properties"]), sorted(set(sent) - set(schema["properties"]))
+    assert set(schema.get("required", [])) <= set(sent)

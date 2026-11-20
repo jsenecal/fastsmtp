@@ -24,6 +24,7 @@ from fastsmtp.db.models import (
     RuleSet,
     User,
 )
+from rule_helpers import make_rule
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typer.testing import CliRunner
@@ -464,7 +465,7 @@ async def graph(test_session: AsyncSession) -> TombstoneGraph:
     )
     await test_session.flush()
 
-    old_rule = Rule(
+    old_rule = make_rule(
         ruleset_id=old_ruleset.id, order=0, field="subject", operator="contains", value="x"
     )
     old_delivery = _delivery(old_domain, old_recipient)

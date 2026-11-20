@@ -7,7 +7,7 @@ from email.message import EmailMessage
 
 import pytest
 import pytest_asyncio
-from fastsmtp.db.models import Domain, Rule, RuleSet
+from fastsmtp.db.models import Domain, RuleSet
 from fastsmtp.db.soft_delete import soft_delete_domain
 from fastsmtp.rules.conditions import (
     MATCHERS,
@@ -27,6 +27,7 @@ from fastsmtp.rules.engine import (
     extract_field_value,
 )
 from fastsmtp.smtp.validation import EmailAuthResult
+from rule_helpers import make_rule
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -319,15 +320,9 @@ class TestEvaluateRule:
         msg = EmailMessage()
         msg["From"] = "sender@example.com"
 
-        # Create a mock Rule-like object
-        class MockRule:
-            id = uuid.uuid4()
-            field = "from"
-            operator = "contains"
-            value = "@example.com"
-            case_sensitive = False
+        rule = make_rule("from", "contains", "@example.com", id=uuid.uuid4())
 
-        result = evaluate_rule(MockRule(), msg, {})
+        result = evaluate_rule(rule, msg, {})
         assert result is True
 
     def test_evaluate_rule_no_match(self):
@@ -335,28 +330,18 @@ class TestEvaluateRule:
         msg = EmailMessage()
         msg["From"] = "sender@other.com"
 
-        class MockRule:
-            id = uuid.uuid4()
-            field = "from"
-            operator = "contains"
-            value = "@example.com"
-            case_sensitive = False
+        rule = make_rule("from", "contains", "@example.com", id=uuid.uuid4())
 
-        result = evaluate_rule(MockRule(), msg, {})
+        result = evaluate_rule(rule, msg, {})
         assert result is False
 
     def test_evaluate_rule_field_not_found(self):
         """Test evaluating rule when field doesn't exist."""
         msg = EmailMessage()
 
-        class MockRule:
-            id = uuid.uuid4()
-            field = "unknown_field"
-            operator = "equals"
-            value = "test"
-            case_sensitive = False
+        rule = make_rule("unknown_field", "equals", "test", id=uuid.uuid4())
 
-        result = evaluate_rule(MockRule(), msg, {})
+        result = evaluate_rule(rule, msg, {})
         assert result is False
 
 
@@ -382,7 +367,7 @@ class TestEvaluateRulesAsync:
         await test_session.flush()
 
         # Rule 1: Tag emails from example.com
-        rule1 = Rule(
+        rule1 = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -392,7 +377,7 @@ class TestEvaluateRulesAsync:
             add_tags=["external"],
         )
         # Rule 2: Tag emails with "urgent" in subject
-        rule2 = Rule(
+        rule2 = make_rule(
             ruleset_id=ruleset.id,
             order=1,
             field="subject",
@@ -463,7 +448,7 @@ class TestEvaluateRulesAsync:
         test_session.add(ruleset)
         await test_session.flush()
 
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -511,7 +496,7 @@ class TestEvaluateRulesAsync:
         test_session.add(ruleset)
         await test_session.flush()
 
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -561,7 +546,7 @@ class TestEvaluateRulesAsync:
         await test_session.flush()
 
         # First rule will match
-        rule1 = Rule(
+        rule1 = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="from",
@@ -571,7 +556,7 @@ class TestEvaluateRulesAsync:
             add_tags=["first"],
         )
         # Second rule should not be evaluated
-        rule2 = Rule(
+        rule2 = make_rule(
             ruleset_id=ruleset.id,
             order=1,
             field="from",
@@ -671,7 +656,7 @@ class TestPreserveRawRules:
         await test_session.flush()
 
         # Preserves the raw message but otherwise leaves delivery alone
-        preserve_rule = Rule(
+        preserve_rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="subject",
@@ -682,7 +667,7 @@ class TestPreserveRawRules:
             preserve_raw=True,
         )
         # Drops the message, and still archives it first
-        drop_rule = Rule(
+        drop_rule = make_rule(
             ruleset_id=ruleset.id,
             order=1,
             field="from",
@@ -692,7 +677,7 @@ class TestPreserveRawRules:
             preserve_raw=True,
         )
         # Matches everything else without preserving
-        plain_rule = Rule(
+        plain_rule = make_rule(
             ruleset_id=ruleset.id,
             order=2,
             field="subject",

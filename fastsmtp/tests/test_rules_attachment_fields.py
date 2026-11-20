@@ -29,10 +29,11 @@ import pytest
 from fastsmtp.db.models import Rule
 from fastsmtp.rules.conditions import _compiled_pattern
 from fastsmtp.rules.engine import evaluate_rule, extract_field_value, extract_field_values
+from rule_helpers import make_rule
 
 
 def _rule(field: str, operator: str, value: str, case_sensitive: bool = False) -> Rule:
-    return Rule(
+    return make_rule(
         id=uuid.uuid4(),
         ruleset_id=uuid.uuid4(),
         order=0,

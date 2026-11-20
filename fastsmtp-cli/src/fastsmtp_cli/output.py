@@ -531,6 +531,41 @@ def print_ruleset(ruleset: dict) -> None:
         print_rules_table(rules)
 
 
+def rule_conditions(rule: dict) -> list[dict]:
+    """A rule's conditions. A pre-#182 server sends only the flat fields: one condition."""
+    conditions = rule.get("conditions")
+    if conditions is not None:
+        return list(conditions)
+    return [
+        {
+            "field": rule.get("field"),
+            "operator": rule.get("operator"),
+            "value": rule.get("value"),
+            "case_sensitive": rule.get("case_sensitive"),
+            "negate": False,
+        }
+    ]
+
+
+def format_condition(condition: dict) -> str:
+    """``[NOT ]field operator 'value'`` as plain text; escape it before printing."""
+    text = f"{condition.get('field') or '-'} {condition.get('operator') or '-'}"
+    if condition.get("operator") != "exists":
+        text += f" '{condition.get('value') or ''}'"
+    if condition.get("negate"):
+        text = f"NOT {text}"
+    if condition.get("case_sensitive"):
+        text += " (case-sensitive)"
+    return text
+
+
+def format_conditions(rule: dict, separator: str | None = None) -> str:
+    """All of a rule's conditions, joined by AND/OR to match its ``match`` mode."""
+    if separator is None:
+        separator = " OR " if rule.get("match") == "any" else " AND "
+    return separator.join(format_condition(c) for c in rule_conditions(rule))
+
+
 def print_rules_table(rules: list[dict]) -> None:
     """Print rules as a table."""
     table = Table(title="Rules")
@@ -543,15 +578,10 @@ def print_rules_table(rules: list[dict]) -> None:
     table.add_column("Preserve Raw")
 
     for rule in rules:
-        field_name = rule.get("field", "-")
-        op = rule.get("operator", "-")
-        val = rule.get("value", "-")
-        condition = f"{field_name} {op} '{val}'"
-
         table.add_row(
             short_id(rule.get("id")),
             str(rule.get("order", 0)),
-            field(truncate(condition, 35)),
+            field(truncate(format_conditions(rule), 50)),
             field(rule.get("action")),
             field(", ".join(rule.get("add_tags") or [])),
             yes_no(rule.get("preserve_raw")),
@@ -569,10 +599,8 @@ def print_rule(rule: dict) -> None:
     table.add_row("ID", field(rule.get("id")))
     table.add_row("RuleSet ID", field(rule.get("ruleset_id")))
     table.add_row("Order", str(rule.get("order", 0)))
-    table.add_row("Field", field(rule.get("field")))
-    table.add_row("Operator", field(rule.get("operator")))
-    table.add_row("Value", field(rule.get("value")))
-    table.add_row("Case Sensitive", yes_no(rule.get("case_sensitive")))
+    table.add_row("Match", field(rule.get("match") or "all"))
+    table.add_row("Conditions", field(format_conditions(rule, separator="\n")))
     table.add_row("Action", field(rule.get("action")))
     table.add_row("Webhook Override", field(rule.get("webhook_url_override")))
     table.add_row("Add Tags", field(", ".join(rule.get("add_tags") or [])))

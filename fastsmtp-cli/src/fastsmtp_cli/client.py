@@ -90,6 +90,29 @@ def _flags(**flags: bool) -> dict[str, str]:
     return {name: "true" for name, value in flags.items() if value}
 
 
+def _put_rule_conditions(
+    data: dict[str, Any],
+    field: str | None,
+    operator: str | None,
+    value: str | None,
+    case_sensitive: bool | None,
+    conditions: list[dict[str, Any]] | None,
+    match: str | None,
+) -> None:
+    """Add a rule's test to a request body: whichever shape the caller gave.
+
+    Only what was given is sent. The server refuses the flat fields and
+    ``conditions`` together, so that check stays on the server rather than
+    being duplicated here.
+    """
+    flat = {"field": field, "operator": operator, "value": value, "case_sensitive": case_sensitive}
+    data.update({name: item for name, item in flat.items() if item is not None})
+    if conditions is not None:
+        data["conditions"] = conditions
+    if match is not None:
+        data["match"] = match
+
+
 class FastSMTPClient:
     """HTTP client for FastSMTP API."""
 
@@ -525,28 +548,30 @@ class FastSMTPClient:
         self,
         domain_id: UUID | str,
         ruleset_id: UUID | str,
-        field: str,
-        operator: str,
-        value: str,
+        field: str | None = None,
+        operator: str | None = None,
+        value: str | None = None,
         action: str = "forward",
-        case_sensitive: bool = False,
+        case_sensitive: bool | None = None,
         webhook_url_override: str | None = None,
         add_tags: list[str] | None = None,
         preserve_raw: bool = False,
+        conditions: list[dict[str, Any]] | None = None,
+        match: str | None = None,
     ) -> dict:
         """Create a new rule.
+
+        Give either ``conditions`` (each a dict as built by
+        ``fastsmtp_cli.commands.rules.parse_condition``) or the flat
+        ``field``/``operator``/``value``/``case_sensitive`` one-condition
+        shape, which every server version accepts. The server refuses both at
+        once. ``match`` (``all`` or ``any``) defaults to ``all`` server-side.
 
         The rule is appended to the end of the ruleset; use
         :meth:`reorder_rules` to change evaluation order.
         """
-        data: dict[str, Any] = {
-            "field": field,
-            "operator": operator,
-            "value": value,
-            "action": action,
-            "case_sensitive": case_sensitive,
-            "preserve_raw": preserve_raw,
-        }
+        data: dict[str, Any] = {"action": action, "preserve_raw": preserve_raw}
+        _put_rule_conditions(data, field, operator, value, case_sensitive, conditions, match)
         if webhook_url_override is not None:
             data["webhook_url_override"] = webhook_url_override
         if add_tags:
@@ -584,24 +609,24 @@ class FastSMTPClient:
         webhook_url_override: NullableStr = UNSET,
         add_tags: list[str] | None = None,
         preserve_raw: bool | None = None,
+        conditions: list[dict[str, Any]] | None = None,
+        match: str | None = None,
     ) -> dict:
         """Update a rule.
+
+        ``conditions`` replaces the rule's whole condition list. The flat
+        ``field``/``operator``/``value``/``case_sensitive`` edit a rule's only
+        condition in place, and the server refuses them on a rule holding
+        several conditions or a negated one.
 
         ``webhook_url_override`` is three-valued: a string sets it, ``None``
         clears the override (sent as JSON null) so the rule falls back to the
         recipient's webhook URL, ``UNSET`` leaves it untouched.
         """
         data: dict[str, Any] = {}
-        if field is not None:
-            data["field"] = field
-        if operator is not None:
-            data["operator"] = operator
-        if value is not None:
-            data["value"] = value
+        _put_rule_conditions(data, field, operator, value, case_sensitive, conditions, match)
         if action is not None:
             data["action"] = action
-        if case_sensitive is not None:
-            data["case_sensitive"] = case_sensitive
         if not isinstance(webhook_url_override, _Unset):
             data["webhook_url_override"] = webhook_url_override
         if add_tags is not None:

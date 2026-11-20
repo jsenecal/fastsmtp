@@ -6,8 +6,9 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastsmtp.config import Settings, get_settings
-from fastsmtp.db.models import Domain, Rule, RuleSet
+from fastsmtp.db.models import Domain, RuleSet
 from httpx import ASGITransport, AsyncClient
+from rule_helpers import make_rule
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -185,7 +186,7 @@ class TestRulePreserveRawApi:
         self, auth_client: AsyncClient, ruleset: RuleSet, test_session: AsyncSession
     ):
         """Test turning preservation on via update is rejected without S3."""
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="subject",
@@ -208,7 +209,7 @@ class TestRulePreserveRawApi:
         self, s3_auth_client: AsyncClient, ruleset: RuleSet, test_session: AsyncSession
     ):
         """Test turning preservation on via update succeeds with S3 configured."""
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="subject",
@@ -232,7 +233,7 @@ class TestRulePreserveRawApi:
         self, auth_client: AsyncClient, ruleset: RuleSet, test_session: AsyncSession
     ):
         """Test turning preservation off never requires S3 configuration."""
-        rule = Rule(
+        rule = make_rule(
             ruleset_id=ruleset.id,
             order=0,
             field="subject",

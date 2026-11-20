@@ -14,14 +14,12 @@ from fastsmtp.api.validation import (
 )
 from fastsmtp.auth import Auth, get_domain_with_access
 from fastsmtp.config import Settings, get_settings
-from fastsmtp.db.models import Rule, RuleSet
+from fastsmtp.db.models import Rule, RuleCondition, RuleSet
 from fastsmtp.db.session import get_session
 from fastsmtp.schemas.common import MessageResponse
 from fastsmtp.schemas.rule import (
-    RULE_ACTIONS,
-    RULE_FIELDS,
-    RULE_HEADER_PREFIX,
-    RULE_OPERATORS,
+    LEGACY_CONDITION_FIELDS,
+    RuleConditionSchema,
     RuleCreate,
     RuleReorderRequest,
     RuleResponse,
@@ -30,6 +28,8 @@ from fastsmtp.schemas.rule import (
     RuleSetUpdate,
     RuleSetWithRulesResponse,
     RuleUpdate,
+    check_condition_value,
+    legacy_condition,
 )
 
 router = APIRouter(tags=["rules"])
@@ -47,35 +47,12 @@ def _duplicate_conflict(name: str) -> HTTPException:
     )
 
 
-def validate_rule_field(field: str) -> None:
-    """Validate rule field name."""
-    if field in RULE_FIELDS:
-        return
-    if field.startswith(RULE_HEADER_PREFIX):
-        return
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=f"Invalid field '{field}'. Valid fields: {', '.join(RULE_FIELDS)}, "
-        f"or {RULE_HEADER_PREFIX}X-Header-Name",
-    )
-
-
-def validate_rule_operator(operator: str) -> None:
-    """Validate rule operator."""
-    if operator not in RULE_OPERATORS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid operator '{operator}'. Valid operators: {', '.join(RULE_OPERATORS)}",
-        )
-
-
-def validate_rule_action(action: str) -> None:
-    """Validate rule action."""
-    if action not in RULE_ACTIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid action '{action}'. Valid actions: {', '.join(RULE_ACTIONS)}",
-        )
+def _condition_rows(conditions: list[RuleConditionSchema]) -> list[RuleCondition]:
+    """Database rows for a validated condition list, numbered in request order."""
+    return [
+        RuleCondition(order=order, **condition.model_dump())
+        for order, condition in enumerate(conditions)
+    ]
 
 
 # RuleSet endpoints
@@ -266,11 +243,6 @@ async def create_rule(
     await get_domain_with_access(domain_id, auth, session, required_role="admin")
     auth.require_scope("rules:write")
 
-    # Validate rule fields
-    validate_rule_field(data.field)
-    validate_rule_operator(data.operator)
-    validate_rule_action(data.action)
-
     if data.preserve_raw:
         require_s3_for_preservation(settings)
 
@@ -296,10 +268,9 @@ async def create_rule(
     rule = Rule(
         ruleset_id=ruleset_id,
         order=next_order,
-        field=data.field,
-        operator=data.operator,
-        value=data.value,
-        case_sensitive=data.case_sensitive,
+        match=data.match,
+        # RuleCreate guarantees conditions (the legacy shape is folded into it)
+        conditions=_condition_rows(data.conditions or []),
         action=data.action,
         webhook_url_override=str(data.webhook_url_override) if data.webhook_url_override else None,
         add_tags=data.add_tags,
@@ -344,23 +315,47 @@ async def update_rule(
         )
 
     update_data = data.model_dump(exclude_unset=True)
+    # Explicit nulls on these mean "unchanged": none of them is nullable.
+    legacy = {
+        name: value
+        for name in LEGACY_CONDITION_FIELDS
+        if (value := update_data.pop(name, None)) is not None
+    }
+    update_data.pop("conditions", None)  # applied from data.conditions below
+    for name in ("match", "action", "add_tags", "preserve_raw"):
+        if update_data.get(name) is None:
+            update_data.pop(name, None)  # not nullable: an explicit null is "unchanged"
 
-    # Validate if changing field/operator/action
-    if "field" in update_data:
-        validate_rule_field(update_data["field"])
-    if "operator" in update_data:
-        validate_rule_operator(update_data["operator"])
-    if "action" in update_data:
-        validate_rule_action(update_data["action"])
     if update_data.get("preserve_raw"):
         require_s3_for_preservation(settings)
 
-    # Validate the merged regex state: a partial update touching only operator
-    # or only value can make the stored counterpart invalid.
-    if "operator" in update_data or "value" in update_data:
-        effective_operator = update_data.get("operator", rule.operator)
-        if effective_operator == "regex":
-            require_valid_rule_regex(update_data.get("value", rule.value))
+    if legacy:
+        # The deprecated flat fields edit the rule's only condition in place.
+        condition = legacy_condition(rule.conditions)
+        if condition is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"This rule has {len(rule.conditions)} condition(s) and the "
+                "deprecated field/operator/value/case_sensitive can only edit a rule "
+                "holding a single non-negated one. Send conditions instead.",
+            )
+        # Validate the merged regex state: a partial update touching only
+        # operator or only value can make the stored counterpart invalid.
+        merged_operator = legacy.get("operator", condition.operator)
+        merged_value = legacy.get("value", condition.value)
+        try:
+            check_condition_value(merged_operator, merged_value)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)
+            ) from e
+        if merged_operator == "regex":
+            require_valid_rule_regex(merged_value)
+        for field, value in legacy.items():
+            setattr(condition, field, value)
+
+    if data.conditions is not None:
+        rule.conditions = _condition_rows(data.conditions)
 
     # Handle webhook_url conversion
     if "webhook_url_override" in update_data and update_data["webhook_url_override"]:

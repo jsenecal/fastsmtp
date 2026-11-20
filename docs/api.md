@@ -120,6 +120,12 @@ message has recipients on several domains.
 - `PUT /domains/{id}/rules/{rule_id}` - Update rule
 - `DELETE /domains/{id}/rules/{rule_id}` - Delete rule
 
+A rule body takes `match` (`all` or `any`) and `conditions`, a list of 1 to 16
+`{field, operator, value, case_sensitive, negate}` objects; on update, `conditions`
+replaces the whole list. The older flat `field`/`operator`/`value`/`case_sensitive`
+shape is still accepted and is deprecated; sending both shapes is a 422. See
+[The Rule Model](rules.md#the-rule-model) for the semantics and the deprecation rules.
+
 Rulesets and rules have no soft delete of their own: deleting one is permanent. While
 their domain is deleted they are unreachable (every route above answers its members
 `404 Domain not found`, and a non-member the same `403` as on a live domain) and they

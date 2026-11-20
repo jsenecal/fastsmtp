@@ -25,7 +25,8 @@ from fastsmtp.schemas.recipient import (
     RecipientUpdate,
 )
 from fastsmtp.schemas.rule import (
-    RuleBase,
+    RuleActionFields,
+    RuleConditionSchema,
     RuleCreate,
     RuleReorderRequest,
     RuleResponse,
@@ -82,7 +83,8 @@ __all__ = [
     "RecipientCreate",
     "RecipientResponse",
     "RecipientUpdate",
-    "RuleBase",
+    "RuleActionFields",
+    "RuleConditionSchema",
     "RuleCreate",
     "RuleReorderRequest",
     "RuleResponse",
