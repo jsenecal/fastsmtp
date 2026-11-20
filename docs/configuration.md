@@ -43,6 +43,41 @@ are set; without it a renewed certificate is picked up on the next restart.
 | `FASTSMTP_SMTP_REJECT_DKIM_FAIL` | `false` | Reject emails on DKIM failure |
 | `FASTSMTP_SMTP_REJECT_SPF_FAIL` | `false` | Reject emails on SPF failure |
 
+### DKIM results
+
+`dkim_result` is one of:
+
+| Result | Meaning |
+|--------|---------|
+| `pass` | A signature verified. `dkim_domain` and `dkim_selector` are its `d=` and `s=` |
+| `fail` | A signature was checked against its key and did not verify: the body or a signed header changed, or the key does not match |
+| `temperror` | The key lookup timed out, or verification hit an unexpected error. Retrying may give a different answer |
+| `permerror` | The signature or the header block is malformed, or its key record is missing, unparseable or not usable for email |
+| `none` | The message is unsigned |
+
+Only `fail` is refused by `reject_dkim_fail`.
+
+A message can carry several signatures (author, ESP, mailing list). Up to five
+are checked, those whose `d=` is the `From:` domain or a parent of it first,
+since anyone relaying the message can prepend signatures of their own; all key
+lookups for one message share a 10 second budget. Any pass makes the message
+pass, and a pass from such a `d=` is the one reported. When none passes,
+`temperror` is reported ahead of `fail` (a signature that might still verify
+must not get the message refused), and `fail` ahead of `permerror`.
+
+`dkim_domain` is the signer, not an alignment verdict. The `From:` comparison
+above has no public suffix list, so it would treat `d=co.uk` as a parent of
+`example.co.uk`; a consumer enforcing DMARC-style alignment has to compare
+organizational domains itself.
+
+**Resolve DKIM keys through a public view of DNS.** Keys are fetched with the
+host's resolver. If the MX resolves through a split-horizon or internal view
+that lacks other domains' public TXT records, every signed message reads as
+`permerror`, and every message from your own domain may too. Point the
+resolver used by FastSMTP at one that answers the public view. A lookup the
+signer's DNS answers with SERVFAIL also reads as `permerror`, because the DKIM
+library reports it the same way as a missing record.
+
 ### Per-domain overrides
 
 These four are defaults, not the final word. Every domain has a matching

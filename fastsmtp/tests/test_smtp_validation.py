@@ -22,6 +22,11 @@ from fastsmtp.smtp.validation import (
 )
 
 
+def no_dns(name: bytes, timeout: float = 5) -> None:
+    """A dkimpy TXT lookup that finds nothing, so no test here touches DNS."""
+    return None
+
+
 class TestEmailAuthResult:
     """Tests for EmailAuthResult dataclass."""
 
@@ -110,16 +115,14 @@ Content-Type: text/plain
 
 Test body.
 """
-        result, domain, selector = _verify_dkim_sync(message)
-        # Either NONE or FAIL depending on dkim library behavior
-        assert result in (RESULT_NONE, RESULT_FAIL)
+        assert _verify_dkim_sync(message, dnsfunc=no_dns) == (RESULT_NONE, None, None)
 
     def test_verify_dkim_invalid_message(self):
         """Test DKIM verification on invalid message."""
         message = b"invalid email content"
-        result, domain, selector = _verify_dkim_sync(message)
-        # Should return an error result
-        assert result in (RESULT_NONE, RESULT_FAIL, RESULT_TEMPERROR, "permerror")
+        # dkimpy cannot parse the header block, so whether it is signed is
+        # unknowable: permerror, which reject_dkim_fail does not refuse.
+        assert _verify_dkim_sync(message, dnsfunc=no_dns) == (RESULT_PERMERROR, None, None)
 
     @pytest.mark.asyncio
     async def test_verify_dkim_async(self):
@@ -131,7 +134,7 @@ Subject: Test
 Test body.
 """
         result, domain, selector = await verify_dkim(message)
-        assert result in (RESULT_NONE, RESULT_FAIL)
+        assert (result, domain, selector) == (RESULT_NONE, None, None)
 
 
 class TestVerifySPF:
@@ -362,9 +365,10 @@ Subject: Test
 
 Test body.
 """
-        result, domain, selector = _verify_dkim_sync(message)
-        # Should fail or return error due to invalid signature
-        assert result in (RESULT_FAIL, RESULT_PERMERROR, RESULT_NONE)
+        # bh= is not valid base64: a malformed signature, rejected before any
+        # key lookup, so permerror rather than a verdict on the message.
+        result = _verify_dkim_sync(message, dnsfunc=no_dns)
+        assert result == (RESULT_PERMERROR, "example.com", "selector1")
 
 
 class TestSPFEdgeCases:

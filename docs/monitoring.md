@@ -54,7 +54,7 @@ already claimed do. See [Delivery statuses](webhooks.md#delivery-statuses).
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `fastsmtp_auth_results_total` | Counter | `type` = `dkim`/`spf`, `result` = `pass`/`fail`/`none` | Verification outcomes per message |
+| `fastsmtp_auth_results_total` | Counter | `type` = `dkim`/`spf`, `result` = `pass`/`fail`/`none`/`temperror`/`permerror` (SPF also `softfail`/`neutral`) | Verification outcomes per message |
 
 ### Metrics access
 
